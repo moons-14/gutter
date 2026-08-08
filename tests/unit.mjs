@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { lstat, mkdir, mkdtemp, symlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, readdir, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -12,6 +12,176 @@ const {
   parseAllowedRoots,
   validateLibraryRoots,
 } = await import('../packages/library-roots/src/index.ts');
+const { inspectCbz, scanRoot } = await import('../packages/discovery-scanner/src/index.ts');
+const encryptedCbz = Buffer.from(
+  'UEsDBAoACQAAAIVOCF2vkRsVIQAAABUAAAAIABwAcGFnZS5qcGdVVAkAA0r8dmpK/HZqdXgLAAEE6AMAAARkAAAADs+a2joAGpSwmOXBRggO4AmBwyUoGVsL/3/bZ+ZlJe4kUEsHCK+RGxUhAAAAFQAAAFBLAQIeAwoACQAAAIVOCF2vkRsVIQAAABUAAAAIABgAAAAAAAEAAACkgQAAAABwYWdlLmpwZ1VUBQADSvx2anV4CwABBOgDAAAEZAAAAFBLBQYAAAAAAQABAE4AAABzAAAAAAA=',
+  'base64',
+);
+const zip64Cbz = Buffer.from(
+  'UEsDBC0AAAgIAN2eCF1GE6D2//////////8PABQA56ysMeipsS8wMDEuanBnAQAQABUAAAAAAAAAFwAAAAAAAAArycyr1M0qSE3XLchJTE7NyM9JSS0CAFBLAQItAy0AAAgIAN2eCF1GE6D2//////////8PABQAAAAAAAAAAACAAQAAAADnrKwx6KmxLzAwMS5qcGcBABAAFQAAAAAAAAAXAAAAAAAAAFBLBgYsAAAAAAAAAC0ALQAAAAAAAAAAAAEAAAAAAAAAAQAAAAAAAABRAAAAAAAAAFgAAAAAAAAAUEsGBwAAAACpAAAAAAAAAAEAAABQSwUGAAAAAP///////////////wAA',
+  'base64',
+);
+
+function zip(entries) {
+  let offset = 0;
+  const locals = [];
+  const central = [];
+  for (const entry of entries) {
+    const { name, encrypted = false } = entry;
+    const data = entry.data ?? Buffer.alloc(encrypted ? 12 : 0);
+    const fileName = Buffer.from(name);
+    const flags = (encrypted ? 1 : 0) | 0x800;
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt16LE(flags, 6);
+    local.writeUInt32LE(data.length, 18);
+    local.writeUInt32LE(data.length, 22);
+    local.writeUInt16LE(fileName.length, 26);
+    const record = Buffer.concat([local, fileName, data]);
+    locals.push(record);
+    const directory = Buffer.alloc(46);
+    directory.writeUInt32LE(0x02014b50, 0);
+    directory.writeUInt16LE(20, 4);
+    directory.writeUInt16LE(20, 6);
+    directory.writeUInt16LE(flags, 8);
+    directory.writeUInt32LE(data.length, 20);
+    directory.writeUInt32LE(data.length, 24);
+    directory.writeUInt16LE(fileName.length, 28);
+    directory.writeUInt32LE(offset, 42);
+    central.push(Buffer.concat([directory, fileName]));
+    offset += record.length;
+  }
+  const directory = Buffer.concat(central);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(entries.length, 8);
+  end.writeUInt16LE(entries.length, 10);
+  end.writeUInt32LE(directory.length, 12);
+  end.writeUInt32LE(offset, 16);
+  return Buffer.concat([...locals, directory, end]);
+}
+
+test('discovery scanner recognizes CBZ pages, rejects unsafe archives, and enforces injectable quotas', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'gutter-scanner-'));
+  const archive = join(directory, 'comic.CBZ');
+  await writeFile(archive, zip([{ name: '10.JPG' }, { name: '2.jpg' }, { name: '１.png' }]));
+  assert.deepEqual((await inspectCbz(archive)).pages, ['１.png', '2.jpg', '10.JPG']);
+
+  await writeFile(join(directory, 'encrypted.cbz'), encryptedCbz);
+  assert.equal(
+    (await inspectCbz(join(directory, 'encrypted.cbz'))).quarantinedReason,
+    'encrypted_archive',
+  );
+  await writeFile(join(directory, 'traversal.cbz'), zip([{ name: '../1.jpg' }]));
+  assert.equal(
+    (await inspectCbz(join(directory, 'traversal.cbz'))).quarantinedReason,
+    'archive_path_traversal',
+  );
+  await writeFile(
+    join(directory, 'duplicate.cbz'),
+    zip([{ name: 'é.jpg' }, { name: 'e\u0301.jpg' }]),
+  );
+  assert.equal(
+    (await inspectCbz(join(directory, 'duplicate.cbz'))).quarantinedReason,
+    'duplicate_page_locator',
+  );
+  assert.equal(
+    (await inspectCbz(archive, { entries: 1 })).quarantinedReason,
+    'archive_entry_limit',
+  );
+});
+
+test('CBZ inspection closes its owned descriptor after success and quarantine', async () => {
+  if (process.platform !== 'linux') return;
+  const directory = await mkdtemp(join(tmpdir(), 'gutter-scanner-fd-'));
+  const archive = join(directory, 'comic.cbz');
+  await writeFile(archive, zip([{ name: '1.jpg' }]));
+  const descriptors = async () => (await readdir('/proc/self/fd')).length;
+  const before = await descriptors();
+  await inspectCbz(archive);
+  await inspectCbz(join(directory, 'missing.cbz'));
+  assert.equal(await descriptors(), before);
+});
+
+test('CBZ inspection supports Zip64 descriptors and preserves ordered locators', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'gutter-scanner-zip64-'));
+  const archive = join(directory, 'zip64.cbz');
+  await writeFile(archive, zip64Cbz);
+  assert.equal(zip64Cbz.includes(Buffer.from('PK\x06\x06')), true);
+  assert.equal(zip64Cbz.includes(Buffer.from('PK\x06\x07')), true);
+  const ordinaryEocd = zip64Cbz.lastIndexOf(Buffer.from('PK\x05\x06'));
+  assert.notEqual(ordinaryEocd, -1);
+  assert.deepEqual(
+    [...zip64Cbz.subarray(ordinaryEocd + 8, ordinaryEocd + 12)],
+    [0xff, 0xff, 0xff, 0xff],
+  );
+  assert.deepEqual(
+    [...zip64Cbz.subarray(ordinaryEocd + 12, ordinaryEocd + 20)],
+    [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+  );
+  const inspected = await inspectCbz(archive);
+  assert.deepEqual(inspected.pages, ['第1話/001.jpg']);
+  assert.equal(inspected.pages.length, 1);
+  if (process.platform === 'linux') {
+    const descriptors = async () => (await readdir('/proc/self/fd')).length;
+    const before = await descriptors();
+    await inspectCbz(archive);
+    assert.equal(await descriptors(), before);
+  }
+});
+
+test('CBZ inspection aborts mid-central-directory and leaves the source unchanged', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'gutter-scanner-abort-'));
+  const archive = join(directory, 'many.cbz');
+  const source = zip(Array.from({ length: 4_000 }, (_, index) => ({ name: `${index}.jpg` })));
+  await writeFile(archive, source);
+  const controller = new AbortController();
+  const inspection = inspectCbz(archive, {}, controller.signal);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(controller.signal.aborted, false);
+  controller.abort();
+  await assert.rejects(inspection, { name: 'AbortError' });
+  assert.deepEqual(await readFile(archive), source);
+});
+
+test('discovery scanner uses bounded leaf directories, ignores symlinks, and propagates aborts', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'gutter-scanner-'));
+  await mkdir(join(root, 'chapter'));
+  await mkdir(join(root, 'chapter', 'nested'));
+  await writeFile(join(root, 'chapter', '1.jpg'), 'page');
+  await writeFile(join(root, 'chapter', 'nested', '2.PNG'), 'page');
+  await symlink(join(root, 'chapter'), join(root, 'linked-chapter'));
+  const result = await scanRoot(root);
+  assert.deepEqual(
+    result.items.map((item) => item.relativePath),
+    ['chapter/nested'],
+  );
+  assert.equal(result.summary.mixedParents, 1);
+  assert.equal(result.summary.symlinks, 1);
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(scanRoot(root, controller.signal), { name: 'AbortError' });
+});
+
+test('discovery scanner treats a depth cutoff as an unknown descendant', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'gutter-scanner-depth-'));
+  let parent = root;
+  for (let depth = 0; depth < 128; depth += 1) {
+    parent = join(parent, 'd');
+    await mkdir(parent);
+  }
+  await writeFile(join(parent, 'direct.jpg'), 'page');
+  await mkdir(join(parent, 'below-cutoff'));
+  await writeFile(join(parent, 'below-cutoff', 'nested.jpg'), 'page');
+  const result = await scanRoot(root);
+  assert.equal(
+    result.items.some((item) => item.relativePath.endsWith('/d')),
+    false,
+  );
+  assert.equal(result.summary.skipped, 1);
+  assert.equal(result.summary.mixedParents, 1);
+});
 
 function testDatabaseUrl() {
   return `postgresql://gutter:${randomUUID()}@db:5432/gutter`;
@@ -31,7 +201,7 @@ async function withEnvironment(values, run) {
 }
 
 test('M1 documents the library roots schema version', () => {
-  assert.equal(schemaVersion, '0001_library_roots');
+  assert.equal(schemaVersion, '0002_source_inventory');
 });
 
 test('config accepts a direct secret only', async () => {

@@ -1,7 +1,7 @@
 # gutter
 
-MIT-licensed, self-hosted comic-library foundation. M1 currently records configured library-root
-availability only; catalog scanning, authentication, and reader features are not implemented.
+MIT-licensed, self-hosted comic-library foundation. M1 records immutable configured roots and a
+read-only, rebuildable source inventory; authentication and reader features are not implemented.
 
 ## Linux quickstart
 
@@ -42,15 +42,17 @@ array of at most 64 `{ "id", "path" }` objects. IDs match `^[a-z][a-z0-9-]{0,62}
 absolute worker-container paths, cannot be `/`, and cannot be equal or nested. One worker-container
 mount namespace can contain multiple explicit worker-only `:ro` binds, one for each configured
 path; it does not create a namespace per root. The worker checks each configured directory before
-its queue starts, records the snapshot in PostgreSQL, and never scans or writes library contents.
+its queue starts, records the snapshot in PostgreSQL, then queues one bounded read-only discovery
+run per ready root. Discovery recognizes CBZ archives and innermost image directories, quarantines
+bad archives, and never writes library contents.
 On older Linux kernels, recursive read-only bind mounts may leave submounts writable; use a
 Docker/Linux version that enforces recursive read-only mounts or ensure the host mount layout has
 no writable submounts.
 
 Do not mount remote storage in API containers. Restore PostgreSQL only with an operator-managed
 `pg_dump`/`pg_restore` workflow while the application is stopped. Put Caddy/Nginx or Tailscale in
-front of port 8080 for remote access. TLS, auth, catalog scans, and reader streaming are later
-milestones. Run focused root checks with `pnpm unit` and start the root snapshot flow with the
+front of port 8080 for remote access. TLS, auth, metadata extraction, and reader streaming are
+later milestones. Run focused root/discovery checks with `pnpm unit` and start the snapshot flow with the
 Compose command above. Run the PostgreSQL reconciliation oracle with
 `docker compose --profile integration run --rm --build integration`; it uses a dedicated
 `gutter_integration` database and requires its test-only environment sentinel.

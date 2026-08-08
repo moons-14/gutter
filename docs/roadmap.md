@@ -8,7 +8,7 @@
 ## M1-M2 actionable backlog
 
 - [ ] M1-1 Operator-configured allowed roots; reject symlinks and overlapping roots.
-- [ ] M1-2 Recursive CBZ/image-directory scanner with natural ordering and quarantine.
+- [x] M1-2 Bounded CBZ/image-directory scanner with natural ordering and quarantine.
 - [ ] M1-3 ComicInfo tolerant metadata fallback and user/admin hide state.
 - [ ] M2-1 Watcher hints, 15-minute reconcile, and manual full scan.
 - [ ] M2-2 Series/publication/release/page metadata and creators/groups.
