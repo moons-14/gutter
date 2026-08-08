@@ -12,8 +12,11 @@ const {
   parseAllowedRoots,
   validateLibraryRoots,
 } = await import('../packages/library-roots/src/index.ts');
-const { inspectCbz, scanRoot } = await import('../packages/discovery-scanner/src/index.ts');
+const { inspectCbz, scanRoot, scanRootBatched } =
+  await import('../packages/discovery-scanner/src/index.ts');
 const { parseComicInfo } = await import('../packages/comic-info/src/index.ts');
+const { startWatcherHints } = await import('../apps/worker/src/watcher-hints.ts');
+const { dispatchReconciliationRequests } = await import('../apps/worker/src/discovery-queue.ts');
 const encryptedCbz = Buffer.from(
   'UEsDBAoACQAAAIVOCF2vkRsVIQAAABUAAAAIABwAcGFnZS5qcGdVVAkAA0r8dmpK/HZqdXgLAAEE6AMAAARkAAAADs+a2joAGpSwmOXBRggO4AmBwyUoGVsL/3/bZ+ZlJe4kUEsHCK+RGxUhAAAAFQAAAFBLAQIeAwoACQAAAIVOCF2vkRsVIQAAABUAAAAIABgAAAAAAAEAAACkgQAAAABwYWdlLmpwZ1VUBQADSvx2anV4CwABBOgDAAAEZAAAAFBLBQYAAAAAAQABAE4AAABzAAAAAAA=',
   'base64',
@@ -213,6 +216,21 @@ test('CBZ inspection closes its owned descriptor after success and quarantine', 
   assert.equal(await descriptors(), before);
 });
 
+test('CBZ outer observation mismatch is deferred instead of quarantined', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'gutter-scanner-snapshot-'));
+  const archive = join(directory, 'comic.cbz');
+  await writeFile(archive, zip([{ name: '1.jpg' }]));
+  const stat = await lstat(archive, { bigint: true });
+  const result = await inspectCbz(archive, {}, undefined, undefined, 0, {
+    dev: stat.dev,
+    ino: stat.ino,
+    size: stat.size + 1n,
+    mtimeNs: stat.mtimeNs,
+  });
+  assert.equal(result.deferredReason, 'unstable');
+  assert.equal(result.quarantinedReason, null);
+});
+
 test('CBZ inspection supports Zip64 descriptors and preserves ordered locators', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'gutter-scanner-zip64-'));
   const archive = join(directory, 'zip64.cbz');
@@ -276,6 +294,152 @@ test('discovery scanner uses bounded leaf directories, ignores symlinks, and pro
   await assert.rejects(scanRoot(root, controller.signal), { name: 'AbortError' });
 });
 
+test('streaming discovery emits bounded candidate batches without retaining worker results', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'gutter-scanner-stream-'));
+  for (let index = 0; index < 101; index += 1) {
+    const chapter = join(root, `chapter-${index}`);
+    await mkdir(chapter);
+    await writeFile(join(chapter, '1.jpg'), 'page');
+  }
+  const batches = [];
+  const result = await scanRootBatched(root, {
+    collect: false,
+    onItems: (items) => batches.push(items.length),
+  });
+  assert.deepEqual(batches, [100, 1]);
+  assert.deepEqual(result.items, []);
+});
+
+test('scanner pulse cancellation is observed while traversing flat files', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'gutter-scanner-pulse-'));
+  for (let index = 0; index < 1_000; index += 1) await writeFile(join(root, `${index}.txt`), 'x');
+  let pulses = 0;
+  await assert.rejects(
+    scanRootBatched(root, {
+      pulse: () => {
+        pulses += 1;
+        if (pulses >= 2) throw new DOMException('cancelled', 'AbortError');
+      },
+    }),
+    { name: 'AbortError' },
+  );
+  assert.ok(pulses >= 2);
+});
+
+test('directory page scanning bounds lease pulses while checking cancellation locally', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'gutter-scanner-directory-pulse-'));
+  const chapter = join(root, 'chapter');
+  await mkdir(chapter);
+  for (let index = 0; index < 1_000; index += 1)
+    await writeFile(join(chapter, `${index}.jpg`), 'page');
+  let pulses = 0;
+  const scanned = await scanRootBatched(root, {
+    pulse: () => {
+      pulses += 1;
+    },
+  });
+  assert.equal(scanned.summary.pages, 1_000);
+  assert.ok(pulses < 100, `expected bounded pulses, received ${pulses}`);
+});
+
+test('unreadable directory page candidates are protected with bounded attempt-ordinal pulses', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'gutter-scanner-unreadable-pages-'));
+  const chapter = join(root, 'chapter');
+  await mkdir(chapter);
+  for (let index = 0; index < 1_000; index += 1)
+    await writeFile(join(chapter, `${index}.jpg`), 'page');
+  let pulses = 0;
+  const protectedPaths = [];
+  await scanRootBatched(root, {
+    collect: false,
+    pulse: () => {
+      pulses += 1;
+    },
+    openPage: async () => {
+      const error = new Error('transient page read failure');
+      Object.assign(error, { code: 'EIO' });
+      throw error;
+    },
+    onProtected: (paths) => protectedPaths.push(...paths),
+  });
+  assert.deepEqual(protectedPaths, ['chapter']);
+  assert.ok(pulses < 50, `expected bounded pulses, received ${pulses}`);
+});
+
+test('watcher hints are optional, trailing, pathless, and error-isolated', async () => {
+  let created = 0;
+  const disabled = startWatcherHints({
+    roots: new Map([['root', { canonicalPath: '/library' }]]),
+    enabled: false,
+    debounceMs: 5_000,
+    request: async () => undefined,
+    log: { error: () => undefined },
+    watchFactory: () => {
+      created += 1;
+      throw new Error('should not watch');
+    },
+  });
+  await disabled.close();
+  assert.equal(created, 0);
+
+  const handlers = new Map();
+  const timers = [];
+  const requested = [];
+  const errors = [];
+  const watcher = {
+    on(event, listener) {
+      handlers.set(event, listener);
+      return this;
+    },
+    close: async () => {
+      throw new Error('close');
+    },
+  };
+  const active = startWatcherHints({
+    roots: new Map([['root', { canonicalPath: '/library' }]]),
+    enabled: true,
+    debounceMs: 5_000,
+    request: async (id) => requested.push(id),
+    log: { error: (data) => errors.push(data.code) },
+    watchFactory: () => watcher,
+    setTimer: (callback) => {
+      timers.push(callback);
+      return timers.length;
+    },
+    clearTimer: () => undefined,
+  });
+  for (const event of ['add', 'change', 'unlink', 'addDir', 'unlinkDir'])
+    handlers.get(event)('/library/a');
+  handlers.get('error')(new Error('watcher'));
+  assert.equal(timers.length, 1);
+  timers[0]();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(requested, ['root']);
+  await active.close();
+  assert.ok(errors.includes('WATCHER_FAILED'));
+  assert.ok(errors.includes('WATCHER_CLOSE_FAILED'));
+});
+
+test('dispatcher immediately requeues failed and unsent request claims', async () => {
+  const sent = [];
+  const requeued = [];
+  await assert.rejects(
+    dispatchReconciliationRequests(
+      {
+        send: async (_queue, payload) => {
+          sent.push(payload.requestId);
+          if (payload.requestId === 'two') throw new Error('send');
+          return 'job';
+        },
+      },
+      async () => [{ id: 'one' }, { id: 'two' }, { id: 'three' }],
+      async (id) => requeued.push(id),
+    ),
+  );
+  assert.deepEqual(sent, ['one', 'two']);
+  assert.deepEqual(requeued.sort(), ['three', 'two']);
+});
+
 test('discovery scanner treats a depth cutoff as an unknown descendant', async () => {
   const root = await mkdtemp(join(tmpdir(), 'gutter-scanner-depth-'));
   let parent = root;
@@ -312,8 +476,8 @@ async function withEnvironment(values, run) {
   }
 }
 
-test('M1 documents the page-validation schema version', () => {
-  assert.equal(schemaVersion, '0004_page_validation');
+test('M2 documents the reconciliation-control schema version', () => {
+  assert.equal(schemaVersion, '0005_reconciliation_control');
 });
 
 test('config accepts a direct secret only', async () => {

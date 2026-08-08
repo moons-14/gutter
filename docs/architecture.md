@@ -1,11 +1,15 @@
 # Architecture
 
-M1 dependency direction is `apps -> packages`; packages never import apps. `web` is static and
+M2 dependency direction is `apps -> packages`; packages never import apps. `web` is static and
 same-origin proxies `/api` through Caddy. `api`, `worker`, `migrate`, and PostgreSQL are internal;
 only web publishes port 8080. PostgreSQL is `postgres:18.1`; named `db-data` and `cache-data`
 volumes persist state.
 
-`migrate` is the sole schema applier. The idempotent `0004_page_validation` migration adds durable
+`migrate` is the sole schema applier. The idempotent `0005_reconciliation_control` migration adds
+durable scan requests, heartbeat/progress, cancellation flags, and due reconciliation state. A
+30-second worker coordinator advances due roots and queues ordinary pg-boss request-ID jobs; it does
+not use pg-boss cron or filesystem events. Requests coalesce per root and a running request gets one
+durable follow-up. The idempotent `0004_page_validation` migration adds durable
 manifest-addressed validation intents and page results. A changed manifest makes old results
 non-authoritative immediately; a completed zero-valid result hides an item without touching its source.
 The idempotent `0003_comicinfo_metadata` migration adds
@@ -27,7 +31,8 @@ races after that check remain an inherited best-effort limitation.
 
 ComicInfo is local, optional, and never changes source files. A bounded UTF-8-only parser rejects DTDs,
 entities and namespaces; valid fields override inferred title/series while page locators remain source-authoritative.
-Global suppression is deliberately separate from rebuildable scan state. M1 has no watcher, reader, auth,
+Global suppression is deliberately separate from rebuildable scan state. M2 watcher hints are optional,
+default-off, and never deletion truth; it has no reader, auth,
 mutable root API, or external provider. Page validation is a worker-only, read-only follow-up: it
 checks ZIP CRCs and fully decodes a first frame with sharp. Each page has a 128 MiB cap, an item has a
 2 GiB aggregate cap, and decoder input is capped at 100M pixels. Same-size/same-mtime replacement is

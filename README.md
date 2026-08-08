@@ -52,6 +52,23 @@ worker-only full-frame validation: invalid pages are skipped and a fully invalid
 from the visible catalog. Limits are 128 MiB/page, 2 GiB/item, and 100M input pixels.
 Validation is retried with bounded backoff and becomes terminal after the fifth failed lease; a later
 source change creates a new intent (manual retry is a future administrative feature).
+Full reconciliation is durable database state and runs every 15 minutes by default, rather than
+trusting NAS file events. `GUTTER_RECONCILIATION_INTERVAL_SECONDS` accepts 60–86400 and
+`GUTTER_STABLE_GRACE_MS` accepts 0–60000. Internal operator control uses configured root IDs only,
+never paths:
+
+```sh
+docker compose exec worker node --import tsx src/scan.ts scan status
+docker compose exec worker node --import tsx src/scan.ts scan enqueue --root <root-id>
+docker compose exec worker node --import tsx src/scan.ts scan cancel --request <request-uuid>
+docker compose exec worker node --import tsx src/scan.ts scan cancel --run <run-bigint>
+```
+
+The command receives the worker's existing database configuration and exposes safe IDs, counters,
+and bounded codes only. A request received during a running scan creates one durable follow-up.
+Optional watcher hints are disabled by default (`GUTTER_WATCHER_HINTS_ENABLED=false`) and debounce
+for five seconds (`GUTTER_WATCHER_HINT_DEBOUNCE_MS=5000`); they only queue a full root reconciliation
+and never make deletion decisions from NAS events.
 On older Linux kernels, recursive read-only bind mounts may leave submounts writable; use a
 Docker/Linux version that enforces recursive read-only mounts or ensure the host mount layout has
 no writable submounts.

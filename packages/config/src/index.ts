@@ -36,7 +36,45 @@ export function allowedRootsJson(): string {
   return process.env.GUTTER_ALLOWED_ROOTS_JSON ?? '[]';
 }
 
-export const schemaVersion = '0004_page_validation';
+export const schemaVersion = '0005_reconciliation_control';
+
+/** Reconciliation is deliberately durable DB state, not a pg-boss cron schedule. */
+export function reconciliationConfig(): Readonly<{
+  intervalSeconds: number;
+  stableGraceMs: number;
+}> {
+  const interval = z.coerce
+    .number()
+    .int()
+    .min(60)
+    .max(86_400)
+    .safeParse(process.env.GUTTER_RECONCILIATION_INTERVAL_SECONDS ?? '900');
+  const grace = z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(60_000)
+    .safeParse(process.env.GUTTER_STABLE_GRACE_MS ?? '2000');
+  if (!interval.success)
+    throw new Error('GUTTER_RECONCILIATION_INTERVAL_SECONDS must be 60..86400');
+  if (!grace.success) throw new Error('GUTTER_STABLE_GRACE_MS must be 0..60000');
+  return { intervalSeconds: interval.data, stableGraceMs: grace.data };
+}
+
+export function watcherHintsConfig(): Readonly<{ enabled: boolean; debounceMs: number }> {
+  const enabled = z
+    .enum(['true', 'false'])
+    .safeParse(process.env.GUTTER_WATCHER_HINTS_ENABLED ?? 'false');
+  const debounce = z.coerce
+    .number()
+    .int()
+    .min(100)
+    .max(60_000)
+    .safeParse(process.env.GUTTER_WATCHER_HINT_DEBOUNCE_MS ?? '5000');
+  if (!enabled.success) throw new Error('GUTTER_WATCHER_HINTS_ENABLED must be true or false');
+  if (!debounce.success) throw new Error('GUTTER_WATCHER_HINT_DEBOUNCE_MS must be 100..60000');
+  return { enabled: enabled.data === 'true', debounceMs: debounce.data };
+}
 
 /** Bounded worker-only deadlines; values are deliberately not accepted from job payloads. */
 export function validationTimeouts(): Readonly<{ itemMs: number }> {

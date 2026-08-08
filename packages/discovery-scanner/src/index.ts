@@ -1,4 +1,5 @@
 import { constants } from 'node:fs';
+import type { BigIntStats, Stats } from 'node:fs';
 import { lstat, open, opendir, realpath } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { basename, join, posix, relative as relativePath } from 'node:path';
@@ -40,6 +41,29 @@ export type ScanItem = Readonly<{
   scanIssues?: readonly ScanIssue[];
   quarantinedReason: ScanReason | null;
 }>;
+type CbzInspection = Pick<ScanItem, 'pages' | 'comicInfo' | 'scanIssues' | 'quarantinedReason'> & {
+  deferredReason?: 'unstable';
+  source?: Readonly<{ size: number; mtimeMs: number }>;
+};
+export type FileObservation = Readonly<{
+  dev: bigint;
+  ino: bigint;
+  size: bigint;
+  mtimeNs: bigint;
+}>;
+
+function observation(stat: BigIntStats): FileObservation {
+  return { dev: stat.dev, ino: stat.ino, size: stat.size, mtimeNs: stat.mtimeNs };
+}
+
+function sameObservation(left: FileObservation, right: FileObservation): boolean {
+  return (
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.size === right.size &&
+    left.mtimeNs === right.mtimeNs
+  );
+}
 
 export type ScanPage = Readonly<{
   locator: string;
@@ -73,6 +97,22 @@ export type ScanSummary = {
 };
 
 export type ScanResult = Readonly<{ items: readonly ScanItem[]; summary: ScanSummary }>;
+export type BatchedScanOptions = Readonly<{
+  signal?: AbortSignal;
+  batchSize?: number;
+  stableGraceMs?: number;
+  /** Called during DFS, before traversal completion. The callback must not retain the array. */
+  onItems?: (items: readonly ScanItem[]) => Promise<void> | void;
+  onProtected?: (paths: readonly string[]) => Promise<void> | void;
+  /** A child subtree could not be read; preserve its prior active descendants for this run. */
+  onProtectedPrefix?: (prefix: string) => Promise<void> | void;
+  /** Bounded cancellation/lease pulse; invoked at least once per second during traversal. */
+  pulse?: (force?: boolean) => Promise<void> | void;
+  /** Disable compatibility collection for worker streaming scans. */
+  collect?: boolean;
+  /** Test seam for simulating a page that becomes unreadable after directory enumeration. */
+  openPage?: (path: string) => ReturnType<typeof open>;
+}>;
 export type ArchiveQuotas = Partial<typeof defaultArchiveQuotas>;
 
 const collator = new Intl.Collator('und', { numeric: true, sensitivity: 'base' });
@@ -115,6 +155,12 @@ function checkAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw new DOMException('scan aborted', 'AbortError');
 }
 
+function transientFilesystemError(error: unknown): boolean {
+  return ['EACCES', 'EIO', 'ESTALE', 'ENOENT', 'EPERM'].includes(
+    (error as NodeJS.ErrnoException)?.code ?? '',
+  );
+}
+
 function relative(root: string, path: string): string {
   const value = path
     .slice(root.length + 1)
@@ -137,13 +183,24 @@ export async function inspectCbz(
   path: string,
   quotaOverrides: ArchiveQuotas = {},
   signal?: AbortSignal,
-): Promise<Pick<ScanItem, 'pages' | 'comicInfo' | 'scanIssues' | 'quarantinedReason'>> {
+  pulse?: (force?: boolean) => Promise<void> | void,
+  stableGraceMs = 0,
+  expected?: FileObservation,
+): Promise<CbzInspection> {
   const quotas = { ...defaultArchiveQuotas, ...quotaOverrides };
   checkAborted(signal);
   let handle;
   try {
     handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   } catch (error) {
+    if (transientFilesystemError(error))
+      return {
+        pages: [],
+        comicInfo: null,
+        scanIssues: [],
+        quarantinedReason: null,
+        deferredReason: 'unstable',
+      };
     return {
       pages: [],
       comicInfo: null,
@@ -151,6 +208,32 @@ export async function inspectCbz(
       quarantinedReason: archiveErrorReason(error as Error),
     };
   }
+  let initial: BigIntStats;
+  try {
+    initial = await handle.stat({ bigint: true });
+  } catch (error) {
+    await handle.close().catch(() => undefined);
+    if (transientFilesystemError(error))
+      return {
+        pages: [],
+        comicInfo: null,
+        scanIssues: [],
+        quarantinedReason: null,
+        deferredReason: 'unstable',
+      };
+    return { pages: [], comicInfo: null, scanIssues: [], quarantinedReason: 'malformed_archive' };
+  }
+  if (!initial.isFile() || (expected && !sameObservation(expected, observation(initial)))) {
+    await handle.close().catch(() => undefined);
+    return {
+      pages: [],
+      comicInfo: null,
+      scanIssues: [],
+      quarantinedReason: null,
+      deferredReason: 'unstable',
+    };
+  }
+  const descriptorSource = { size: Number(initial.size), mtimeMs: Number(initial.mtimeMs) };
   if (signal?.aborted) {
     await handle.close();
     checkAborted(signal);
@@ -159,10 +242,7 @@ export async function inspectCbz(
     let zip: yauzl.ZipFile | undefined;
     let settled = false;
     let onAbort: (() => void) | undefined;
-    const finish = (
-      result?: Pick<ScanItem, 'pages' | 'comicInfo' | 'scanIssues' | 'quarantinedReason'>,
-      error?: unknown,
-    ) => {
+    const finish = (result?: CbzInspection, error?: unknown) => {
       if (settled) return;
       settled = true;
       if (onAbort) signal?.removeEventListener('abort', onAbort);
@@ -191,6 +271,7 @@ export async function inspectCbz(
               comicInfo: null,
               scanIssues: [],
               quarantinedReason: openError ? archiveErrorReason(openError) : 'malformed_archive',
+              source: descriptorSource,
             });
             return;
           }
@@ -203,6 +284,12 @@ export async function inspectCbz(
           let entries = 0;
           let total = 0;
           let reason: ScanReason | null = null;
+          const advance = async (force = false) => {
+            checkAborted(signal);
+            await pulse?.(force);
+            checkAborted(signal);
+            archive.readEntry();
+          };
           const readComicInfo = (entry: yauzl.Entry) =>
             new Promise<Uint8Array>((resolve, reject) => {
               if (entry.uncompressedSize > maxComicInfoBytes) {
@@ -269,11 +356,29 @@ export async function inspectCbz(
                 locators.add(locator);
               }
             }
+            // This intentionally follows ComicInfo streaming/parsing: metadata is source input too.
+            const final = await handle.stat({ bigint: true }).catch(() => null);
+            if (
+              !final ||
+              !final.isFile() ||
+              !sameObservation(observation(initial), observation(final)) ||
+              Number(final.mtimeMs) > Date.now() - stableGraceMs
+            ) {
+              finish({
+                pages: [],
+                comicInfo: null,
+                scanIssues: [],
+                quarantinedReason: null,
+                deferredReason: 'unstable',
+              });
+              return;
+            }
             finish({
               pages: reason ? [] : pages.sort(pageOrder),
               comicInfo: reason ? null : comicInfo,
               scanIssues,
               quarantinedReason: reason,
+              source: descriptorSource,
             });
           };
           archive.on('error', (error: Error) => {
@@ -281,41 +386,43 @@ export async function inspectCbz(
             complete();
           });
           archive.on('entry', (entry) => {
-            if (signal?.aborted) return abort();
-            entries += 1;
-            total += entry.uncompressedSize;
-            if (entries > quotas.entries) reason = 'archive_entry_limit';
-            else if (entry.generalPurposeBitFlag & 1) reason = 'encrypted_archive';
-            else if (unsafeZipPath(entry.fileName)) reason = 'archive_path_traversal';
-            else if (entry.uncompressedSize > quotas.entryBytes) reason = 'archive_entry_too_large';
-            else if (total > quotas.totalBytes) reason = 'archive_total_too_large';
-            else if (
-              entry.uncompressedSize / Math.max(entry.compressedSize, 1) >
-              quotas.compressionRatio
-            )
-              reason = 'archive_compression_ratio';
-            else if (
-              !entry.fileName.includes('/') &&
-              entry.fileName.toLowerCase() === 'comicinfo.xml'
-            )
-              comicInfoEntries.push(entry);
-            else if (!entry.fileName.endsWith('/') && isImage(basename(entry.fileName)))
-              pages.push({
-                locator: entry.fileName,
-                observed: {
-                  compressedSize: entry.compressedSize,
-                  crc32: entry.crc32 >>> 0,
-                  size: entry.uncompressedSize,
-                  uncompressedSize: entry.uncompressedSize,
-                },
-              });
-            if (reason) void complete();
-            else if (signal?.aborted) abort();
-            else archive.readEntry();
+            void (async () => {
+              if (signal?.aborted) return abort();
+              entries += 1;
+              total += entry.uncompressedSize;
+              if (entries > quotas.entries) reason = 'archive_entry_limit';
+              else if (entry.generalPurposeBitFlag & 1) reason = 'encrypted_archive';
+              else if (unsafeZipPath(entry.fileName)) reason = 'archive_path_traversal';
+              else if (entry.uncompressedSize > quotas.entryBytes)
+                reason = 'archive_entry_too_large';
+              else if (total > quotas.totalBytes) reason = 'archive_total_too_large';
+              else if (
+                entry.uncompressedSize / Math.max(entry.compressedSize, 1) >
+                quotas.compressionRatio
+              )
+                reason = 'archive_compression_ratio';
+              else if (
+                !entry.fileName.includes('/') &&
+                entry.fileName.toLowerCase() === 'comicinfo.xml'
+              )
+                comicInfoEntries.push(entry);
+              else if (!entry.fileName.endsWith('/') && isImage(basename(entry.fileName)))
+                pages.push({
+                  locator: entry.fileName,
+                  observed: {
+                    compressedSize: entry.compressedSize,
+                    crc32: entry.crc32 >>> 0,
+                    size: entry.uncompressedSize,
+                    uncompressedSize: entry.uncompressedSize,
+                  },
+                });
+              if (reason) await complete();
+              else await advance(entries % 64 === 0);
+            })().catch((error) => finish(undefined, error));
           });
           archive.on('end', () => void complete());
           if (signal?.aborted) abort();
-          else archive.readEntry();
+          else void advance().catch((error) => finish(undefined, error));
         },
       );
     } catch (error) {
@@ -324,6 +431,7 @@ export async function inspectCbz(
         comicInfo: null,
         scanIssues: [],
         quarantinedReason: archiveErrorReason(error as Error),
+        source: descriptorSource,
       });
     }
   });
@@ -332,29 +440,53 @@ export async function inspectCbz(
 async function inspectDirectoryComicInfo(
   directory: string,
   names: readonly string[],
-): Promise<{ comicInfo: ComicInfoParseResult | null; scanIssues: readonly ScanIssue[] }> {
+  stableGraceMs: number,
+): Promise<{
+  comicInfo: ComicInfoParseResult | null;
+  scanIssues: readonly ScanIssue[];
+  deferred: boolean;
+}> {
   const candidates = names.filter((name) => name.toLowerCase() === 'comicinfo.xml');
-  if (candidates.length === 0) return { comicInfo: null, scanIssues: [] };
+  if (candidates.length === 0) return { comicInfo: null, scanIssues: [], deferred: false };
   const exact = candidates.filter((name) => name === 'ComicInfo.xml');
   if (exact.length > 1 || (exact.length === 0 && candidates.length > 1))
     return {
       comicInfo: null,
       scanIssues: [{ code: 'comicinfo_ambiguous_name', rule: 'comicinfo-filename-v1' }],
+      deferred: false,
     };
   const name = exact[0] ?? candidates[0]!;
   try {
     const handle = await open(join(directory, name), constants.O_RDONLY | constants.O_NOFOLLOW);
     try {
-      const stat = await handle.stat();
-      const bytes = Buffer.alloc(Math.min(stat.size, maxComicInfoBytes + 1));
-      const { bytesRead } = await handle.read(bytes, 0, bytes.length, 0);
-      if (bytesRead !== bytes.length) throw new Error('ComicInfo short read');
+      const initial = await handle.stat({ bigint: true });
+      if (!initial.isFile() || Number(initial.mtimeMs) > Date.now() - stableGraceMs)
+        return { comicInfo: null, scanIssues: [], deferred: true };
+      const limit = Number(
+        initial.size > BigInt(maxComicInfoBytes) ? maxComicInfoBytes + 1 : initial.size,
+      );
+      const bytes = Buffer.alloc(limit);
+      let offset = 0;
+      while (offset < bytes.length) {
+        const { bytesRead } = await handle.read(bytes, offset, bytes.length - offset, offset);
+        if (bytesRead === 0) return { comicInfo: null, scanIssues: [], deferred: true };
+        offset += bytesRead;
+      }
+      const parsed = parseComicInfo(bytes);
+      const final = await handle.stat({ bigint: true });
+      if (
+        !final.isFile() ||
+        !sameObservation(observation(initial), observation(final)) ||
+        Number(final.mtimeMs) > Date.now() - stableGraceMs
+      )
+        return { comicInfo: null, scanIssues: [], deferred: true };
       return {
-        comicInfo: parseComicInfo(bytes),
+        comicInfo: parsed,
         scanIssues:
           name === 'ComicInfo.xml'
             ? []
             : [{ code: 'comicinfo_noncanonical_name', rule: 'comicinfo-filename-v1' }],
+        deferred: false,
       };
     } finally {
       await handle.close();
@@ -362,12 +494,31 @@ async function inspectDirectoryComicInfo(
   } catch {
     return {
       comicInfo: null,
-      scanIssues: [{ code: 'comicinfo_read_failed', rule: 'comicinfo-filename-v1' }],
+      scanIssues: [],
+      deferred: true,
     };
   }
 }
 
 export async function scanRoot(root: string, signal?: AbortSignal): Promise<ScanResult> {
+  return scanRootBatched(root, { signal });
+}
+
+/** Bounded DFS emits at most 100 candidates at a time while retaining the compatibility result. */
+export async function scanRootBatched(
+  root: string,
+  options: BatchedScanOptions = {},
+): Promise<ScanResult> {
+  const signal = options.signal;
+  const batchSize = Math.min(100, Math.max(1, options.batchSize ?? 100));
+  const stableGraceMs = Math.max(0, options.stableGraceMs ?? 0);
+  const collect = options.collect ?? true;
+  let lastPulse = 0;
+  const pulse = async (force = false): Promise<void> => {
+    if (!force && Date.now() - lastPulse < 1_000) return;
+    lastPulse = Date.now();
+    await options.pulse?.();
+  };
   const summary: ScanSummary = {
     discovered: 0,
     skipped: 0,
@@ -382,6 +533,29 @@ export async function scanRoot(root: string, signal?: AbortSignal): Promise<Scan
     unchanged: 0,
   };
   const items: ScanItem[] = [];
+  let pending: ScanItem[] = [];
+  let protectedPaths: string[] = [];
+  const protect = async (path: string): Promise<void> => {
+    protectedPaths.push(path);
+    if (protectedPaths.length >= batchSize) {
+      const batch = protectedPaths;
+      protectedPaths = [];
+      await options.onProtected?.(batch);
+    }
+  };
+  const protectPrefix = async (path: string): Promise<void> => {
+    await options.onProtectedPrefix?.(path);
+  };
+  const stable = (mtimeMs: number): boolean => mtimeMs <= Date.now() - stableGraceMs;
+  const recordItem = async (item: ScanItem): Promise<void> => {
+    if (collect) items.push(item);
+    pending.push(item);
+    if (pending.length >= batchSize) {
+      const batch = pending;
+      pending = [];
+      await options.onItems?.(batch);
+    }
+  };
   const recordMetadataIssues = (issues: readonly ScanIssue[]): void => {
     for (const entry of issues)
       summary.metadataIssues[entry.code] = (summary.metadataIssues[entry.code] ?? 0) + 1;
@@ -397,6 +571,7 @@ export async function scanRoot(root: string, signal?: AbortSignal): Promise<Scan
 
   async function visit(directory: string, depth: number): Promise<DescendantState> {
     checkAborted(signal);
+    await pulse();
     if (depth > maxDepth) {
       summary.skipped += 1;
       return 'unknown-cutoff';
@@ -404,34 +579,61 @@ export async function scanRoot(root: string, signal?: AbortSignal): Promise<Scan
     const canonicalDirectory = await realpath(directory);
     if (!contained(canonicalDirectory)) throw new Error('directory escaped validated root');
     const children: string[] = [];
-    const direct: string[] = [];
+    const direct: { name: string; initial: FileObservation }[] = [];
     const files: string[] = [];
+    let observedEntries = 0;
+    let unreadableDirect = false;
     // Re-realpath and containment are best-effort against host filesystem mutation races.
     const handle = await opendir(canonicalDirectory);
     try {
       for await (const entry of handle) {
         checkAborted(signal);
+        await pulse(++observedEntries % 64 === 0);
         const path = join(canonicalDirectory, entry.name);
-        const stat = await lstat(path);
+        let stat: BigIntStats;
+        try {
+          stat = await lstat(path, { bigint: true });
+        } catch {
+          if (posix.extname(entry.name).toLowerCase() === '.cbz')
+            await protect(relative(canonicalRoot, path));
+          else if (entry.isDirectory()) await protectPrefix(relative(canonicalRoot, path));
+          else if (isImage(entry.name)) unreadableDirect = true;
+          continue;
+        }
         if (stat.isSymbolicLink()) {
           summary.symlinks += 1;
         } else if (stat.isDirectory()) {
           children.push(path);
         } else if (stat.isFile()) {
           files.push(entry.name);
-          if (isImage(entry.name)) direct.push(entry.name);
+          if (isImage(entry.name)) direct.push({ name: entry.name, initial: observation(stat) });
           else if (posix.extname(entry.name).toLowerCase() === '.cbz') {
-            const inspected = await inspectCbz(path, {}, signal);
-            items.push({
+            if (!stable(Number(stat.mtimeMs))) {
+              await protect(relative(canonicalRoot, path));
+              continue;
+            }
+            const inspected = await inspectCbz(
+              path,
+              {},
+              signal,
+              pulse,
+              stableGraceMs,
+              observation(stat),
+            );
+            if (inspected.deferredReason) {
+              await protect(relative(canonicalRoot, path));
+              continue;
+            }
+            await recordItem({
               relativePath: relative(canonicalRoot, path),
               kind: 'cbz',
-              size: stat.size,
-              mtimeMs: stat.mtimeMs,
+              size: inspected.source!.size,
+              mtimeMs: inspected.source!.mtimeMs,
               ...inspected,
               manifestSha256: manifestSha256(
                 'cbz',
-                stat.size,
-                stat.mtimeMs,
+                inspected.source!.size,
+                inspected.source!.mtimeMs,
                 inspected.pages.map(scanPage),
               ),
             });
@@ -457,23 +659,42 @@ export async function scanRoot(root: string, signal?: AbortSignal): Promise<Scan
     }
     let descendant: DescendantState = 'none';
     for (const child of children.sort()) {
-      const childState = await visit(child, depth + 1);
+      let childState: DescendantState;
+      try {
+        childState = await visit(child, depth + 1);
+      } catch (error) {
+        if (!transientFilesystemError(error)) throw error;
+        await protectPrefix(relative(canonicalRoot, child));
+        childState = 'candidate';
+      }
       if (childState === 'candidate') descendant = 'candidate';
       else if (childState === 'unknown-cutoff' && descendant === 'none')
         descendant = 'unknown-cutoff';
     }
     if (direct.length && descendant === 'none') {
-      const stat = await lstat(canonicalDirectory);
+      const beforeDirectory = await lstat(canonicalDirectory);
       const pages: ScanPage[] = [];
-      for (const name of direct.sort(comparePages)) {
+      let unstable = unreadableDirect || !stable(beforeDirectory.mtimeMs);
+      let attemptedPages = 0;
+      for (const entry of direct.sort((left, right) => comparePages(left.name, right.name))) {
+        const name = entry.name;
+        checkAborted(signal);
+        attemptedPages += 1;
+        await pulse(attemptedPages % 64 === 0);
         const path = join(canonicalDirectory, name);
-        const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+        let handle;
+        try {
+          handle = await (
+            options.openPage ?? ((value) => open(value, constants.O_RDONLY | constants.O_NOFOLLOW))
+          )(path);
+        } catch {
+          unstable = true;
+          continue;
+        }
         try {
           const stat = await handle.stat({ bigint: true });
-          if (!stat.isFile()) {
-            summary.skipped += 1;
-            continue;
-          }
+          if (!stat.isFile() || !sameObservation(entry.initial, observation(stat))) unstable = true;
+          if (Number(stat.mtimeMs) > Date.now() - stableGraceMs) unstable = true;
           pages.push({
             locator: name,
             observed: { size: Number(stat.size), mtimeNs: stat.mtimeNs.toString() },
@@ -482,9 +703,26 @@ export async function scanRoot(root: string, signal?: AbortSignal): Promise<Scan
           await handle.close();
         }
       }
-      const comicInfo = await inspectDirectoryComicInfo(canonicalDirectory, files);
+      if (unstable) {
+        await protect(relative(canonicalRoot, canonicalDirectory));
+        return 'candidate';
+      }
+      const comicInfo = await inspectDirectoryComicInfo(canonicalDirectory, files, stableGraceMs);
+      if (comicInfo.deferred) {
+        await protect(relative(canonicalRoot, canonicalDirectory));
+        return 'candidate';
+      }
       const directoryStat = await lstat(canonicalDirectory);
-      items.push({
+      if (
+        directoryStat.dev !== beforeDirectory.dev ||
+        directoryStat.ino !== beforeDirectory.ino ||
+        directoryStat.mtimeMs !== beforeDirectory.mtimeMs ||
+        directoryStat.size !== beforeDirectory.size
+      ) {
+        await protect(relative(canonicalRoot, canonicalDirectory));
+        return 'candidate';
+      }
+      await recordItem({
         relativePath: relative(canonicalRoot, canonicalDirectory),
         displayName:
           relative(canonicalRoot, canonicalDirectory) === '.' ? basename(canonicalRoot) : undefined,
@@ -514,5 +752,7 @@ export async function scanRoot(root: string, signal?: AbortSignal): Promise<Scan
   }
 
   await visit(root, 0);
+  if (pending.length) await options.onItems?.(pending);
+  if (protectedPaths.length) await options.onProtected?.(protectedPaths);
   return { items, summary };
 }

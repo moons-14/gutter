@@ -3,6 +3,7 @@ import type { LibraryRootSnapshot } from '@gutter/library-roots';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
 import { fileURLToPath } from 'node:url';
+import { randomUUID } from 'node:crypto';
 import { basename, dirname, extname } from 'node:path';
 import { Pool } from 'pg';
 import {
@@ -185,6 +186,349 @@ export async function startScanRun(rootId: string, configGeneration: string): Pr
   }
 }
 
+export const scanTriggers = ['startup', 'periodic', 'watcher', 'manual'] as const;
+export type ScanTrigger = (typeof scanTriggers)[number];
+export type ScanRequestState =
+  | 'queued'
+  | 'dispatched'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
+export type ScanRequest = Readonly<{
+  id: string;
+  rootId: string;
+  trigger: ScanTrigger;
+  state: ScanRequestState;
+  scanRunId: number | null;
+  followUpRequested: boolean;
+}>;
+
+const triggerRank: Record<ScanTrigger, number> = { periodic: 0, startup: 1, watcher: 2, manual: 3 };
+function scanTrigger(value: string): ScanTrigger {
+  return (scanTriggers as readonly string[]).includes(value) ? (value as ScanTrigger) : 'periodic';
+}
+function safeScanError(value: string | undefined): string {
+  return (
+    (value ?? 'scan_failed')
+      .toLowerCase()
+      .replace(/[^a-z0-9_]/g, '_')
+      .slice(0, 96) || 'scan_failed'
+  );
+}
+
+/**
+ * Coalesces at the database boundary. A running request never receives a second active row; its
+ * one durable follow-up is created only when the current request becomes terminal.
+ */
+/**
+ * Startup callers pass their configured interval so queue coalescing and the first due time share
+ * the same root lock. This prevents the coordinator from immediately adding a periodic follow-up.
+ */
+export async function requestRootScan(
+  rootId: string,
+  trigger: ScanTrigger,
+  scheduleIntervalSeconds?: number,
+): Promise<ScanRequest> {
+  const client = await pool.connect();
+  try {
+    await client.query('begin');
+    const root = await client.query('select id from library_roots where id=$1 for update', [
+      rootId,
+    ]);
+    if (root.rowCount !== 1) throw new Error('library_root_not_found');
+    if (scheduleIntervalSeconds !== undefined)
+      await client.query(
+        `update library_roots set next_reconcile_at=now()+($2 * interval '1 second'),
+         reconcile_interval_seconds=$2,updated_at=now() where id=$1`,
+        [rootId, scheduleIntervalSeconds],
+      );
+    const active = await client.query<{
+      id: string;
+      trigger: string;
+      state: ScanRequestState;
+      scan_run_id: string | null;
+      follow_up_requested: boolean;
+      follow_up_trigger: string | null;
+    }>(
+      `select id,trigger,state,scan_run_id,follow_up_requested,follow_up_trigger from scan_requests
+         where root_id=$1 and state in ('queued','dispatched','running') for update`,
+      [rootId],
+    );
+    if (!active.rows[0]) {
+      const created = await client.query<{ id: string }>(
+        `insert into scan_requests(id,root_id,trigger,state) values($1,$2,$3,'queued') returning id`,
+        [randomUUID(), rootId, trigger],
+      );
+      await client.query('commit');
+      return {
+        id: created.rows[0]!.id,
+        rootId,
+        trigger,
+        state: 'queued',
+        scanRunId: null,
+        followUpRequested: false,
+      };
+    }
+    const row = active.rows[0];
+    const existingTrigger = scanTrigger(row.follow_up_trigger ?? row.trigger);
+    const chosen = triggerRank[trigger] > triggerRank[existingTrigger] ? trigger : existingTrigger;
+    if (row.state === 'running') {
+      await client.query(
+        `update scan_requests set follow_up_requested=true, follow_up_trigger=$2, updated_at=now() where id=$1`,
+        [row.id, chosen],
+      );
+      await client.query('commit');
+      return {
+        id: row.id,
+        rootId,
+        trigger: chosen,
+        state: row.state,
+        scanRunId: row.scan_run_id ? Number(row.scan_run_id) : null,
+        followUpRequested: true,
+      };
+    }
+    await client.query('update scan_requests set trigger=$2, updated_at=now() where id=$1', [
+      row.id,
+      chosen,
+    ]);
+    await client.query('commit');
+    return {
+      id: row.id,
+      rootId,
+      trigger: chosen,
+      state: row.state,
+      scanRunId: row.scan_run_id ? Number(row.scan_run_id) : null,
+      followUpRequested: row.follow_up_requested,
+    };
+  } catch (error) {
+    await client.query('rollback');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+/** Claims queued rows before sending. A crash after this claim is recovered by recoverStaleScanRequests. */
+export async function claimScanRequestsForDispatch(limit = 20): Promise<ScanRequest[]> {
+  const client = await pool.connect();
+  try {
+    await client.query('begin');
+    const result = await client.query<{ id: string; root_id: string; trigger: string }>(
+      `with candidates as (select id from scan_requests where state='queued' order by created_at for update skip locked limit $1)
+       update scan_requests r set state='dispatched',updated_at=now() from candidates c where r.id=c.id
+       returning r.id,r.root_id,r.trigger`,
+      [limit],
+    );
+    await client.query('commit');
+    return result.rows.map((row) => ({
+      id: row.id,
+      rootId: row.root_id,
+      trigger: scanTrigger(row.trigger),
+      state: 'dispatched',
+      scanRunId: null,
+      followUpRequested: false,
+    }));
+  } catch (error) {
+    await client.query('rollback');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function requeueDispatchedScanRequest(id: string): Promise<void> {
+  await pool.query(
+    "update scan_requests set state='queued',updated_at=now(),pg_boss_job_id=null where id=$1 and state='dispatched'",
+    [id],
+  );
+}
+
+/** Duplicate pg-boss deliveries are harmless: only a dispatched request can be claimed once. */
+export async function startRequestedScan(
+  requestId: string,
+  configGeneration: string,
+  jobId?: string,
+): Promise<{ runId: number; rootId: string; trigger: ScanTrigger } | null> {
+  const client = await pool.connect();
+  try {
+    await client.query('begin');
+    const requested = await client.query<{ root_id: string; trigger: string }>(
+      "select root_id,trigger from scan_requests where id=$1 and state='dispatched' for update",
+      [requestId],
+    );
+    if (!requested.rows[0]) {
+      await client.query('commit');
+      return null;
+    }
+    const row = requested.rows[0];
+    const run = await client.query<{ id: number }>(
+      `insert into scan_runs(root_id,config_generation,state,scan_request_id,pg_boss_job_id,trigger,heartbeat_at)
+       values($1,$2,'running',$3,$4,$5,now()) returning id`,
+      [row.root_id, configGeneration, requestId, jobId ?? null, row.trigger],
+    );
+    await client.query(
+      `update scan_requests set state='running',scan_run_id=$2,pg_boss_job_id=$3,started_at=now(),updated_at=now() where id=$1`,
+      [requestId, run.rows[0]!.id, jobId ?? null],
+    );
+    await client.query('commit');
+    return { runId: run.rows[0]!.id, rootId: row.root_id, trigger: scanTrigger(row.trigger) };
+  } catch (error) {
+    await client.query('rollback');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function heartbeatScanRun(
+  runId: number,
+  progress: Record<string, number>,
+): Promise<boolean> {
+  const safe = Object.fromEntries(
+    Object.entries(progress)
+      .slice(0, 16)
+      .map(([key, value]) => [key.slice(0, 64), Math.max(0, Math.floor(value))]),
+  );
+  const result = await pool.query(
+    "update scan_runs set heartbeat_at=now(),progress=$2 where id=$1 and state='running' and cancel_requested_at is null",
+    [runId, JSON.stringify(safe)],
+  );
+  return result.rowCount === 1;
+}
+
+export async function protectSeenPaths(
+  runId: number,
+  rootId: string,
+  paths: readonly string[],
+): Promise<void> {
+  if (!paths.length) return;
+  const client = await pool.connect();
+  try {
+    await client.query('begin');
+    await assertCurrentRun(client, runId, rootId);
+    await client.query(
+      `update source_items set last_seen_run_id=$1,updated_at=now() where root_id=$2 and active
+         and relative_path = any($3::text[])`,
+      [runId, rootId, paths.slice(0, 100)],
+    );
+    await client.query('commit');
+  } catch (error) {
+    await client.query('rollback');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+/** Protect a transiently unreadable subtree without treating SQL LIKE metacharacters as paths. */
+export async function protectSeenPrefix(
+  runId: number,
+  rootId: string,
+  prefix: string,
+): Promise<void> {
+  const client = await pool.connect();
+  try {
+    await client.query('begin');
+    await assertCurrentRun(client, runId, rootId);
+    await client.query(
+      `update source_items set last_seen_run_id=$1,updated_at=now() where root_id=$2 and active
+       and ($3='.' or relative_path=$3 or left(relative_path,length($3)+1)=$3 || '/')`,
+      [runId, rootId, prefix],
+    );
+    await client.query('commit');
+  } catch (error) {
+    await client.query('rollback');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function requestScanCancellation(id: string): Promise<boolean> {
+  const result = await pool.query(
+    `update scan_requests set state=case when state in ('queued','dispatched') then 'cancelled' else state end,
+       cancel_requested_at=now(),finished_at=case when state in ('queued','dispatched') then now() else finished_at end,updated_at=now()
+     where id=$1 and state in ('queued','dispatched','running')`,
+    [id],
+  );
+  if (result.rowCount)
+    await pool.query(
+      `update scan_runs set cancel_requested_at=now() where scan_request_id=$1 and state='running'`,
+      [id],
+    );
+  return result.rowCount === 1;
+}
+
+export async function isScanCancellationRequested(runId: number): Promise<boolean> {
+  const result = await pool.query<{ cancelled: boolean }>(
+    `select r.cancel_requested_at is not null as cancelled from scan_runs s join scan_requests r on r.id=s.scan_request_id where s.id=$1`,
+    [runId],
+  );
+  return result.rows[0]?.cancelled ?? false;
+}
+
+export async function dueReconciliationRequests(intervalSeconds: number): Promise<number> {
+  const roots = await pool.query<{ id: string }>(
+    `update library_roots set next_reconcile_at=now()+($1 * interval '1 second'), reconcile_interval_seconds=$1,updated_at=now()
+     where active and state like 'ready_%' and (next_reconcile_at is null or next_reconcile_at <= now()) returning id`,
+    [intervalSeconds],
+  );
+  for (const root of roots.rows) await requestRootScan(root.id, 'periodic');
+  return roots.rowCount ?? 0;
+}
+
+/** Only an expired heartbeat is reclaimable; a live worker is never pre-empted. */
+export async function recoverStaleScanRequests(): Promise<number> {
+  const client = await pool.connect();
+  try {
+    await client.query('begin');
+    const stale = await client.query<{
+      id: string;
+      root_id: string;
+      trigger: string;
+      follow_up_requested: boolean;
+      follow_up_trigger: string | null;
+      cancel_requested_at: Date | null;
+    }>(
+      `select r.id,r.root_id,r.trigger,r.follow_up_requested,r.follow_up_trigger,r.cancel_requested_at
+       from scan_requests r join scan_runs s on s.id=r.scan_run_id
+       where r.state='running' and s.state='running' and s.heartbeat_at < now()-interval '2 minutes' for update skip locked`,
+    );
+    for (const row of stale.rows) {
+      const state = row.cancel_requested_at ? 'cancelled' : 'failed';
+      await client.query(
+        "update scan_runs set state=$2,completed_at=now() where scan_request_id=$1 and state='running'",
+        [row.id, state],
+      );
+      await client.query(
+        "update scan_requests set state=$2,finished_at=now(),updated_at=now(),error_code=case when $2='failed' then 'interrupted' else null end where id=$1",
+        [row.id, state],
+      );
+      const retryTrigger = row.follow_up_requested
+        ? scanTrigger(row.follow_up_trigger ?? row.trigger)
+        : row.cancel_requested_at
+          ? null
+          : scanTrigger(row.trigger ?? 'periodic');
+      if (retryTrigger)
+        await client.query(
+          "insert into scan_requests(id,root_id,trigger,state) values($1,$2,$3,'queued') on conflict do nothing",
+          [randomUUID(), row.root_id, retryTrigger],
+        );
+    }
+    const redispatched = await client.query(
+      "update scan_requests set state='queued',updated_at=now(),pg_boss_job_id=null where state='dispatched' and updated_at < now()-interval '2 minutes'",
+    );
+    await client.query('commit');
+    return (stale.rowCount ?? 0) + (redispatched.rowCount ?? 0);
+  } catch (error) {
+    await client.query('rollback');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function assertCurrentRun(
   client: import('pg').PoolClient,
   runId: number,
@@ -319,6 +663,21 @@ export async function completeScanRun(
   try {
     await client.query('begin');
     await assertCurrentRun(client, runId, rootId);
+    // The request row is locked in the same authority transaction as tombstoning. A cancellation
+    // that wins this race is terminal without changing catalog visibility.
+    const request = await client.query<{ cancel_requested_at: Date | null }>(
+      'select cancel_requested_at from scan_requests where scan_run_id=$1 for update',
+      [runId],
+    );
+    if (request.rows[0]?.cancel_requested_at) {
+      await client.query(
+        "update scan_runs set state='cancelled',summary=$2,completed_at=now() where id=$1 and state='running'",
+        [runId, JSON.stringify(summary)],
+      );
+      await finalizeRequestedScan(client, runId, 'cancelled');
+      await client.query('commit');
+      return;
+    }
     const finished = await client.query(
       `update scan_runs set state='completed', summary=$2, completed_at=now()
        where id=$1 and root_id=$3 and state='running'`,
@@ -336,6 +695,7 @@ export async function completeScanRun(
        where v.source_item_id=i.id and i.root_id=$1 and not i.active`,
       [rootId],
     );
+    await finalizeRequestedScan(client, runId, 'completed');
     await client.query('commit');
   } catch (error) {
     await client.query('rollback');
@@ -346,17 +706,65 @@ export async function completeScanRun(
 }
 
 export async function failScanRun(runId: number, summary: ScanSummary): Promise<void> {
-  await pool.query(
-    `update scan_runs set state='failed', summary=$2, completed_at=now() where id=$1 and state='running'`,
-    [runId, JSON.stringify(summary)],
-  );
+  await finishUnsuccessfulScan(runId, summary, 'failed');
 }
 
 export async function cancelScanRun(runId: number, summary: ScanSummary): Promise<void> {
-  await pool.query(
-    `update scan_runs set state='cancelled', summary=$2, completed_at=now() where id=$1 and state='running'`,
-    [runId, JSON.stringify(summary)],
+  await finishUnsuccessfulScan(runId, summary, 'cancelled');
+}
+
+async function finishUnsuccessfulScan(
+  runId: number,
+  summary: ScanSummary,
+  state: 'failed' | 'cancelled',
+): Promise<void> {
+  const client = await pool.connect();
+  try {
+    await client.query('begin');
+    const result = await client.query(
+      `update scan_runs set state=$2,summary=$3,completed_at=now() where id=$1 and state='running'`,
+      [runId, state, JSON.stringify(summary)],
+    );
+    if (result.rowCount) await finalizeRequestedScan(client, runId, state);
+    await client.query('commit');
+  } catch (error) {
+    await client.query('rollback');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function finalizeRequestedScan(
+  client: import('pg').PoolClient,
+  runId: number,
+  state: 'completed' | 'failed' | 'cancelled',
+): Promise<void> {
+  const request = await client.query<{
+    id: string;
+    root_id: string;
+    follow_up_requested: boolean;
+    follow_up_trigger: string | null;
+    cancel_requested_at: Date | null;
+  }>(
+    `select id,root_id,follow_up_requested,follow_up_trigger,cancel_requested_at from scan_requests
+     where scan_run_id=$1 for update`,
+    [runId],
   );
+  const row = request.rows[0];
+  if (!row) return; // legacy M1 queue run
+  const terminal = row.cancel_requested_at ? 'cancelled' : state;
+  await client.query(
+    `update scan_requests set state=$2,finished_at=now(),updated_at=now(),error_code=case when $2='failed' then 'scan_failed' else null end where id=$1`,
+    [row.id, terminal],
+  );
+  // Cancellation applies to this request/run only. A coalesced request is explicit operator work
+  // and must survive, whereas a lone cancelled request creates no surprise retry.
+  if (row.follow_up_requested)
+    await client.query(
+      `insert into scan_requests(id,root_id,trigger,state) values($1,$2,$3,'queued') on conflict do nothing`,
+      [randomUUID(), row.root_id, scanTrigger(row.follow_up_trigger ?? 'periodic')],
+    );
 }
 
 export type ValidationIntent = Readonly<{

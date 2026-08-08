@@ -105,6 +105,9 @@ importers:
       '@gutter/page-validator':
         specifier: workspace:*
         version: file:packages/page-validator(@types/node@24.13.3)
+      chokidar:
+        specifier: 5.0.0
+        version: 5.0.0
       pg-boss:
         specifier: 12.27.0
         version: 12.27.0
@@ -1691,6 +1694,13 @@ packages:
       }
     engines: { node: '>= 14.16.0' }
 
+  chokidar@5.0.0:
+    resolution:
+      {
+        integrity: sha512-TQMmc3w+5AxjpL8iIiwebF73dRDF4fBIieAqGn9RGCWaEVwQ6Fb2cGe31Yns0RRIzii5goJ1Y7xbMwo1TxMplw==,
+      }
+    engines: { node: '>= 20.19.0' }
+
   clsx@2.1.1:
     resolution:
       {
@@ -2179,6 +2189,13 @@ packages:
         integrity: sha512-GDhwkLfywWL2s6vEjyhri+eXmfH6j1L7JE27WhqLeYzoh/A3DBaYGEj2H/HFZCn/kMfim73FXxEJTw06WtxQwg==,
       }
     engines: { node: '>= 14.18.0' }
+
+  readdirp@5.1.1:
+    resolution:
+      {
+        integrity: sha512-Kko+Y5XQ6fM+Ce3dq3m9YGxnacYZYl9cA1wZjaF3Vbry2L3i1qVg8+CAgNPsXRArPMUMCaOR7oa9Nqntc43JKA==,
+      }
+    engines: { node: '>= 20.19.0' }
 
   real-require@0.2.0:
     resolution:
@@ -3085,6 +3102,10 @@ snapshots:
     dependencies:
       readdirp: 4.1.2
 
+  chokidar@5.0.0:
+    dependencies:
+      readdirp: 5.1.1
+
   clsx@2.1.1: {}
 
   cookie@0.6.0: {}
@@ -3347,6 +3368,8 @@ snapshots:
   quick-format-unescaped@4.0.4: {}
 
   readdirp@4.1.2: {}
+
+  readdirp@5.1.1: {}
 
   real-require@0.2.0: {}
 

@@ -9,8 +9,8 @@
 
 - [ ] M1-1 Operator-configured allowed roots; reject symlinks and overlapping roots.
 - [x] M1-2 Bounded CBZ/image-directory scanner with natural ordering and quarantine.
-- [ ] M1-3 ComicInfo tolerant metadata fallback and user/admin hide state.
-- [ ] M2-1 Watcher hints, 15-minute reconcile, and manual full scan.
+- [x] M1-3 ComicInfo tolerant metadata fallback and global admin hide state.
+- [x] M2-1 Durable 15-minute reconcile and manual full scan, with optional default-off watcher hints.
 - [ ] M2-2 Series/publication/release/page metadata and creators/groups.
 
 ## Epics
