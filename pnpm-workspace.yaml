@@ -1,0 +1,11 @@
+packages:
+  - apps/*
+  - packages/*
+injectWorkspacePackages: true
+dedupeInjectedDeps: false
+allowBuilds:
+  esbuild: true
+minimumReleaseAgeExclude:
+  - '@sveltejs/load-config@0.2.2'
+  - svelte-check@4.7.5
+  - tsx@4.23.11

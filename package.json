@@ -1,0 +1,30 @@
+{
+  "name": "gutter",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MIT",
+  "packageManager": "pnpm@11.20.0",
+  "engines": {
+    "node": "24.19.0",
+    "pnpm": "11.20.0"
+  },
+  "scripts": {
+    "format": "prettier --write .",
+    "check": "prettier --check .",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "unit": "node --test tests/unit.mjs",
+    "build": "turbo run build",
+    "generate:pwa-icons": "node scripts/generate-pwa-icons.mjs",
+    "audit:licenses": "node scripts/audit-licenses.mjs",
+    "dev": "docker compose up --build",
+    "migrate": "pnpm --filter @gutter/db migrate"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.3",
+    "prettier": "3.8.1",
+    "sharp": "0.35.3",
+    "turbo": "2.10.7",
+    "typescript": "5.9.3"
+  }
+}

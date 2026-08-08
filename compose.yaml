@@ -1,0 +1,76 @@
+services:
+  db:
+    image: postgres:18.1
+    environment:
+      POSTGRES_DB: gutter
+      POSTGRES_USER: gutter
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
+    volumes: [db-data:/var/lib/postgresql]
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U gutter -d gutter]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [internal]
+  migrate:
+    build: { context: ., target: migrate }
+    command: [node, --import, tsx, src/migrate.ts]
+    environment:
+      DATABASE_URL: 'postgresql://gutter:${POSTGRES_PASSWORD:-}@db:5432/gutter'
+    depends_on: { db: { condition: service_healthy } }
+    restart: 'no'
+    networks: [internal]
+  api:
+    build: { context: ., target: api }
+    command: [node, --import, tsx, src/index.ts]
+    environment:
+      DATABASE_URL: 'postgresql://gutter:${POSTGRES_PASSWORD:-}@db:5432/gutter'
+    depends_on: { migrate: { condition: service_completed_successfully } }
+    healthcheck:
+      test:
+        [
+          CMD,
+          node,
+          -e,
+          "fetch('http://127.0.0.1:3000/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [internal]
+  worker:
+    build: { context: ., target: worker }
+    command: [node, --import, tsx, src/index.ts]
+    environment:
+      DATABASE_URL: 'postgresql://gutter:${POSTGRES_PASSWORD:-}@db:5432/gutter'
+    depends_on: { migrate: { condition: service_completed_successfully } }
+    volumes: [cache-data:/cache]
+    networks: [internal]
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    depends_on: { api: { condition: service_healthy } }
+    ports: ['8080:8080']
+    healthcheck:
+      test: [CMD-SHELL, 'wget -q -O /dev/null http://127.0.0.1:8080/']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [internal]
+  test:
+    build: { context: ., target: api }
+    profiles: [test]
+    command:
+      - sh
+      - -ec
+      - >-
+        node -e "Promise.all(['http://web:8080/api/health','http://web:8080/manifest.webmanifest','http://web:8080/service-worker.js'].map(url=>fetch(url))).then(async rs=>{if(!rs.every(r=>r.ok))throw Error('smoke response');if(!(await rs[1].text()).includes('192x192'))throw Error('manifest');}).catch(e=>{console.error(e);process.exit(1)})"
+    depends_on: { api: { condition: service_healthy }, web: { condition: service_healthy } }
+    networks: [internal]
+volumes:
+  db-data:
+  cache-data:
+networks:
+  internal:
+    internal: true

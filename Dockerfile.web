@@ -1,0 +1,15 @@
+FROM node:24.19.0-bookworm-slim AS build
+WORKDIR /src
+RUN corepack enable && corepack prepare pnpm@11.20.0 --activate
+COPY . .
+RUN pnpm install --frozen-lockfile && pnpm --filter @gutter/web build
+
+FROM caddy:2.10.2-alpine
+RUN addgroup -S -g 10001 gutter \
+  && adduser -S -D -H -u 10001 -G gutter gutter \
+  && mkdir -p /config /data \
+  && chown gutter:gutter /config /data
+COPY --chown=root:gutter Caddyfile /etc/caddy/Caddyfile
+RUN caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+COPY --from=build --chown=root:root /src/apps/web/build /srv
+USER gutter

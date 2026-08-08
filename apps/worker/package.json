@@ -1,0 +1,21 @@
+{
+  "name": "@gutter/worker",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "lint": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc"
+  },
+  "dependencies": {
+    "@gutter/config": "workspace:*",
+    "@gutter/db": "workspace:*",
+    "pg-boss": "12.27.0",
+    "pino": "10.3.1",
+    "tsx": "4.23.11"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
+  }
+}
