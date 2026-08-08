@@ -36,4 +36,16 @@ export function allowedRootsJson(): string {
   return process.env.GUTTER_ALLOWED_ROOTS_JSON ?? '[]';
 }
 
-export const schemaVersion = '0003_comicinfo_metadata';
+export const schemaVersion = '0004_page_validation';
+
+/** Bounded worker-only deadlines; values are deliberately not accepted from job payloads. */
+export function validationTimeouts(): Readonly<{ itemMs: number }> {
+  const parsed = z.coerce
+    .number()
+    .int()
+    .min(1_000)
+    .max(3_600_000)
+    .safeParse(process.env.GUTTER_VALIDATION_ITEM_TIMEOUT_MS ?? '900000');
+  if (!parsed.success) throw new Error('GUTTER_VALIDATION_ITEM_TIMEOUT_MS must be 1000..3600000');
+  return { itemMs: parsed.data };
+}

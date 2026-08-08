@@ -31,6 +31,8 @@ const summary: ScanSummary = {
   pages: 2,
   reasons: {},
   metadataIssues: {},
+  updated: 0,
+  unchanged: 0,
 };
 const item: ScanItem = {
   relativePath: 'chapter',

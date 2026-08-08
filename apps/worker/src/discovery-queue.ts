@@ -19,7 +19,11 @@ export type DiscoveryQueueDependencies = Readonly<{
     signal: AbortSignal,
   ) => Promise<{ items: readonly ScanItem[]; summary: ScanSummary }>;
   startScanRun: (rootId: string, generation: string) => Promise<number>;
-  persistScanItems: (runId: number, rootId: string, items: readonly ScanItem[]) => Promise<void>;
+  persistScanItems: (
+    runId: number,
+    rootId: string,
+    items: readonly ScanItem[],
+  ) => Promise<{ updated: number; unchanged: number }>;
   completeScanRun: (runId: number, rootId: string, summary: ScanSummary) => Promise<void>;
   failScanRun: (runId: number, summary: ScanSummary) => Promise<void>;
   cancelScanRun: (runId: number, summary: ScanSummary) => Promise<void>;
@@ -40,6 +44,8 @@ const failedSummary = (): ScanSummary => ({
   pages: 0,
   reasons: {},
   metadataIssues: {},
+  updated: 0,
+  unchanged: 0,
 });
 
 function aborted(error: unknown, signal: AbortSignal): boolean {
@@ -82,9 +88,10 @@ export async function startDiscoveryQueue(deps: DiscoveryQueueDependencies): Pro
       const runId = await deps.startScanRun(root.id, deps.configGeneration);
       try {
         const scanned = await deps.scanRoot(root.canonicalPath, deps.signal);
-        await deps.persistScanItems(runId, root.id, scanned.items);
-        await deps.completeScanRun(runId, root.id, scanned.summary);
-        deps.log.info({ rootId: root.id, summary: scanned.summary }, 'discovery scan completed');
+        const outcome = await deps.persistScanItems(runId, root.id, scanned.items);
+        const summary = { ...scanned.summary, ...outcome };
+        await deps.completeScanRun(runId, root.id, summary);
+        deps.log.info({ rootId: root.id, summary }, 'discovery scan completed');
       } catch (error) {
         const operation = aborted(error, deps.signal) ? deps.cancelScanRun : deps.failScanRun;
         try {

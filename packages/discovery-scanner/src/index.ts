@@ -1,5 +1,6 @@
 import { constants } from 'node:fs';
 import { lstat, open, opendir, realpath } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { basename, join, posix, relative as relativePath } from 'node:path';
 import { maxComicInfoBytes, parseComicInfo, type ComicInfoParseResult } from '@gutter/comic-info';
 import yauzl from 'yauzl';
@@ -32,11 +33,29 @@ export type ScanItem = Readonly<{
   kind: 'directory' | 'cbz';
   size: number;
   mtimeMs: number;
-  pages: readonly string[];
+  pages: readonly (ScanPage | string)[];
+  /** A digest of discovery observations, not a content hash. */
+  manifestSha256?: string;
   comicInfo?: ComicInfoParseResult | null;
   scanIssues?: readonly ScanIssue[];
   quarantinedReason: ScanReason | null;
 }>;
+
+export type ScanPage = Readonly<{
+  locator: string;
+  /** ZIP central-directory facts or a no-follow directory-file observation. */
+  observed: Readonly<{
+    compressedSize?: number;
+    crc32?: number;
+    mtimeNs?: string;
+    size: number;
+    uncompressedSize?: number;
+  }>;
+}>;
+
+export function scanPage(page: ScanPage | string): ScanPage {
+  return typeof page === 'string' ? { locator: page, observed: { size: 0 } } : page;
+}
 
 export type ScanSummary = {
   discovered: number;
@@ -48,6 +67,9 @@ export type ScanSummary = {
   pages: number;
   reasons: Partial<Record<ScanReason, number>>;
   metadataIssues: Partial<Record<string, number>>;
+  /** Database-derived classification; filesystem discovery must not guess these values. */
+  updated: number;
+  unchanged: number;
 };
 
 export type ScanResult = Readonly<{ items: readonly ScanItem[]; summary: ScanSummary }>;
@@ -66,6 +88,27 @@ function comparePages(a: string, b: string): number {
     b.normalize('NFC').normalize('NFKC'),
   );
   return normalized || (a < b ? -1 : a > b ? 1 : 0);
+}
+
+function pageOrder(a: ScanPage, b: ScanPage): number {
+  return comparePages(a.locator, b.locator);
+}
+
+export function manifestSha256(
+  kind: ScanItem['kind'],
+  size: number,
+  mtimeMs: number,
+  pages: readonly ScanPage[],
+): string {
+  const hash = createHash('sha256');
+  hash.update(`${kind}\u0000${size}\u0000${mtimeMs}\u0000`);
+  for (const page of pages) {
+    const value = page.observed;
+    hash.update(
+      `${page.locator.normalize('NFC')}\u0000${value.size}\u0000${value.mtimeNs ?? ''}\u0000${value.compressedSize ?? ''}\u0000${value.uncompressedSize ?? ''}\u0000${value.crc32 ?? ''}\u0000`,
+    );
+  }
+  return hash.digest('hex');
 }
 
 function checkAborted(signal?: AbortSignal): void {
@@ -153,7 +196,7 @@ export async function inspectCbz(
           }
           zip = zipFile;
           const archive = zipFile;
-          const pages: string[] = [];
+          const pages: ScanPage[] = [];
           const scanIssues: ScanIssue[] = [];
           let comicInfo: ComicInfoParseResult | null = null;
           const comicInfoEntries: yauzl.Entry[] = [];
@@ -218,7 +261,7 @@ export async function inspectCbz(
             if (!reason) {
               const locators = new Set<string>();
               for (const page of pages) {
-                const locator = page.normalize('NFC');
+                const locator = page.locator.normalize('NFC');
                 if (locators.has(locator)) {
                   reason = 'duplicate_page_locator';
                   break;
@@ -227,7 +270,7 @@ export async function inspectCbz(
               }
             }
             finish({
-              pages: reason ? [] : pages.sort(comparePages),
+              pages: reason ? [] : pages.sort(pageOrder),
               comicInfo: reason ? null : comicInfo,
               scanIssues,
               quarantinedReason: reason,
@@ -257,7 +300,15 @@ export async function inspectCbz(
             )
               comicInfoEntries.push(entry);
             else if (!entry.fileName.endsWith('/') && isImage(basename(entry.fileName)))
-              pages.push(entry.fileName);
+              pages.push({
+                locator: entry.fileName,
+                observed: {
+                  compressedSize: entry.compressedSize,
+                  crc32: entry.crc32 >>> 0,
+                  size: entry.uncompressedSize,
+                  uncompressedSize: entry.uncompressedSize,
+                },
+              });
             if (reason) void complete();
             else if (signal?.aborted) abort();
             else archive.readEntry();
@@ -327,6 +378,8 @@ export async function scanRoot(root: string, signal?: AbortSignal): Promise<Scan
     pages: 0,
     reasons: {},
     metadataIssues: {},
+    updated: 0,
+    unchanged: 0,
   };
   const items: ScanItem[] = [];
   const recordMetadataIssues = (issues: readonly ScanIssue[]): void => {
@@ -375,6 +428,12 @@ export async function scanRoot(root: string, signal?: AbortSignal): Promise<Scan
               size: stat.size,
               mtimeMs: stat.mtimeMs,
               ...inspected,
+              manifestSha256: manifestSha256(
+                'cbz',
+                stat.size,
+                stat.mtimeMs,
+                inspected.pages.map(scanPage),
+              ),
             });
             recordMetadataIssues([
               ...(inspected.scanIssues ?? []),
@@ -405,16 +464,40 @@ export async function scanRoot(root: string, signal?: AbortSignal): Promise<Scan
     }
     if (direct.length && descendant === 'none') {
       const stat = await lstat(canonicalDirectory);
-      const pages = direct.sort(comparePages);
+      const pages: ScanPage[] = [];
+      for (const name of direct.sort(comparePages)) {
+        const path = join(canonicalDirectory, name);
+        const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+        try {
+          const stat = await handle.stat({ bigint: true });
+          if (!stat.isFile()) {
+            summary.skipped += 1;
+            continue;
+          }
+          pages.push({
+            locator: name,
+            observed: { size: Number(stat.size), mtimeNs: stat.mtimeNs.toString() },
+          });
+        } finally {
+          await handle.close();
+        }
+      }
       const comicInfo = await inspectDirectoryComicInfo(canonicalDirectory, files);
+      const directoryStat = await lstat(canonicalDirectory);
       items.push({
         relativePath: relative(canonicalRoot, canonicalDirectory),
         displayName:
           relative(canonicalRoot, canonicalDirectory) === '.' ? basename(canonicalRoot) : undefined,
         kind: 'directory',
-        size: stat.size,
-        mtimeMs: stat.mtimeMs,
+        size: directoryStat.size,
+        mtimeMs: directoryStat.mtimeMs,
         pages,
+        manifestSha256: manifestSha256(
+          'directory',
+          directoryStat.size,
+          directoryStat.mtimeMs,
+          pages,
+        ),
         ...comicInfo,
         quarantinedReason: null,
       });

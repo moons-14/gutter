@@ -23,10 +23,10 @@ discarded. The allowlist accepts MIT, Apache-2.0, ISC, BSD-2-Clause, BSD-3-Claus
 labels fail closed.
 
 The sole non-allowlist exception is `@img/sharp-libvips-linux-x64@1.3.2` under
-`LGPL-3.0-or-later`. Its installed manifest identifies it as sharp's Linux x64 prebuilt libvips
-artifact and exports the shared object `lib/libvips-cpp.so.8.18.3`; sharp declares the artifact as
-an optional platform dependency. This package/version/license tuple is reviewed as dynamically
-linked native support for the development-time sharp image tool, not as a blanket LGPL approval.
+`LGPL-3.0-or-later`. It is a runtime optional platform dependency of Apache-2.0 `sharp@0.35.3`,
+and the worker's page validator dynamically loads its bundled native `libvips` shared object.
+Distribution of the worker image must retain the applicable LGPL notices and provide the required
+corresponding-source/relinking information; this exception is not a blanket LGPL approval.
 
 ## Future, not-installed decision
 

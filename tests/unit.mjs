@@ -67,7 +67,10 @@ test('discovery scanner recognizes CBZ pages, rejects unsafe archives, and enfor
   const directory = await mkdtemp(join(tmpdir(), 'gutter-scanner-'));
   const archive = join(directory, 'comic.CBZ');
   await writeFile(archive, zip([{ name: '10.JPG' }, { name: '2.jpg' }, { name: '１.png' }]));
-  assert.deepEqual((await inspectCbz(archive)).pages, ['１.png', '2.jpg', '10.JPG']);
+  assert.deepEqual(
+    (await inspectCbz(archive)).pages.map((page) => page.locator),
+    ['１.png', '2.jpg', '10.JPG'],
+  );
   assert.equal(
     (await scanRoot(directory)).items.some((item) => item.relativePath === 'comic.CBZ'),
     true,
@@ -227,7 +230,10 @@ test('CBZ inspection supports Zip64 descriptors and preserves ordered locators',
     [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
   );
   const inspected = await inspectCbz(archive);
-  assert.deepEqual(inspected.pages, ['第1話/001.jpg']);
+  assert.deepEqual(
+    inspected.pages.map((page) => page.locator),
+    ['第1話/001.jpg'],
+  );
   assert.equal(inspected.pages.length, 1);
   if (process.platform === 'linux') {
     const descriptors = async () => (await readdir('/proc/self/fd')).length;
@@ -306,8 +312,8 @@ async function withEnvironment(values, run) {
   }
 }
 
-test('M1 documents the ComicInfo metadata schema version', () => {
-  assert.equal(schemaVersion, '0003_comicinfo_metadata');
+test('M1 documents the page-validation schema version', () => {
+  assert.equal(schemaVersion, '0004_page_validation');
 });
 
 test('config accepts a direct secret only', async () => {
