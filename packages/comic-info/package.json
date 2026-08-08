@@ -1,5 +1,5 @@
 {
-  "name": "@gutter/discovery-scanner",
+  "name": "@gutter/comic-info",
   "version": "0.0.0",
   "private": true,
   "license": "MIT",
@@ -11,12 +11,9 @@
     "build": "tsc"
   },
   "dependencies": {
-    "@gutter/comic-info": "workspace:*",
-    "yauzl": "3.4.0"
+    "saxes": "6.0.0"
   },
   "devDependencies": {
-    "@types/node": "24.13.3",
-    "@types/yauzl": "3.4.0",
     "typescript": "5.9.3"
   }
 }

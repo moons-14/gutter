@@ -30,6 +30,7 @@ const summary: ScanSummary = {
   mixedParents: 0,
   pages: 2,
   reasons: {},
+  metadataIssues: {},
 };
 const item: ScanItem = {
   relativePath: 'chapter',
@@ -317,6 +318,181 @@ try {
     [{ locator: '1.jpg' }, { locator: '2.jpg' }],
   );
 
+  const metadataRun = await startScanRun('integration-alpha', generation);
+  const metadataItem: ScanItem = {
+    ...item,
+    comicInfo: {
+      document: {
+        fields: { title: 'Local title' },
+        pageAnnotations: [{ image: 0, type: 'FrontCover' }],
+        claimedPageCount: 7,
+        sha256: 'a'.repeat(64),
+      },
+      issues: [{ code: 'test_metadata_warning', rule: 'test-rule' }],
+    },
+  };
+  const cappedMetadataItem: ScanItem = {
+    ...item,
+    relativePath: 'issue-cap',
+    scanIssues: Array.from({ length: 98 }, (_, index) => ({
+      code: `test_capped_warning_${index}`,
+      rule: 'test-rule',
+      detail: 'd'.repeat(300),
+    })),
+    comicInfo: {
+      document: {
+        fields: {},
+        pageAnnotations: [{ image: 9, type: 'FrontCover' }],
+        claimedPageCount: 7,
+        sha256: 'b'.repeat(64),
+      },
+      issues: [],
+    },
+  };
+  const rootLevelDirectoryItem: ScanItem = {
+    ...item,
+    relativePath: '.',
+    displayName: 'library-root-images',
+  };
+  await persistScanItems(metadataRun, 'integration-alpha', [
+    metadataItem,
+    cappedMetadataItem,
+    rootLevelDirectoryItem,
+  ]);
+  await completeScanRun(metadataRun, 'integration-alpha', summary);
+  const metadataId = (
+    await pool.query<{ id: number }>(
+      'select id from source_items where root_id=$1 and relative_path=$2',
+      ['integration-alpha', 'chapter'],
+    )
+  ).rows[0]!.id;
+  assert.equal(
+    (
+      await pool.query('select annotation from source_page_annotations where source_item_id=$1', [
+        metadataId,
+      ])
+    ).rowCount,
+    1,
+  );
+  const cappedIssues = await pool.query<{
+    count: number;
+    longest_detail: number;
+    codes: string[];
+  }>(
+    `select count(*)::int as count, max(length(detail))::int as longest_detail,
+       array_agg(code order by code, rule, detail) as codes
+     from source_metadata_issues e join source_items i on i.id=e.source_item_id
+     where i.root_id=$1 and i.relative_path=$2`,
+    ['integration-alpha', 'issue-cap'],
+  );
+  assert.equal(cappedIssues.rows[0]?.count, 100);
+  assert.equal(cappedIssues.rows[0]?.longest_detail, 256);
+  assert.equal(cappedIssues.rows[0]?.codes.includes('page_count_mismatch'), true);
+  assert.equal(cappedIssues.rows[0]?.codes.includes('page_image_out_of_range'), true);
+  const rootLevelMetadata = await pool.query<{ title: string; series: string }>(
+    `select m.effective->>'title' as title, m.effective->>'series' as series
+     from source_metadata m join source_items i on i.id=m.source_item_id
+     where i.root_id=$1 and i.relative_path=$2`,
+    ['integration-alpha', '.'],
+  );
+  assert.deepEqual(rootLevelMetadata.rows[0], {
+    title: 'library-root-images',
+    series: 'library-root-images',
+  });
+  const capRepeatRun = await startScanRun('integration-alpha', generation);
+  await persistScanItems(capRepeatRun, 'integration-alpha', [
+    metadataItem,
+    cappedMetadataItem,
+    rootLevelDirectoryItem,
+  ]);
+  await completeScanRun(capRepeatRun, 'integration-alpha', summary);
+  const cappedIssuesRepeated = await pool.query<{ codes: string[] }>(
+    `select array_agg(code order by code, rule, detail) as codes
+     from source_metadata_issues e join source_items i on i.id=e.source_item_id
+     where i.root_id=$1 and i.relative_path=$2`,
+    ['integration-alpha', 'issue-cap'],
+  );
+  assert.deepEqual(cappedIssuesRepeated.rows[0]?.codes, cappedIssues.rows[0]?.codes);
+  assert.equal(
+    (
+      await pool.query(
+        'select root_id, relative_path, code, detected_at, last_seen_at, retry_state from source_metadata_error_list where root_id=$1 and relative_path=$2 and code=$3',
+        ['integration-alpha', 'chapter', 'test_metadata_warning'],
+      )
+    ).rowCount,
+    1,
+  );
+  assert.equal(
+    (await pool.query('select * from visible_source_items where id=$1', [metadataId])).rowCount,
+    1,
+  );
+  await pool.query(
+    'insert into global_source_suppressions (source_item_id, reason) values ($1,$2)',
+    [metadataId, 'test'],
+  );
+  assert.equal(
+    (await pool.query('select * from visible_source_items where id=$1', [metadataId])).rowCount,
+    0,
+  );
+  const deactivateSuppressedRun = await startScanRun('integration-alpha', generation);
+  await completeScanRun(deactivateSuppressedRun, 'integration-alpha', {
+    ...summary,
+    discovered: 0,
+    pages: 0,
+  });
+  assert.equal(
+    (await pool.query('select active from source_items where id=$1', [metadataId])).rows[0]?.active,
+    false,
+  );
+  assert.equal(
+    (
+      await pool.query('select * from global_source_suppressions where source_item_id=$1', [
+        metadataId,
+      ])
+    ).rowCount,
+    1,
+  );
+  const replacementRun = await startScanRun('integration-alpha', generation);
+  await persistScanItems(replacementRun, 'integration-alpha', [item]);
+  await completeScanRun(replacementRun, 'integration-alpha', summary);
+  assert.equal(
+    (await pool.query('select * from visible_source_items where id=$1', [metadataId])).rowCount,
+    0,
+  );
+  assert.equal(
+    (
+      await pool.query('select * from source_page_annotations where source_item_id=$1', [
+        metadataId,
+      ])
+    ).rowCount,
+    0,
+  );
+  assert.equal(
+    (
+      await pool.query(
+        `select * from source_metadata_error_list
+         where root_id=$1 and relative_path=$2 and code=$3`,
+        ['integration-alpha', 'chapter', 'test_metadata_warning'],
+      )
+    ).rowCount,
+    0,
+  );
+  assert.equal(
+    (
+      await pool.query(
+        `select * from source_metadata_issues e join source_items i on i.id=e.source_item_id
+         where i.root_id=$1 and i.relative_path=$2 and e.code=$3 and e.resolved_at is not null`,
+        ['integration-alpha', 'chapter', 'test_metadata_warning'],
+      )
+    ).rowCount,
+    1,
+  );
+  await pool.query('delete from global_source_suppressions where source_item_id=$1', [metadataId]);
+  assert.equal(
+    (await pool.query('select * from visible_source_items where id=$1', [metadataId])).rowCount,
+    1,
+  );
+
   const secondRun = await startScanRun('integration-alpha', generation);
   await persistScanItems(secondRun, 'integration-alpha', [item]);
   await completeScanRun(secondRun, 'integration-alpha', summary);
@@ -327,6 +503,38 @@ try {
         ['integration-alpha', 'chapter', secondRun],
       )
     ).rows[0]?.count,
+    1,
+  );
+
+  const inactiveIssueRun = await startScanRun('integration-alpha', generation);
+  const inactiveIssueItem: ScanItem = {
+    ...item,
+    relativePath: 'inactive-issue',
+    scanIssues: [{ code: 'inactive_warning', rule: 'test-rule', detail: 'kept in history' }],
+  };
+  await persistScanItems(inactiveIssueRun, 'integration-alpha', [item, inactiveIssueItem]);
+  await completeScanRun(inactiveIssueRun, 'integration-alpha', summary);
+  const deactivateInactiveIssueRun = await startScanRun('integration-alpha', generation);
+  await persistScanItems(deactivateInactiveIssueRun, 'integration-alpha', [item]);
+  await completeScanRun(deactivateInactiveIssueRun, 'integration-alpha', summary);
+  assert.equal(
+    (
+      await pool.query(
+        `select * from source_metadata_error_list
+         where root_id=$1 and relative_path=$2 and code=$3`,
+        ['integration-alpha', 'inactive-issue', 'inactive_warning'],
+      )
+    ).rowCount,
+    0,
+  );
+  assert.equal(
+    (
+      await pool.query(
+        `select * from source_metadata_issues e join source_items i on i.id=e.source_item_id
+         where i.root_id=$1 and i.relative_path=$2 and e.code=$3 and e.resolved_at is null`,
+        ['integration-alpha', 'inactive-issue', 'inactive_warning'],
+      )
+    ).rowCount,
     1,
   );
 

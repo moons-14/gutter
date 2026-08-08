@@ -13,7 +13,7 @@
     "check": "prettier --check .",
     "lint": "turbo run lint",
     "typecheck": "turbo run typecheck",
-    "unit": "node --test tests/unit.mjs",
+    "unit": "tsx --test tests/unit.mjs",
     "integration:library-roots": "pnpm --filter @gutter/db exec tsx ../../tests/integration/library-roots.mts",
     "build": "turbo run build",
     "generate:pwa-icons": "node scripts/generate-pwa-icons.mjs",
@@ -25,6 +25,7 @@
     "@types/node": "24.13.3",
     "prettier": "3.8.1",
     "sharp": "0.35.3",
+    "tsx": "4.23.11",
     "turbo": "2.10.7",
     "typescript": "5.9.3"
   }

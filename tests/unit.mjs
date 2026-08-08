@@ -13,6 +13,7 @@ const {
   validateLibraryRoots,
 } = await import('../packages/library-roots/src/index.ts');
 const { inspectCbz, scanRoot } = await import('../packages/discovery-scanner/src/index.ts');
+const { parseComicInfo } = await import('../packages/comic-info/src/index.ts');
 const encryptedCbz = Buffer.from(
   'UEsDBAoACQAAAIVOCF2vkRsVIQAAABUAAAAIABwAcGFnZS5qcGdVVAkAA0r8dmpK/HZqdXgLAAEE6AMAAARkAAAADs+a2joAGpSwmOXBRggO4AmBwyUoGVsL/3/bZ+ZlJe4kUEsHCK+RGxUhAAAAFQAAAFBLAQIeAwoACQAAAIVOCF2vkRsVIQAAABUAAAAIABgAAAAAAAEAAACkgQAAAABwYWdlLmpwZ1VUBQADSvx2anV4CwABBOgDAAAEZAAAAFBLBQYAAAAAAQABAE4AAABzAAAAAAA=',
   'base64',
@@ -67,6 +68,10 @@ test('discovery scanner recognizes CBZ pages, rejects unsafe archives, and enfor
   const archive = join(directory, 'comic.CBZ');
   await writeFile(archive, zip([{ name: '10.JPG' }, { name: '2.jpg' }, { name: '１.png' }]));
   assert.deepEqual((await inspectCbz(archive)).pages, ['１.png', '2.jpg', '10.JPG']);
+  assert.equal(
+    (await scanRoot(directory)).items.some((item) => item.relativePath === 'comic.CBZ'),
+    true,
+  );
 
   await writeFile(join(directory, 'encrypted.cbz'), encryptedCbz);
   assert.equal(
@@ -90,6 +95,107 @@ test('discovery scanner recognizes CBZ pages, rejects unsafe archives, and enfor
     (await inspectCbz(archive, { entries: 1 })).quarantinedReason,
     'archive_entry_limit',
   );
+});
+
+test('ComicInfo is bounded, UTF-8-only, and preserves source page authority', async () => {
+  const benign = parseComicInfo(
+    Buffer.from(
+      '<?xml version="1.0" encoding="UTF-8"?><ComicInfo><Title>A &amp; B</Title><Writer>One, Two</Writer><Pages><Page Image="0" Type="FrontCover"/></Pages></ComicInfo>',
+    ),
+  );
+  assert.equal(benign.document?.fields.title, 'A & B');
+  assert.deepEqual(benign.document?.fields.writers, ['One', 'Two']);
+  assert.equal(benign.document?.pageAnnotations[0]?.type, 'FrontCover');
+  const edgeCases = parseComicInfo(
+    Buffer.from(
+      '<ComicInfo><Title> </Title><Writer>One, , One, Two</Writer><Pages><Page Image="0"/><Page Image="0"/></Pages></ComicInfo>',
+    ),
+  );
+  assert.equal(edgeCases.document?.fields.title, undefined);
+  assert.deepEqual(edgeCases.document?.fields.writers, ['One', 'Two']);
+  assert.equal(edgeCases.document?.pageAnnotations.length, 1);
+  assert.equal(
+    edgeCases.issues.some((entry) => entry.code === 'page_duplicate_image'),
+    true,
+  );
+  const longScalar = parseComicInfo(
+    Buffer.from(`<ComicInfo><Title>${'a'.repeat(4097)}</Title></ComicInfo>`),
+  );
+  assert.equal(longScalar.document?.fields.title.length, 4097);
+  const tooLongScalar = parseComicInfo(
+    Buffer.from(`<ComicInfo><Title>${'a'.repeat(64 * 1024 + 1)}</Title></ComicInfo>`),
+  );
+  assert.equal(tooLongScalar.document?.fields.title, undefined);
+  for (const xml of [
+    '<!DOCTYPE ComicInfo [<!ENTITY x "x">]><ComicInfo/>',
+    '<x:ComicInfo xmlns:x="urn:x"/>',
+    '<ComicInfo xmlns:x="urn:x"><Title>ok</Title></ComicInfo>',
+    '<ComicInfo><Title x:flag="1">ok</Title></ComicInfo>',
+  ])
+    assert.equal(parseComicInfo(Buffer.from(xml)).document, null);
+  assert.equal(
+    parseComicInfo(
+      Buffer.from('<ComicInfo><Notes><![CDATA[literal <!DOCTYPE text]]></Notes></ComicInfo>'),
+    ).document?.fields.notes,
+    'literal <!DOCTYPE text',
+  );
+  assert.equal(
+    parseComicInfo(
+      Buffer.from(
+        '<ComicInfo><!-- literal <!DOCTYPE text --><Title>comment-safe</Title></ComicInfo>',
+      ),
+    ).document?.fields.title,
+    'comment-safe',
+  );
+  for (const [field, value] of [
+    ['Manga', 'Unknown'],
+    ['BlackAndWhite', 'Unknown'],
+    ['AgeRating', 'Unknown'],
+    ['CommunityRating', '1'],
+  ])
+    assert.equal(
+      parseComicInfo(
+        Buffer.from(
+          `<ComicInfo><${field}>${value}</${field}><${field}>${value}</${field}></ComicInfo>`,
+        ),
+      ).document,
+      null,
+    );
+
+  const directory = await mkdtemp(join(tmpdir(), 'gutter-comicinfo-'));
+  await mkdir(join(directory, 'chapter'));
+  await writeFile(join(directory, 'chapter', '1.jpg'), 'page');
+  await writeFile(
+    join(directory, 'chapter', 'comicinfo.xml'),
+    '<ComicInfo><Title>Metadata title</Title><Pages><Page Image="7"/></Pages></ComicInfo>',
+  );
+  const scanned = await scanRoot(directory);
+  assert.equal(scanned.items[0]?.comicInfo?.document?.fields.title, 'Metadata title');
+  assert.equal(scanned.items[0]?.comicInfo?.document?.pageAnnotations[0]?.image, 7);
+  assert.equal(
+    scanned.items[0]?.scanIssues?.some((entry) => entry.code === 'comicinfo_noncanonical_name'),
+    true,
+  );
+
+  const archive = join(directory, 'metadata.cbz');
+  await writeFile(
+    archive,
+    zip([
+      {
+        name: 'ComicInfo.xml',
+        data: Buffer.from('<ComicInfo><Title>CBZ metadata</Title></ComicInfo>'),
+      },
+      { name: '001.jpg' },
+    ]),
+  );
+  assert.equal((await inspectCbz(archive)).comicInfo?.document?.fields.title, 'CBZ metadata');
+  const oversized = join(directory, 'oversized.cbz');
+  await writeFile(
+    oversized,
+    zip([{ name: 'ComicInfo.xml', data: Buffer.alloc(1024 * 1024 + 1, 65) }, { name: '001.jpg' }]),
+  );
+  assert.equal((await inspectCbz(oversized)).comicInfo?.document, null);
+  assert.equal((await inspectCbz(oversized)).comicInfo?.issues[0]?.code, 'document_too_large');
 });
 
 test('CBZ inspection closes its owned descriptor after success and quarantine', async () => {
@@ -200,8 +306,8 @@ async function withEnvironment(values, run) {
   }
 }
 
-test('M1 documents the library roots schema version', () => {
-  assert.equal(schemaVersion, '0002_source_inventory');
+test('M1 documents the ComicInfo metadata schema version', () => {
+  assert.equal(schemaVersion, '0003_comicinfo_metadata');
 });
 
 test('config accepts a direct secret only', async () => {
