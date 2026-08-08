@@ -37,6 +37,13 @@
       "when": 1786489200000,
       "tag": "0005_reconciliation_control",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1786575600000,
+      "tag": "0006_catalog_domain",
+      "breakpoints": true
     }
   ]
 }

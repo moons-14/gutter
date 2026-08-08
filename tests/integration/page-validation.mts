@@ -107,12 +107,95 @@ try {
     0,
   );
 
+  // A repeated authoritative full scan only updates its source observation.  Catalog projection
+  // rows (including their refresh timestamp) remain byte-for-byte stable when the source inputs
+  // and visibility did not change.
+  const catalogSnapshotSql = `select (select json_agg(x order by x.id) from (
+       select id::text,publication_id::text,source_item_id::text,
+         to_char(updated_at at time zone 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as updated_at
+       from catalog_releases where root_id=$1) x) as releases,
+       (select json_agg(x order by x.release_id,x.entity_id,x.role) from (
+         select release_id::text,entity_id::text,role from catalog_credits
+         where release_id in (select id from catalog_releases where root_id=$1)) x) as credits,
+       (select json_agg(x order by x.series_id) from (
+         select series_id::text,visible_publication_count,
+           to_char(refreshed_at at time zone 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as refreshed_at
+         from catalog_series_list_state where library_id=$1) x) as list_state`;
+  const catalogBefore = await pool.query(catalogSnapshotSql, [rootId]);
   const secondRun = await startScanRun(rootId, generation);
   assert.deepEqual(await persistScanItems(secondRun, rootId, [item]), { updated: 0, unchanged: 1 });
   await completeScanRun(secondRun, rootId, summary);
+  const catalogAfter = await pool.query(catalogSnapshotSql, [rootId]);
+  assert.deepEqual(catalogAfter.rows, catalogBefore.rows);
+
+  // Quarantine changes catalog visibility without changing the source manifest.  It must refresh
+  // only the owning catalog projection and never enqueue/restart page validation.
+  const toggled: ScanItem = { ...item, relativePath: 'quarantine-toggle' };
+  const toggleStart = await startScanRun(rootId, generation);
+  await persistScanItems(toggleStart, rootId, [item, toggled]);
+  await completeScanRun(toggleStart, rootId, { ...summary, discovered: 2, pages: 2 });
+  const toggleId = (
+    await pool.query<{ id: string }>(
+      "select id from source_items where root_id=$1 and relative_path='quarantine-toggle'",
+      [rootId],
+    )
+  ).rows[0]!.id;
+  assert.equal(
+    (
+      await pool.query(
+        "select visible_publication_count from catalog_series_list_state where library_id=$1 and display_name='quarantine-toggle'",
+        [rootId],
+      )
+    ).rows[0]?.visible_publication_count,
+    1,
+  );
+  const quarantineRun = await startScanRun(rootId, generation);
+  assert.deepEqual(
+    await persistScanItems(quarantineRun, rootId, [
+      item,
+      { ...toggled, quarantinedReason: 'zero_supported_pages' },
+    ]),
+    { updated: 0, unchanged: 2 },
+  );
+  await completeScanRun(quarantineRun, rootId, { ...summary, discovered: 2, pages: 2 });
+  assert.equal(
+    (
+      await pool.query(
+        "select visible_publication_count from catalog_series_list_state where library_id=$1 and display_name='quarantine-toggle'",
+        [rootId],
+      )
+    ).rows[0]?.visible_publication_count,
+    0,
+  );
+  assert.deepEqual(
+    (
+      await pool.query(
+        'select validation_generation::text as generation,count(*)::int as intents from source_items i left join validation_intents v on v.source_item_id=i.id where i.id=$1 group by i.validation_generation',
+        [toggleId],
+      )
+    ).rows[0],
+    { generation: '1', intents: 1 },
+  );
+  const restoreRun = await startScanRun(rootId, generation);
+  assert.deepEqual(await persistScanItems(restoreRun, rootId, [item, toggled]), {
+    updated: 0,
+    unchanged: 2,
+  });
+  await completeScanRun(restoreRun, rootId, { ...summary, discovered: 2, pages: 2 });
+  assert.equal(
+    (
+      await pool.query(
+        "select visible_publication_count from catalog_series_list_state where library_id=$1 and display_name='quarantine-toggle'",
+        [rootId],
+      )
+    ).rows[0]?.visible_publication_count,
+    1,
+  );
   const thirdRun = await startScanRun(rootId, generation);
   await persistScanItems(thirdRun, rootId, [{ ...item, mtimeMs: 1 }]);
   await completeScanRun(thirdRun, rootId, summary);
+  const catalogChanged = await pool.query(catalogSnapshotSql, [rootId]);
+  assert.notDeepEqual(catalogChanged.rows, catalogBefore.rows);
   const fourthRun = await startScanRun(rootId, generation);
   await persistScanItems(fourthRun, rootId, [item]);
   await completeScanRun(fourthRun, rootId, summary);
@@ -232,6 +315,16 @@ try {
   const deactivateRun = await startScanRun(rootId, generation);
   await persistScanItems(deactivateRun, rootId, []);
   await completeScanRun(deactivateRun, rootId, { ...summary, discovered: 0, pages: 0 });
+  assert.equal(
+    (
+      await pool.query(
+        `select visible_publication_count from catalog_series_list_state
+       where library_id=$1 and display_name='disappearing'`,
+        [rootId],
+      )
+    ).rows[0]?.visible_publication_count,
+    0,
+  );
   assert.equal(
     (
       await pool.query(

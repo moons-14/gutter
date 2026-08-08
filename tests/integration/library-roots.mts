@@ -3,12 +3,18 @@ import { randomUUID } from 'node:crypto';
 import {
   assertSchema,
   cancelScanRun,
+  clearGlobalSourceSuppression,
   completeScanRun,
   failScanRun,
   migrateSchema,
+  listCatalogSeries,
+  catalogPublicationDetail,
   pool,
   persistScanItems,
+  rebuildCatalogSeriesListStateForIntegration,
+  rebuildCatalogProjectionForIntegration,
   reconcileLibraryRoots,
+  setGlobalSourceSuppression,
   startScanRun,
 } from '../../packages/db/src/index.ts';
 import {
@@ -103,12 +109,34 @@ async function root(id: string) {
 
 let integrationDatabaseVerified = false;
 
+async function clearCatalogRoots(rootIds: readonly string[]): Promise<void> {
+  await pool.query('delete from catalog_series_list_state where library_id=any($1::text[])', [
+    rootIds,
+  ]);
+  await pool.query(
+    'delete from catalog_credits where release_id in (select id from catalog_releases where root_id=any($1::text[]))',
+    [rootIds],
+  );
+  await pool.query('delete from catalog_releases where root_id=any($1::text[])', [rootIds]);
+  await pool.query(
+    'delete from catalog_publications where series_id in (select id from catalog_series where library_id=any($1::text[]))',
+    [rootIds],
+  );
+  await pool.query('delete from catalog_series where library_id=any($1::text[])', [rootIds]);
+  await pool.query(
+    'delete from catalog_preferred_release_overrides where root_id=any($1::text[])',
+    [rootIds],
+  );
+  await pool.query('delete from catalog_libraries where id=any($1::text[])', [rootIds]);
+}
+
 try {
   assertIntegrationDatabase();
   integrationDatabaseVerified = true;
   await migrateSchema();
   await migrateSchema();
   await assertSchema();
+  await clearCatalogRoots(ids);
   await pool.query('delete from library_roots where id = any($1::text[])', [ids]);
 
   await reconcileLibraryRoots(
@@ -124,7 +152,18 @@ try {
     active: true,
   });
   assert.equal((await root('integration-bravo'))?.active, true);
-
+  assert.deepEqual(
+    (
+      await pool.query(
+        'select id,display_name from catalog_libraries where id = any($1::text[]) order by id',
+        [['integration-alpha', 'integration-bravo']],
+      )
+    ).rows,
+    [
+      { id: 'integration-alpha', display_name: 'integration-alpha' },
+      { id: 'integration-bravo', display_name: 'integration-bravo' },
+    ],
+  );
   const staleA = await startScanRun('integration-alpha', generation);
   const staleB = await startScanRun('integration-alpha', generation);
   const staleAItem: ScanItem = { ...item, relativePath: 'stale-a', pages: ['a.jpg'] };
@@ -155,6 +194,118 @@ try {
       )
     ).rows,
     [{ locator: 'b.jpg' }],
+  );
+  const canonicalIdentities = (
+    await pool.query(`select s.identity_canonical_json as series, p.publication_identity_canonical_json as publication
+      from catalog_releases r join catalog_publications p on p.id=r.publication_id join catalog_series s on s.id=p.series_id
+      join source_items i on i.id=r.source_item_id where i.relative_path='stale-b'`)
+  ).rows[0]!;
+  assert.deepEqual(
+    {
+      series:
+        typeof canonicalIdentities.series === 'string'
+          ? JSON.parse(canonicalIdentities.series)
+          : canonicalIdentities.series,
+      publication:
+        typeof canonicalIdentities.publication === 'string'
+          ? JSON.parse(canonicalIdentities.publication)
+          : canonicalIdentities.publication,
+    },
+    {
+      series: [1, 'stale-b'],
+      publication: [
+        1,
+        (
+          await pool.query(
+            `select s.identity_key from catalog_releases r join catalog_publications p on p.id=r.publication_id join catalog_series s on s.id=p.series_id join source_items i on i.id=r.source_item_id where i.relative_path='stale-b'`,
+          )
+        ).rows[0].identity_key,
+        'volume',
+        null,
+        null,
+        'stale-b',
+        null,
+      ],
+    },
+  );
+  assert.deepEqual(
+    (
+      await pool.query(
+        "select display_name,search_document,visible_publication_count from catalog_series_list_state where library_id='integration-alpha'",
+      )
+    ).rows,
+    [{ display_name: 'stale-b', search_document: 'stale-b stale-b', visible_publication_count: 1 }],
+  );
+  assert.equal(
+    (
+      await pool.query(
+        "select visible_publication_count from catalog_series_list_state where library_id='integration-alpha'",
+      )
+    ).rows[0]?.visible_publication_count,
+    1,
+  );
+  assert.deepEqual(
+    (await listCatalogSeries({ q: 'stale-b', limit: 10 })).items.map((row) => row.displayName),
+    ['stale-b'],
+  );
+  const staleSource = await pool.query<{ id: string }>(
+    "select id from source_items where root_id='integration-alpha' and relative_path='stale-b'",
+  );
+  await pool.query(`update source_metadata set effective=$2::jsonb where source_item_id=$1`, [
+    staleSource.rows[0]!.id,
+    JSON.stringify({ title: 'stale-b', series: 'stale-b', writers: ['Writer'] }),
+  ]);
+  // Deliberately destroy the disposable hierarchy. Rebuild must retain source truth and the
+  // stable-key override, then recreate the release, list row, and creator credit.
+  await rebuildCatalogProjectionForIntegration();
+  const rebuiltPublication = await pool.query<{ id: string }>(
+    `select p.id from catalog_publications p join catalog_series s on s.id=p.series_id
+     where s.library_id='integration-alpha' and p.display_name='stale-b'`,
+  );
+  const rebuiltDetail = await catalogPublicationDetail(rebuiltPublication.rows[0]!.id);
+  assert.equal(rebuiltDetail?.releases.length, 1);
+  assert.deepEqual(
+    rebuiltDetail?.credits.map((credit: { displayName: string }) => credit.displayName),
+    ['Writer'],
+  );
+  assert.deepEqual(
+    (await listCatalogSeries({ q: 'stale-b', limit: 10 })).items.map((row) => row.displayName),
+    ['stale-b'],
+  );
+  // A full projection rebuild is disposable: suppression/inactivity make the durable preferred
+  // choice dormant, never delete it, and reactivation makes the same choice effective again.
+  const staleRelease = await pool.query<{ source_item_id: string; identity_key: string }>(
+    `select r.source_item_id,p.identity_key from catalog_releases r join catalog_publications p on p.id=r.publication_id
+     join source_items i on i.id=r.source_item_id where i.root_id=$1 and i.relative_path='stale-b'`,
+    ['integration-alpha'],
+  );
+  const staleSourceId = staleRelease.rows[0]!.source_item_id;
+  await pool.query(
+    `insert into catalog_preferred_release_overrides(root_id,publication_identity_key,preferred_source_item_id)
+    values($1,$2,$3)`,
+    ['integration-alpha', staleRelease.rows[0]!.identity_key, staleSourceId],
+  );
+  await setGlobalSourceSuppression(Number(staleSourceId), 'test-dormant');
+  await rebuildCatalogSeriesListStateForIntegration();
+  assert.deepEqual((await listCatalogSeries({ q: 'stale-b', limit: 10 })).items, []);
+  assert.equal(
+    (
+      await pool.query(
+        'select count(*)::int as count from catalog_preferred_release_overrides where preferred_source_item_id=$1',
+        [staleSourceId],
+      )
+    ).rows[0]?.count,
+    1,
+  );
+  await clearGlobalSourceSuppression(Number(staleSourceId));
+  await pool.query('update source_items set active=false where id=$1', [staleSourceId]);
+  await rebuildCatalogSeriesListStateForIntegration();
+  assert.deepEqual((await listCatalogSeries({ q: 'stale-b', limit: 10 })).items, []);
+  await pool.query('update source_items set active=true where id=$1', [staleSourceId]);
+  await rebuildCatalogSeriesListStateForIntegration();
+  assert.deepEqual(
+    (await listCatalogSeries({ q: 'stale-b', limit: 10 })).items.map((row) => row.displayName),
+    ['stale-b'],
   );
 
   await reconcileLibraryRoots(
@@ -426,12 +577,9 @@ try {
   );
   assert.equal(
     (await pool.query('select * from visible_source_items where id=$1', [metadataId])).rowCount,
-    1,
+    0,
   );
-  await pool.query(
-    'insert into global_source_suppressions (source_item_id, reason) values ($1,$2)',
-    [metadataId, 'test'],
-  );
+  await setGlobalSourceSuppression(metadataId, 'test');
   assert.equal(
     (await pool.query('select * from visible_source_items where id=$1', [metadataId])).rowCount,
     0,
@@ -489,10 +637,10 @@ try {
     ).rowCount,
     1,
   );
-  await pool.query('delete from global_source_suppressions where source_item_id=$1', [metadataId]);
+  await clearGlobalSourceSuppression(metadataId);
   assert.equal(
     (await pool.query('select * from visible_source_items where id=$1', [metadataId])).rowCount,
-    1,
+    0,
   );
 
   const secondRun = await startScanRun('integration-alpha', generation);
@@ -587,8 +735,10 @@ try {
   assert.equal((await root('integration-bravo'))?.active, true);
 } finally {
   try {
-    if (integrationDatabaseVerified)
+    if (integrationDatabaseVerified) {
+      await clearCatalogRoots(ids);
       await pool.query('delete from library_roots where id = any($1::text[])', [ids]);
+    }
   } finally {
     await pool.end();
   }

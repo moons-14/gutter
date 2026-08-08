@@ -36,7 +36,7 @@ export function allowedRootsJson(): string {
   return process.env.GUTTER_ALLOWED_ROOTS_JSON ?? '[]';
 }
 
-export const schemaVersion = '0005_reconciliation_control';
+export const schemaVersion = '0006_catalog_domain';
 
 /** Reconciliation is deliberately durable DB state, not a pg-boss cron schedule. */
 export function reconciliationConfig(): Readonly<{

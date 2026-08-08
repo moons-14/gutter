@@ -5,7 +5,7 @@ import { PgBoss, type Job } from 'pg-boss';
 
 export const validationQueueName = 'catalog.page-validation.v1';
 export type ValidationJob = Readonly<{
-  sourceItemId: number;
+  sourceItemId: string;
   manifestSha256: string;
   generation: number;
   leaseEpoch: number;

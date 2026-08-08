@@ -1,7 +1,25 @@
 import { serve } from '@hono/node-server';
 import { OpenAPIHono } from '@hono/zod-openapi';
-import { healthRoute, readinessRoute } from '@gutter/api-contract';
-import { assertSchema, pool } from '@gutter/db';
+import {
+  catalogEntitiesRoute,
+  catalogEntityRoute,
+  catalogLibrariesRoute,
+  catalogPublicationDetailRoute,
+  catalogSeriesDetailRoute,
+  catalogSeriesRoute,
+  healthRoute,
+  readinessRoute,
+} from '@gutter/api-contract';
+import {
+  assertSchema,
+  catalogEntityDetail,
+  catalogPublicationDetail,
+  catalogSeriesDetail,
+  listCatalogEntities,
+  listCatalogLibraries,
+  listCatalogSeries,
+  pool,
+} from '@gutter/db';
 import { Gauge, Registry, collectDefaultMetrics } from 'prom-client';
 import pino from 'pino';
 import { reconciliationMetricLabels } from './metrics.js';
@@ -45,6 +63,45 @@ app.openapi(readinessRoute, async (c) => {
     return c.json({ status: 'not-ready' }, 503);
   }
 });
+app.openapi(catalogLibrariesRoute, async (c) =>
+  c.json({ items: await listCatalogLibraries(), nextCursor: null }, 200),
+);
+app.openapi(catalogSeriesRoute, async (c) => {
+  const query = c.req.valid('query');
+  try {
+    const page = await listCatalogSeries(query);
+    return c.json({ ...page, libraries: await listCatalogLibraries() }, 200);
+  } catch (error) {
+    if (error instanceof Error && error.message === 'invalid_catalog_cursor')
+      return c.json({ error: 'invalid_cursor' }, 400);
+    throw error;
+  }
+});
+app.openapi(catalogSeriesDetailRoute, async (c) => {
+  const item = await catalogSeriesDetail(c.req.valid('param').id);
+  return item ? c.json(item, 200) : c.json({ error: 'not_found' }, 404);
+});
+app.openapi(catalogPublicationDetailRoute, async (c) => {
+  const item = await catalogPublicationDetail(c.req.valid('param').id);
+  return item ? c.json(item, 200) : c.json({ error: 'not_found' }, 404);
+});
+for (const [path, kind] of [
+  ['/catalog/creators/{id}', 'creator'],
+  ['/catalog/groups/{id}', 'group'],
+  ['/catalog/publishers/{id}', 'publisher'],
+] as const)
+  app.openapi(catalogEntityRoute(path), async (c) => {
+    const item = await catalogEntityDetail(kind, c.req.valid('param').id);
+    return item ? c.json(item, 200) : c.json({ error: 'not_found' }, 404);
+  });
+for (const [path, kind] of [
+  ['/catalog/creators', 'creator'],
+  ['/catalog/groups', 'group'],
+  ['/catalog/publishers', 'publisher'],
+] as const)
+  app.openapi(catalogEntitiesRoute(path), async (c) =>
+    c.json({ items: await listCatalogEntities(kind, c.req.valid('query')) }, 200),
+  );
 app.get('/metrics', async (c) => {
   const rows = await pool.query<{ trigger: string; state: string; count: string }>(
     'select trigger,state,count(*) from scan_requests group by trigger,state',
