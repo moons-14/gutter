@@ -7,6 +7,7 @@
 | Caddy                        | 2.10.2-alpine             | Apache-2.0                    | caddyserver.com / Docker Official Image                      |
 | pnpm                         | 11.20.0                   | MIT                           | pnpm.io                                                      |
 | yauzl / @types/yauzl         | 3.4.0 / 3.4.0             | MIT                           | npmjs.com/package/yauzl / npmjs.com/package/@types/yauzl     |
+| saxes                        | 6.0.0                     | ISC                           | npmjs.com/package/saxes                                      |
 | Turbo                        | 2.10.7                    | MIT                           | vercel/turborepo                                             |
 | TypeScript                   | 5.9.3                     | Apache-2.0                    | microsoft/TypeScript                                         |
 | SvelteKit/Svelte/Vite        | 2.59.1 / 5.56.8 / 7.3.6   | MIT                           | sveltejs / vitejs                                            |

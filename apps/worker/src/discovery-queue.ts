@@ -39,6 +39,7 @@ const failedSummary = (): ScanSummary => ({
   mixedParents: 0,
   pages: 0,
   reasons: {},
+  metadataIssues: {},
 });
 
 function aborted(error: unknown, signal: AbortSignal): boolean {

@@ -36,4 +36,4 @@ export function allowedRootsJson(): string {
   return process.env.GUTTER_ALLOWED_ROOTS_JSON ?? '[]';
 }
 
-export const schemaVersion = '0002_source_inventory';
+export const schemaVersion = '0003_comicinfo_metadata';

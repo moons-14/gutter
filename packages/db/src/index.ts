@@ -3,6 +3,7 @@ import type { LibraryRootSnapshot } from '@gutter/library-roots';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
 import { fileURLToPath } from 'node:url';
+import { basename, dirname, extname } from 'node:path';
 import { Pool } from 'pg';
 import type { ScanItem, ScanSummary } from '@gutter/discovery-scanner';
 
@@ -16,6 +17,90 @@ export class StaleScanRunError extends Error {
   constructor() {
     super('stale_scan_run');
   }
+}
+
+function metadataFor(item: ScanItem): {
+  effective: Record<string, unknown>;
+  provenance: Record<string, 'inference' | 'comicinfo'>;
+  ruleSet: string;
+  sha256: string | null;
+  annotations: readonly { locator: string; annotation: unknown }[];
+  issues: readonly { code: string; rule: string; detail?: string }[];
+} {
+  const normalizeIssues = (source: readonly { code: string; rule: string; detail?: string }[]) => {
+    const unique = new Map<string, { code: string; rule: string; detail?: string }>();
+    for (const entry of source) {
+      const detail = entry.detail?.trim().slice(0, 256);
+      const normalized = {
+        code: entry.code.slice(0, 128),
+        rule: entry.rule.slice(0, 128),
+        ...(detail ? { detail } : {}),
+      };
+      unique.set(
+        `${normalized.code}\u0000${normalized.rule}\u0000${normalized.detail ?? ''}`,
+        normalized,
+      );
+      if (unique.size >= 100) break;
+    }
+    return [...unique.values()];
+  };
+  const base =
+    item.displayName ??
+    basename(item.relativePath, item.kind === 'cbz' ? extname(item.relativePath) : undefined);
+  const parent = basename(dirname(item.relativePath));
+  const effective: Record<string, unknown> = {
+    title: base,
+    series: parent === '.' ? base : parent,
+  };
+  const provenance: Record<string, 'inference' | 'comicinfo'> = {
+    title: 'inference',
+    series: 'inference',
+  };
+  const issues = [...(item.scanIssues ?? [])];
+  const document = item.comicInfo?.document;
+  if (item.comicInfo) issues.push(...item.comicInfo.issues);
+  if (!document)
+    return {
+      effective,
+      provenance,
+      ruleSet: 'comicinfo-anansi-v2.1-draft-compatible-v1',
+      sha256: null,
+      annotations: [],
+      issues: normalizeIssues(issues),
+    };
+  for (const [key, value] of Object.entries(document.fields)) {
+    effective[key] = value;
+    provenance[key] = 'comicinfo';
+  }
+  if (document.claimedPageCount !== null && document.claimedPageCount !== item.pages.length)
+    issues.push({ code: 'page_count_mismatch', rule: 'comicinfo-anansi-v2.1-draft-compatible-v1' });
+  const annotations: { locator: string; annotation: unknown }[] = [];
+  const annotatedLocators = new Set<string>();
+  for (const annotation of document.pageAnnotations) {
+    const locator = item.pages[annotation.image];
+    if (!locator)
+      issues.push({
+        code: 'page_image_out_of_range',
+        rule: 'comicinfo-anansi-v2.1-draft-compatible-v1',
+      });
+    else if (annotatedLocators.has(locator))
+      issues.push({
+        code: 'page_duplicate_image',
+        rule: 'comicinfo-anansi-v2.1-draft-compatible-v1',
+      });
+    else {
+      annotatedLocators.add(locator);
+      annotations.push({ locator, annotation });
+    }
+  }
+  return {
+    effective,
+    provenance,
+    ruleSet: 'comicinfo-anansi-v2.1-draft-compatible-v1',
+    sha256: document.sha256,
+    annotations,
+    issues: normalizeIssues(issues),
+  };
 }
 
 export async function migrateSchema(): Promise<void> {
@@ -148,6 +233,37 @@ export async function persistScanItems(
           await client.query(
             'insert into source_pages (source_item_id, ordinal, locator) values ($1,$2,$3)',
             [itemId, ordinal, locator],
+          );
+        const metadata = metadataFor(item);
+        await client.query(
+          `insert into source_metadata (source_item_id, effective, provenance, rule_set, comicinfo_sha256)
+           values ($1,$2,$3,$4,$5)
+           on conflict (source_item_id) do update set effective=excluded.effective, provenance=excluded.provenance,
+             rule_set=excluded.rule_set, comicinfo_sha256=excluded.comicinfo_sha256, updated_at=now()`,
+          [
+            itemId,
+            JSON.stringify(metadata.effective),
+            JSON.stringify(metadata.provenance),
+            metadata.ruleSet,
+            metadata.sha256,
+          ],
+        );
+        await client.query('delete from source_page_annotations where source_item_id=$1', [itemId]);
+        for (const annotation of metadata.annotations)
+          await client.query(
+            'insert into source_page_annotations (source_item_id, locator, annotation) values ($1,$2,$3)',
+            [itemId, annotation.locator, JSON.stringify(annotation.annotation)],
+          );
+        await client.query(
+          'update source_metadata_issues set resolved_at=now(), retry_state=$2 where source_item_id=$1 and resolved_at is null',
+          [itemId, 'resolved'],
+        );
+        for (const issue of metadata.issues)
+          await client.query(
+            `insert into source_metadata_issues (source_item_id, code, rule, detail, detected_at, last_seen_at, resolved_at, retry_state)
+             values ($1,$2,$3,$4,now(),now(),null,'pending')
+             on conflict (source_item_id, code, rule, detail) do update set last_seen_at=now(), resolved_at=null, retry_state='pending'`,
+            [itemId, issue.code, issue.rule, issue.detail ?? ''],
           );
       }
       await client.query('commit');

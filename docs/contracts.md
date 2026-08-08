@@ -12,6 +12,9 @@
 | M1R-009     | README/Compose/docs boundary and exact integration command                                        |
 
 M1 records immutable configured-root availability snapshots and rebuildable, read-only source
-inventory discovery. It does not provide a watcher, reader, auth, mutable registration API/UI,
-external provider, ComicInfo, CRC/image decoding, or source writes. Run the
+inventory discovery. Issue #5 adds the rebuildable local ComicInfo projection (`ComicInfo.xml`,
+Anansi v1/v2/common v2.1 draft fields; pinned source commit
+`99e1453a163c777b4b5320a68732f6f133ac7918`) and durable global suppression. It has no watcher,
+reader, auth, mutable registration API/UI, external provider, CRC/image decoding, or source writes.
+User-specific hiding is deferred until authentication and will use a separate table. Run the
 focused PostgreSQL oracle with `docker compose --profile integration run --rm --build integration`.
