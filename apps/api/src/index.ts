@@ -2,14 +2,21 @@ import { serve } from '@hono/node-server';
 import { OpenAPIHono } from '@hono/zod-openapi';
 import { healthRoute, readinessRoute } from '@gutter/api-contract';
 import { assertSchema, pool } from '@gutter/db';
-import { Registry, collectDefaultMetrics } from 'prom-client';
+import { Gauge, Registry, collectDefaultMetrics } from 'prom-client';
 import pino from 'pino';
+import { reconciliationMetricLabels } from './metrics.js';
 
 const log = pino({
   redact: ['req.headers.authorization', 'req.headers.cookie', '*.password', '*.token'],
 });
 const metrics = new Registry();
 collectDefaultMetrics({ register: metrics });
+const reconciliationRequests = new Gauge({
+  name: 'gutter_reconciliation_requests',
+  help: 'Durable reconciliation requests by bounded trigger and state.',
+  labelNames: ['trigger', 'state'],
+  registers: [metrics],
+});
 const app = new OpenAPIHono();
 
 app.use('*', async (c, next) => {
@@ -38,9 +45,17 @@ app.openapi(readinessRoute, async (c) => {
     return c.json({ status: 'not-ready' }, 503);
   }
 });
-app.get('/metrics', async (c) =>
-  c.text(await metrics.metrics(), 200, { 'content-type': metrics.contentType }),
-);
+app.get('/metrics', async (c) => {
+  const rows = await pool.query<{ trigger: string; state: string; count: string }>(
+    'select trigger,state,count(*) from scan_requests group by trigger,state',
+  );
+  reconciliationRequests.reset();
+  for (const row of rows.rows) {
+    const labels = reconciliationMetricLabels(row.trigger, row.state);
+    if (labels) reconciliationRequests.set(labels, Number(row.count));
+  }
+  return c.text(await metrics.metrics(), 200, { 'content-type': metrics.contentType });
+});
 app.doc('/openapi.json', {
   openapi: '3.1.0',
   info: { title: 'gutter internal API', version: '0.0.0' },

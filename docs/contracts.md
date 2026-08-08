@@ -15,7 +15,8 @@ M1 records immutable configured-root availability snapshots and rebuildable, rea
 inventory discovery. Issue #5 adds the rebuildable local ComicInfo projection (`ComicInfo.xml`,
 Anansi v1/v2/common v2.1 draft fields; pinned source commit
 `99e1453a163c777b4b5320a68732f6f133ac7918`) and durable global suppression. Issue #4 adds
-worker-only streaming CRC/full-first-frame image validation. It has no watcher, reader, auth,
+worker-only streaming CRC/full-first-frame image validation. M2 may use disabled-by-default watcher
+hints that discard event paths and only enqueue full-root reconciliation; it has no reader, auth,
 mutable registration API/UI, external provider, or source writes.
 User-specific hiding is deferred until authentication and will use a separate table. Run the
 focused PostgreSQL oracle with `docker compose --profile integration run --rm --build integration`.
