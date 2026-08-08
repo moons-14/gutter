@@ -6,7 +6,28 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
-        with: { node-version: 24.19.0 }
+        with: { node-version: 24.19.0, package-manager-cache: false }
       - run: corepack enable && corepack prepare pnpm@11.20.0 --activate
       - run: pnpm install --frozen-lockfile
       - run: pnpm audit:licenses && pnpm check && pnpm lint && pnpm typecheck && pnpm unit && pnpm build
+  compose-smoke:
+    needs: quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Generate database password
+        run: |
+          password="$(openssl rand -hex 32)"
+          echo "::add-mask::$password"
+          echo "POSTGRES_PASSWORD=$password" >> "$GITHUB_ENV"
+      - run: docker compose up -d migrate
+      - run: docker compose wait migrate
+      - run: docker compose up -d api worker web
+      - run: docker compose --profile test run --rm test
+      - run: docker compose run --rm --no-deps migrate
+      - if: failure()
+        run: |
+          docker compose ps
+          docker compose logs
+      - if: always()
+        run: docker compose down --volumes --remove-orphans
