@@ -1,24 +1,23 @@
 {
-  "name": "@gutter/worker",
+  "name": "@gutter/page-validator",
   "version": "0.0.0",
   "private": true,
+  "license": "MIT",
   "type": "module",
+  "exports": "./src/index.ts",
   "scripts": {
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
     "build": "tsc"
   },
   "dependencies": {
-    "@gutter/config": "workspace:*",
-    "@gutter/db": "workspace:*",
     "@gutter/discovery-scanner": "workspace:*",
-    "@gutter/library-roots": "workspace:*",
-    "@gutter/page-validator": "workspace:*",
-    "pg-boss": "12.27.0",
-    "pino": "10.3.1",
-    "tsx": "4.23.11"
+    "sharp": "0.35.3",
+    "yauzl": "3.4.0"
   },
   "devDependencies": {
+    "@types/node": "24.13.3",
+    "@types/yauzl": "3.4.0",
     "typescript": "5.9.3"
   }
 }

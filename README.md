@@ -47,7 +47,11 @@ run per ready root. Discovery recognizes CBZ archives and innermost image direct
 bad archives, and never writes library contents. It reads an optional direct `ComicInfo.xml` as
 rebuildable local metadata (exact filename wins; a unique case variant is accepted with a warning),
 while page order/count remain the source of truth. Global catalog suppression is stored separately
-from source metadata and does not modify or delete a library file.
+from source metadata and does not modify or delete a library file. Changed manifests enqueue a
+worker-only full-frame validation: invalid pages are skipped and a fully invalid item is hidden
+from the visible catalog. Limits are 128 MiB/page, 2 GiB/item, and 100M input pixels.
+Validation is retried with bounded backoff and becomes terminal after the fifth failed lease; a later
+source change creates a new intent (manual retry is a future administrative feature).
 On older Linux kernels, recursive read-only bind mounts may leave submounts writable; use a
 Docker/Linux version that enforces recursive read-only mounts or ensure the host mount layout has
 no writable submounts.

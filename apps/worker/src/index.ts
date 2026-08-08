@@ -1,12 +1,17 @@
-import { allowedRootsJson, databaseUrl } from '@gutter/config';
+import { allowedRootsJson, databaseUrl, validationTimeouts } from '@gutter/config';
 import {
   assertSchema,
   completeScanRun,
   cancelScanRun,
+  claimValidationIntents,
+  completeValidationIntent,
   failScanRun,
   persistScanItems,
   pool,
+  getValidationSource,
+  releaseValidationIntent,
   reconcileLibraryRoots,
+  renewValidationLease,
   startScanRun,
 } from '@gutter/db';
 import { scanRoot } from '@gutter/discovery-scanner';
@@ -14,6 +19,8 @@ import { parseAllowedRoots, validateLibraryRoots } from '@gutter/library-roots';
 import { PgBoss } from 'pg-boss';
 import pino from 'pino';
 import { enqueueDiscovery, startDiscoveryQueue } from './discovery-queue.js';
+import { validateSourceItem } from '@gutter/page-validator';
+import { dispatchValidationIntents, startValidationQueue } from './validation-queue.js';
 
 const log = pino({ redact: ['*.password', '*.token'] });
 await assertSchema();
@@ -44,6 +51,22 @@ await startDiscoveryQueue({
   cancelScanRun,
   log,
 });
+await startValidationQueue({
+  boss,
+  readyRoots,
+  getSource: getValidationSource,
+  renew: renewValidationLease,
+  release: releaseValidationIntent,
+  complete: completeValidationIntent,
+  validate: validateSourceItem,
+  signal: shutdown.signal,
+  itemTimeoutMs: validationTimeouts().itemMs,
+});
+await dispatchValidationIntents(boss, claimValidationIntents);
+const validationDispatcher = setInterval(
+  () => void dispatchValidationIntents(boss, claimValidationIntents),
+  30_000,
+);
 for (const root of readyRoots.values())
   await enqueueDiscovery(boss, root.id, rootConfig.generation);
 log.info(
@@ -57,6 +80,7 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const)
     stopping = true;
     log.info({ signal }, 'worker stopping');
     shutdown.abort();
+    clearInterval(validationDispatcher);
     try {
       await boss.stop();
       await pool.end();

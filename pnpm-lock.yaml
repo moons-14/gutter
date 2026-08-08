@@ -102,6 +102,9 @@ importers:
       '@gutter/library-roots':
         specifier: workspace:*
         version: file:packages/library-roots
+      '@gutter/page-validator':
+        specifier: workspace:*
+        version: file:packages/page-validator(@types/node@24.13.3)
       pg-boss:
         specifier: 12.27.0
         version: 12.27.0
@@ -204,6 +207,28 @@ importers:
       '@types/node':
         specifier: 24.13.3
         version: 24.13.3
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
+
+  packages/page-validator:
+    dependencies:
+      '@gutter/discovery-scanner':
+        specifier: workspace:*
+        version: link:../discovery-scanner
+      sharp:
+        specifier: 0.35.3
+        version: 0.35.3(@types/node@24.13.3)
+      yauzl:
+        specifier: 3.4.0
+        version: 3.4.0
+    devDependencies:
+      '@types/node':
+        specifier: 24.13.3
+        version: 24.13.3
+      '@types/yauzl':
+        specifier: 3.4.0
+        version: 3.4.0
       typescript:
         specifier: 5.9.3
         version: 5.9.3
@@ -917,6 +942,9 @@ packages:
 
   '@gutter/library-roots@file:packages/library-roots':
     resolution: { directory: packages/library-roots, type: directory }
+
+  '@gutter/page-validator@file:packages/page-validator':
+    resolution: { directory: packages/page-validator, type: directory }
 
   '@hono/node-server@2.1.0':
     resolution:
@@ -2716,6 +2744,14 @@ snapshots:
       yauzl: 3.4.0
 
   '@gutter/library-roots@file:packages/library-roots': {}
+
+  '@gutter/page-validator@file:packages/page-validator(@types/node@24.13.3)':
+    dependencies:
+      '@gutter/discovery-scanner': file:packages/discovery-scanner
+      sharp: 0.35.3(@types/node@24.13.3)
+      yauzl: 3.4.0
+    transitivePeerDependencies:
+      - '@types/node'
 
   '@hono/node-server@2.1.0(hono@4.13.0)':
     dependencies:
