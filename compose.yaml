@@ -43,6 +43,7 @@ services:
     command: [node, --import, tsx, src/index.ts]
     environment:
       DATABASE_URL: 'postgresql://gutter:${POSTGRES_PASSWORD:-}@db:5432/gutter'
+      GUTTER_ALLOWED_ROOTS_JSON: '[]'
     depends_on: { migrate: { condition: service_completed_successfully } }
     volumes: [cache-data:/cache]
     networks: [internal]
@@ -67,6 +68,28 @@ services:
       - >-
         node -e "Promise.all(['http://web:8080/api/health','http://web:8080/manifest.webmanifest','http://web:8080/service-worker.js'].map(url=>fetch(url))).then(async rs=>{if(!rs.every(r=>r.ok))throw Error('smoke response');if(!(await rs[1].text()).includes('192x192'))throw Error('manifest');}).catch(e=>{console.error(e);process.exit(1)})"
     depends_on: { api: { condition: service_healthy }, web: { condition: service_healthy } }
+    networks: [internal]
+  integration:
+    build: { context: ., target: build }
+    command: [pnpm, integration:library-roots]
+    environment:
+      DATABASE_URL: 'postgresql://gutter:${POSTGRES_PASSWORD:-}@integration-db:5432/gutter_integration'
+      GUTTER_INTEGRATION_TEST: '1'
+    depends_on: { integration-db: { condition: service_healthy } }
+    profiles: [integration]
+    networks: [internal]
+  integration-db:
+    image: postgres:18.1
+    environment:
+      POSTGRES_DB: gutter_integration
+      POSTGRES_USER: gutter
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U gutter -d gutter_integration]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    profiles: [integration]
     networks: [internal]
 volumes:
   db-data:

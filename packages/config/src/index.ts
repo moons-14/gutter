@@ -31,4 +31,9 @@ export async function databaseUrl(): Promise<string> {
     .url()
     .parse(await secret('DATABASE_URL'));
 }
-export const schemaVersion = '0000_initial';
+
+export function allowedRootsJson(): string {
+  return process.env.GUTTER_ALLOWED_ROOTS_JSON ?? '[]';
+}
+
+export const schemaVersion = '0001_library_roots';

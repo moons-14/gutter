@@ -1,4 +1,5 @@
 # Worker
 
-M0 starts pg-boss only after real database/schema readiness. Task registration is intentionally
-empty; future scanning must preserve read-only library semantics and worker-only mounts.
+M1 validates immutable configured roots in the worker mount namespace and snapshots their state in
+PostgreSQL before pg-boss starts. Task registration and scanning remain intentionally empty; keep
+library mounts worker-only and read-only.

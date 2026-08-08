@@ -1,16 +1,16 @@
 # Architecture
 
-M0 dependency direction is `apps -> packages`; packages never import apps. `web` is static and
+M1 dependency direction is `apps -> packages`; packages never import apps. `web` is static and
 same-origin proxies `/api` through Caddy. `api`, `worker`, `migrate`, and PostgreSQL are internal;
-only web publishes port 8080. PostgreSQL is `postgres:18.1` (verified available on Docker Hub on
-2026-08-08). Named `db-data` and `cache-data` volumes persist state.
+only web publishes port 8080. PostgreSQL is `postgres:18.1`; named `db-data` and `cache-data`
+volumes persist state.
 
-Drizzle robustness is preferred over SQL hacks. `migrate` is the sole schema applier and installs
-the idempotent `0000_initial` version. API and worker reject incompatible schema versions. Worker
-uses pg-boss. Pino JSON logging redacts secrets and Prometheus serves internal metrics. Containers
-run non-root where the base permits it and do not mount libraries into API. Secrets accept direct
-development variables or `*_FILE` paths.
+`migrate` is the sole schema applier. The idempotent `0001_library_roots` migration adds the
+library-root snapshot table, and API/worker reject incompatible schemas. Before pg-boss starts, the
+worker parses immutable `GUTTER_ALLOWED_ROOTS_JSON`, validates each configured directory in its one
+container mount namespace, then writes one short reconciliation transaction. Library binds are
+explicit, worker-only, and read-only; API never receives a library bind. Validation only uses
+metadata, canonical path resolution, and one directory entry: it never scans or changes sources.
 
-Target scale is 100k books, 20 TB, and five users. Benchmark by generated metadata/path fixtures,
-controlled CBZ/image samples, and representative PostgreSQL query/load tests; do not require 20 TB
-physical test data.
+M1 has no catalog scanner, watcher, reader, auth, mutable root API, or external provider. Pino JSON
+logging redacts secrets; direct development secrets and `*_FILE` variants remain supported.

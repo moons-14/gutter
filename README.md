@@ -1,7 +1,7 @@
 # gutter
 
-MIT-licensed, self-hosted comic-library foundation. It is intentionally M0 only: no catalog,
-authentication, or reader is implemented.
+MIT-licensed, self-hosted comic-library foundation. M1 currently records configured library-root
+availability only; catalog scanning, authentication, and reader features are not implemented.
 
 ## Linux quickstart
 
@@ -28,14 +28,29 @@ The overlay removes the direct development variables before PostgreSQL consumes 
 `POSTGRES_PASSWORD_FILE` and API, worker, and migrate consume `DATABASE_URL_FILE`. The values are
 mandatory at runtime: use either direct development values or the file variants, never both.
 
-For NAS libraries, mount NFS/SMB on the host and bind only that host mount into `worker`:
+For NAS libraries, mount NFS/SMB on the host and bind only that host mount into `worker`. Copy the
+tracked example and adjust its one root id, host mount, and matching container path:
 
 ```sh
 sudo mount -t nfs nas:/comics /mnt/comics
-# Add /mnt/comics:/libraries/comics:ro to worker.volumes in compose.yaml.
+cp compose.library.example.yaml compose.library.yaml
+docker compose -f compose.yaml -f compose.library.yaml up --build
 ```
 
+`GUTTER_ALLOWED_ROOTS_JSON` defaults to `[]` and is immutable process configuration: it is a JSON
+array of at most 64 `{ "id", "path" }` objects. IDs match `^[a-z][a-z0-9-]{0,62}$`; paths are
+absolute worker-container paths, cannot be `/`, and cannot be equal or nested. One worker-container
+mount namespace can contain multiple explicit worker-only `:ro` binds, one for each configured
+path; it does not create a namespace per root. The worker checks each configured directory before
+its queue starts, records the snapshot in PostgreSQL, and never scans or writes library contents.
+On older Linux kernels, recursive read-only bind mounts may leave submounts writable; use a
+Docker/Linux version that enforces recursive read-only mounts or ensure the host mount layout has
+no writable submounts.
+
 Do not mount remote storage in API containers. Restore PostgreSQL only with an operator-managed
-`pg_dump`/`pg_restore` workflow while the application is stopped; M0 does not automate restore.
-Put Caddy/Nginx or Tailscale in front of port 8080 for remote access. TLS, auth, catalog scans,
-and reader streaming are later milestones.
+`pg_dump`/`pg_restore` workflow while the application is stopped. Put Caddy/Nginx or Tailscale in
+front of port 8080 for remote access. TLS, auth, catalog scans, and reader streaming are later
+milestones. Run focused root checks with `pnpm unit` and start the root snapshot flow with the
+Compose command above. Run the PostgreSQL reconciliation oracle with
+`docker compose --profile integration run --rm --build integration`; it uses a dedicated
+`gutter_integration` database and requires its test-only environment sentinel.
