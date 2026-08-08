@@ -1,4 +1,4 @@
-# M1 acceptance mapping
+# M2 acceptance mapping
 
 | ID          | Decision / validation                                                                             |
 | ----------- | ------------------------------------------------------------------------------------------------- |
@@ -12,9 +12,17 @@
 | M1R-009     | README/Compose/docs boundary and exact integration command                                        |
 
 M1 records immutable configured-root availability snapshots and rebuildable, read-only source
-inventory discovery. Issue #5 adds the rebuildable local ComicInfo projection (`ComicInfo.xml`,
+inventory discovery. M2 adds the rebuildable local ComicInfo and catalog projection (`ComicInfo.xml`,
 Anansi v1/v2/common v2.1 draft fields; pinned source commit
-`99e1453a163c777b4b5320a68732f6f133ac7918`) and durable global suppression. Issue #4 adds
+`99e1453a163c777b4b5320a68732f6f133ac7918`): library → series → publication → release, exact
+creator/group/publisher credits, and a disposable per-series list state. Source files remain the
+only authority; a source move is a new `(root_id, relative_path)` identity. Durable global
+suppression and preferred-release overrides are separate from rebuildable catalog tables.
+
+Catalog list cursors are unsigned opaque base64url JSON. They bind scope, sort, direction and a
+SHA-256 hash of normalized filters, are valid only while the result set is unchanged, and carry
+lossless decimal bigint IDs plus PostgreSQL microsecond timestamp text. This is request-shape
+validation, not an authorization token. Issue #4 adds
 worker-only streaming CRC/full-first-frame image validation. M2 may use disabled-by-default watcher
 hints that discard event paths and only enqueue full-root reconciliation; it has no reader, auth,
 mutable registration API/UI, external provider, or source writes.

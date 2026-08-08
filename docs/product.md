@@ -13,6 +13,14 @@ CBZ page CRCs are compared; AVIF is unsupported in M1 (future best-effort work),
 and duplicate-locator archives are quarantined. There is no reader, auth, upload, mutable
 registration endpoint/UI, or external metadata provider. A configured root is not a published library.
 
+M2 presents that source inventory as a mobile-first, trusted-LAN catalog: libraries, series,
+publications, releases, and creator/group/publisher pages. `ComicInfo.xml` overrides inferred
+title/series metadata; exact normalized identity avoids fuzzy merges. Multiple physical releases
+may represent one publication. A durable global preferred release uses root plus publication
+identity and source-item ID; it becomes dormant when its source is hidden and returns if visible
+again. Catalog state may be rebuilt from source inventory and metadata; user-specific reading,
+hiding, and preferences are deliberately not present yet.
+
 The product boundary preserves future options while preventing source ownership: roots cannot be
 `/`, overlap, or resolve through symlinks; the API has no library mount; and worker binds are
 explicit and read-only. PostgreSQL plus pg-boss continues to avoid a second queue/Redis service.

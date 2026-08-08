@@ -15,6 +15,16 @@ const {
 const { inspectCbz, scanRoot, scanRootBatched } =
   await import('../packages/discovery-scanner/src/index.ts');
 const { parseComicInfo } = await import('../packages/comic-info/src/index.ts');
+const {
+  canonicalIdentity,
+  decodeCatalogCursor,
+  encodeCatalogCursor,
+  identityHash,
+  identityText,
+  normalizeCatalogFilters,
+  publicationKind,
+  searchKey,
+} = await import('../packages/catalog-domain/src/index.ts');
 const { startWatcherHints } = await import('../apps/worker/src/watcher-hints.ts');
 const { dispatchReconciliationRequests } = await import('../apps/worker/src/discovery-queue.ts');
 const encryptedCbz = Buffer.from(
@@ -25,6 +35,49 @@ const zip64Cbz = Buffer.from(
   'UEsDBC0AAAgIAN2eCF1GE6D2//////////8PABQA56ysMeipsS8wMDEuanBnAQAQABUAAAAAAAAAFwAAAAAAAAArycyr1M0qSE3XLchJTE7NyM9JSS0CAFBLAQItAy0AAAgIAN2eCF1GE6D2//////////8PABQAAAAAAAAAAACAAQAAAADnrKwx6KmxLzAwMS5qcGcBABAAFQAAAAAAAAAXAAAAAAAAAFBLBgYsAAAAAAAAAC0ALQAAAAAAAAAAAAEAAAAAAAAAAQAAAAAAAABRAAAAAAAAAFgAAAAAAAAAUEsGBwAAAACpAAAAAAAAAAEAAABQSwUGAAAAAP///////////////wAA',
   'base64',
 );
+
+test('catalog identity is deterministic, exact, and separate from search normalization', () => {
+  assert.equal(identityText('  Ａ\u3000Ｂ  '), 'A B');
+  assert.equal(identityText(' \t '), null);
+  assert.notEqual(identityText('Alpha'), identityText('alpha'));
+  assert.equal(searchKey('ＡLPHA'), 'alpha');
+  assert.equal(publicationKind('Art Book'), 'artbook');
+  assert.equal(publicationKind('OneShot'), 'special');
+  assert.equal(publicationKind('Comic'), 'issue');
+  assert.equal(publicationKind('unrecognized'), 'volume');
+  assert.notEqual(identityHash([1, '01']), identityHash([1, '1']));
+  assert.deepEqual(canonicalIdentity([1, 'Series']).canonicalJson, '[1,"Series"]');
+});
+
+test('catalog cursors keep database IDs and microsecond timestamps lossless', () => {
+  const filters = normalizeCatalogFilters({
+    q: ' Ａ ',
+    sort: 'metadata_updated',
+    direction: 'desc',
+    limit: 999,
+  });
+  assert.equal(filters.q, 'a');
+  assert.equal(filters.limit, 100);
+  const cursor = {
+    v: 1,
+    scope: 'series',
+    sort: 'metadata_updated',
+    direction: 'desc',
+    filterHash: 'a'.repeat(64),
+    tuple: ['2026-08-09T12:34:56.123456Z', '9007199254740993'],
+  };
+  assert.deepEqual(decodeCatalogCursor(encodeCatalogCursor(cursor)), cursor);
+  assert.equal(
+    decodeCatalogCursor(encodeCatalogCursor({ ...cursor, tuple: ['not-a-timestamp', '1'] })),
+    null,
+  );
+  assert.equal(
+    decodeCatalogCursor(
+      encodeCatalogCursor({ ...cursor, sort: 'source_updated', tuple: ['1.5', '1'] }),
+    ),
+    null,
+  );
+});
 
 function zip(entries) {
   let offset = 0;
@@ -476,8 +529,21 @@ async function withEnvironment(values, run) {
   }
 }
 
-test('M2 documents the reconciliation-control schema version', () => {
-  assert.equal(schemaVersion, '0005_reconciliation_control');
+test('M2 documents the catalog schema version', () => {
+  assert.equal(schemaVersion, '0006_catalog_domain');
+});
+
+test('catalog UI exposes entity discovery and publication credit links', async () => {
+  const [catalog, publication, entities] = await Promise.all([
+    readFile(join(process.cwd(), 'apps/web/src/routes/+page.svelte'), 'utf8'),
+    readFile(join(process.cwd(), 'apps/web/src/routes/publications/[id]/+page.svelte'), 'utf8'),
+    readFile(join(process.cwd(), 'apps/web/src/routes/[entity=entity]/+page.svelte'), 'utf8'),
+  ]);
+  assert.match(catalog, /href="\/creators"/);
+  assert.match(catalog, /href="\/groups"/);
+  assert.match(catalog, /href="\/publishers"/);
+  assert.match(publication, /credit\.kind/);
+  assert.match(entities, /\/api\/catalog\/\$\{data\.entity\}/);
 });
 
 test('config accepts a direct secret only', async () => {

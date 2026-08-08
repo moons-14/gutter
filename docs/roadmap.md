@@ -11,7 +11,7 @@
 - [x] M1-2 Bounded CBZ/image-directory scanner with natural ordering and quarantine.
 - [x] M1-3 ComicInfo tolerant metadata fallback and global admin hide state.
 - [x] M2-1 Durable 15-minute reconcile and manual full scan, with optional default-off watcher hints.
-- [ ] M2-2 Series/publication/release/page metadata and creators/groups.
+- [x] M2-2 Rebuildable catalog hierarchy, exact credits, cursor list APIs, and mobile catalog UI.
 
 ## Epics
 

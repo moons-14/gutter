@@ -5,7 +5,12 @@ same-origin proxies `/api` through Caddy. `api`, `worker`, `migrate`, and Postgr
 only web publishes port 8080. PostgreSQL is `postgres:18.1`; named `db-data` and `cache-data`
 volumes persist state.
 
-`migrate` is the sole schema applier. The idempotent `0005_reconciliation_control` migration adds
+`migrate` is the sole schema applier. The idempotent `0006_catalog_domain` migration adds rebuildable
+libraries, series, publications, releases and exact creator/group/publisher credits. Each identity
+stores its canonical JSON alongside its SHA-256 key, so rebuild inputs remain inspectable. Catalog reads
+start at `visible_source_items`, so suppression, quarantine, inactivity and zero-valid items are
+filtered before aggregation; durable preferred-release rows are keyed by root and canonical publication
+identity and are never rebuilt. The idempotent `0005_reconciliation_control` migration adds
 durable scan requests, heartbeat/progress, cancellation flags, and due reconciliation state. A
 30-second worker coordinator advances due roots and queues ordinary pg-boss request-ID jobs; it does
 not use pg-boss cron or filesystem events. Requests coalesce per root and a running request gets one
@@ -31,7 +36,12 @@ races after that check remain an inherited best-effort limitation.
 
 ComicInfo is local, optional, and never changes source files. A bounded UTF-8-only parser rejects DTDs,
 entities and namespaces; valid fields override inferred title/series while page locators remain source-authoritative.
-Global suppression is deliberately separate from rebuildable scan state. M2 watcher hints are optional,
+Global suppression is deliberately separate from rebuildable scan state. The static mobile catalog uses
+same-origin `/api/catalog` reads only. Series lists have unsigned opaque, filter-bound (base64url JSON plus SHA-256 filter-hash)
+keyset cursors for name, source update, discovery and metadata update order; cursor IDs stay decimal
+strings and timestamp keys remain PostgreSQL microsecond text. A configured but temporarily unavailable
+root retains its last active catalog; only an explicitly inactive/removed root is hidden. It is suitable
+for trusted local/LAN deployment, not Internet exposure. M2 watcher hints are optional,
 default-off, and never deletion truth; it has no reader, auth,
 mutable root API, or external provider. Page validation is a worker-only, read-only follow-up: it
 checks ZIP CRCs and fully decodes a first frame with sharp. Each page has a 128 MiB cap, an item has a

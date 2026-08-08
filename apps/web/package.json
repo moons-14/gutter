@@ -6,15 +6,19 @@
   "scripts": {
     "lint": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "typecheck": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
-    "build": "vite build"
+    "build": "vite build",
+    "test:ui": "vitest run"
   },
   "devDependencies": {
+    "@testing-library/svelte": "5.2.8",
     "@sveltejs/adapter-static": "3.0.10",
     "@sveltejs/kit": "2.59.1",
     "@sveltejs/vite-plugin-svelte": "6.2.1",
     "svelte": "5.56.8",
     "svelte-check": "4.7.5",
     "typescript": "5.9.3",
-    "vite": "7.3.6"
+    "vite": "7.3.6",
+    "vitest": "3.2.4",
+    "jsdom": "26.1.0"
   }
 }
