@@ -1,27 +1,16 @@
 # Product decisions
 
-`gutter` is a public MIT self-hosted comic library. Kavita and Mihon are behavior inspiration
-only: no code, API, or database compatibility is intended. Files remain the read-only source of
-truth: gutter will never edit, move, delete, rename, or repack source files. M0 has no catalog,
-auth, reader, uploads, native app, Redis, or SaaS dependency. Supported future inputs are CBZ and
-image directories only; CBR/7z, PDF, and EPUB are explicitly excluded.
+`gutter` is a public MIT self-hosted comic-library foundation. Files are read-only source material:
+the application never edits, moves, deletes, renames, or repacks them. M1 lets an operator declare
+up to 64 immutable container paths. The worker validates those paths in its own mount namespace and
+persists only a PostgreSQL availability snapshot (`ready_nonempty`, `ready_empty`, `missing`,
+`unreadable`, `not_directory`, or `unavailable`).
 
-The future domain is library → series → publication → release → page. CBZ and image directories
-are inputs; ComicInfo has highest metadata priority but parsing is tolerant with fallbacks.
-Scanning is recursive with natural order. Missing pages are skipped and an unreadable book is
-quarantined. A watcher is only a hint; a 15-minute reconcile and manual full scan are required.
-Path identity is initial; roots are operator configured, may not overlap, and may not contain
-symlinks. Users/admins may hide items. Creators and groups are first-class future metadata.
+This slice deliberately stops before library discovery: there is no recursive scan, catalog,
+watcher, ComicInfo/CBZ processing, reader, auth, upload, mutable registration endpoint/UI, or
+external metadata provider. A configured root is not a published library and a ready snapshot does
+not claim any content was indexed.
 
-Metadata providers are versioned HTTP sidecars. The client is a mobile Svelte PWA; Mihon-inspired
-modes and gestures are later. There is no manga offline mode. Sources stream; derived content is a
-content-addressed cache with GC. Future multi-user auth is Better Auth/passkey/TOTP plus library
-ACL; there is no signup/email, and PATs cover selected public API only. APIs are internal and
-unstable until v1.
-
-Rationale and rejected alternatives: file source-of-truth prevents destructive library ownership;
-a PWA is preferred to a native app; PostgreSQL plus pg-boss avoids a second queue/Redis service;
-versioned HTTP sidecars isolate metadata providers instead of in-process plugins; no Kavita
-compatibility prevents inherited constraints; and no manga offline mode avoids duplicating source
-storage. These decisions map to M0-001/M0-002/M0-006/M0-008/M0-010 in
-[`contracts.md`](contracts.md).
+The product boundary preserves future options while preventing source ownership: roots cannot be
+`/`, overlap, or resolve through symlinks; the API has no library mount; and worker binds are
+explicit and read-only. PostgreSQL plus pg-boss continues to avoid a second queue/Redis service.

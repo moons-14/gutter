@@ -1,22 +1,16 @@
-# M0 acceptance mapping
+# M1 acceptance mapping
 
-| ID     | Decision / validation                                                     |
-| ------ | ------------------------------------------------------------------------- |
-| M0-001 | pnpm/Turbo apps and packages; `pnpm typecheck` / `pnpm build`             |
-| M0-002 | MIT and OSS-only inventory in `docs/quality.md`; no GPL/SaaS              |
-| M0-003 | Compose health gates and internal services; `docker compose config`       |
-| M0-004 | `packages/db/drizzle/0000_initial.sql`; repeat `pnpm migrate`             |
-| M0-005 | API `/health`, `/ready`, `/metrics`, `/openapi.json`; worker pg-boss boot |
-| M0-006 | static Svelte service worker, manifest, ja/en shell and Caddy proxy       |
-| M0-007 | format/check/lint/typecheck/unit/build and test profile smoke scripts     |
-| M0-008 | scoped instructions, issue-ready backlog, templates and CI                |
-| M0-009 | non-root runtime, no defaults secrets, redact, internal service boundary  |
-| M0-010 | README Linux/NAS/restore/proxy limitations                                |
+| ID          | Decision / validation                                                                             |
+| ----------- | ------------------------------------------------------------------------------------------------- |
+| M1R-001     | Immutable `GUTTER_ALLOWED_ROOTS_JSON` parser, canonical JSON, SHA-256 generation, and `pnpm unit` |
+| M1R-002     | Worker-only `:ro` bind example and `docker compose config`                                        |
+| M1R-003–004 | `@gutter/library-roots` namespace validation and focused filesystem fixtures                      |
+| M1R-005     | `packages/db/drizzle/0001_library_roots.sql` and repeated migration integration oracle            |
+| M1R-006     | Worker reconciliation before pg-boss; PostgreSQL integration oracle                               |
+| M1R-007     | Package-only domain dependency direction and no API-contract change                               |
+| M1R-008     | `pnpm unit` parser and filesystem cases                                                           |
+| M1R-009     | README/Compose/docs boundary and exact integration command                                        |
 
-Each ID is a stable requirement and its validation oracle: M0-001 uses `pnpm typecheck/build`;
-M0-002 uses `pnpm audit:licenses`; M0-003 uses `docker compose config`; M0-004 uses repeated
-`pnpm migrate`; M0-005/M0-006 use the health/PWA smoke; M0-007 uses the named root scripts; and
-M0-008–M0-010 use the linked canonical docs and template inspection.
-
-Rejected alternatives: PWA plugin, Redis, OTel, uploads, a native app, catalog/auth/reader work,
-and external SaaS are outside M0.
+M1 records immutable configured-root availability snapshots only. It does not provide a scanner,
+watcher, reader, auth, mutable registration API/UI, external provider, or source writes. Run the
+focused PostgreSQL oracle with `docker compose --profile integration run --rm --build integration`.

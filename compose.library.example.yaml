@@ -1,0 +1,7 @@
+# Copy this example alongside compose.yaml and replace the host path before starting Compose.
+services:
+  worker:
+    environment:
+      GUTTER_ALLOWED_ROOTS_JSON: '[{"id":"comics","path":"/libraries/comics"}]'
+    volumes:
+      - /mnt/comics:/libraries/comics:ro

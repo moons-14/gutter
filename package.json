@@ -14,6 +14,7 @@
     "lint": "turbo run lint",
     "typecheck": "turbo run typecheck",
     "unit": "node --test tests/unit.mjs",
+    "integration:library-roots": "pnpm --filter @gutter/db exec tsx ../../tests/integration/library-roots.mts",
     "build": "turbo run build",
     "generate:pwa-icons": "node scripts/generate-pwa-icons.mjs",
     "audit:licenses": "node scripts/audit-licenses.mjs",
