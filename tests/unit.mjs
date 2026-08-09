@@ -14,7 +14,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-const { schemaVersion, secret } = await import('../packages/config/src/index.ts');
+const { authConfig, schemaVersion, secret } = await import('../packages/config/src/index.ts');
 const {
   LibraryRootConfigError,
   LibraryRootStructuralError,
@@ -541,8 +541,8 @@ async function withEnvironment(values, run) {
   }
 }
 
-test('M2 documents the catalog schema version', () => {
-  assert.equal(schemaVersion, '0007_metadata_integration');
+test('M5 documents the authentication schema version', () => {
+  assert.equal(schemaVersion, '0008_auth_foundation');
 });
 
 test('catalog UI exposes entity discovery and publication credit links', async () => {
@@ -583,6 +583,15 @@ test('config rejects simultaneous direct and file secrets without exposing value
         message: 'Define exactly one of DATABASE_URL or DATABASE_URL_FILE',
       }),
   );
+  await withEnvironment(
+    {
+      BETTER_AUTH_SECRET: 'test-auth-secret-not-a-production-secret',
+      BETTER_AUTH_SECRET_FILE: '',
+      GUTTER_AUTH_ORIGIN: 'https://gutter.example.test',
+      GUTTER_AUTH_TRUSTED_PROXIES_JSON: '["172.30.0.20"]',
+    },
+    async () => assert.equal((await authConfig()).secureCookies, true),
+  );
 });
 
 test('config rejects a missing secret', async () => {
@@ -606,6 +615,47 @@ test('config rejects an empty file secret without exposing its path', async () =
         message: 'DATABASE_URL_FILE must reference a readable non-empty file',
       }),
   );
+});
+
+test('auth config permits insecure cookies only on localhost and binds the exact proxy', async () => {
+  await withEnvironment(
+    {
+      BETTER_AUTH_SECRET: 'test-auth-secret-not-a-production-secret',
+      BETTER_AUTH_SECRET_FILE: '',
+      GUTTER_AUTH_ORIGIN: 'http://localhost:8080',
+      GUTTER_AUTH_TRUSTED_PROXIES_JSON: '["172.30.0.20"]',
+    },
+    async () =>
+      assert.deepEqual(await authConfig(), {
+        secret: 'test-auth-secret-not-a-production-secret',
+        origin: 'http://localhost:8080',
+        trustedProxies: ['172.30.0.20'],
+        secureCookies: false,
+      }),
+  );
+  await withEnvironment(
+    {
+      BETTER_AUTH_SECRET: 'test-auth-secret-not-a-production-secret',
+      BETTER_AUTH_SECRET_FILE: '',
+      GUTTER_AUTH_ORIGIN: 'http://lan.example.test',
+      GUTTER_AUTH_TRUSTED_PROXIES_JSON: '[]',
+    },
+    async () =>
+      await assert.rejects(authConfig(), {
+        message: 'GUTTER_AUTH_ORIGIN must use https outside localhost',
+      }),
+  );
+});
+
+test('auth proxy preserves the Better Auth path and uses a fixed internal source address', async () => {
+  const [caddy, compose] = await Promise.all([
+    readFile(join(process.cwd(), 'Caddyfile'), 'utf8'),
+    readFile(join(process.cwd(), 'compose.yaml'), 'utf8'),
+  ]);
+  assert.match(caddy, /handle \/api\/auth\/\*/);
+  assert.match(compose, /GUTTER_AUTH_TRUSTED_PROXIES_JSON: '\["172\.30\.0\.20"\]'/);
+  assert.match(compose, /ipv4_address: 172\.30\.0\.20/);
+  assert.match(compose, /subnet: 172\.30\.0\.0\/24/);
 });
 
 test('library-root parser normalizes paths and produces a stable generation', () => {

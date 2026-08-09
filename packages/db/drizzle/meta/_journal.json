@@ -51,6 +51,13 @@
       "when": 1786662000000,
       "tag": "0007_metadata_integration",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1786748400000,
+      "tag": "0008_auth_foundation",
+      "breakpoints": true
     }
   ]
 }

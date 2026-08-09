@@ -6,14 +6,17 @@
   "scripts": {
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
-    "build": "tsc"
+    "build": "tsc",
+    "auth": "node --import tsx src/auth-recovery.ts"
   },
   "dependencies": {
+    "@better-auth/passkey": "1.6.26",
     "@gutter/api-contract": "workspace:*",
     "@gutter/config": "workspace:*",
     "@gutter/db": "workspace:*",
     "@hono/node-server": "2.1.0",
     "@hono/zod-openapi": "1.5.1",
+    "better-auth": "1.6.26",
     "hono": "4.13.0",
     "pino": "10.3.1",
     "prom-client": "15.1.3",

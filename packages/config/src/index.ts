@@ -34,6 +34,42 @@ export async function databaseUrl(): Promise<string> {
     .parse(await secret('DATABASE_URL'));
 }
 
+/** Authentication is intentionally local-only: an explicit public origin and file-backed secret are required. */
+export async function authConfig(): Promise<
+  Readonly<{
+    secret: string;
+    origin: string;
+    trustedProxies: readonly string[];
+    secureCookies: boolean;
+  }>
+> {
+  const origin = z
+    .string()
+    .url()
+    .parse(process.env.GUTTER_AUTH_ORIGIN ?? 'http://localhost:8080');
+  const url = new URL(origin);
+  if (url.pathname !== '/' || url.search || url.hash || !['http:', 'https:'].includes(url.protocol))
+    throw new Error('GUTTER_AUTH_ORIGIN must be an origin URL');
+  let trustedProxies: unknown;
+  try {
+    trustedProxies = JSON.parse(process.env.GUTTER_AUTH_TRUSTED_PROXIES_JSON ?? '[]');
+  } catch {
+    throw new Error('invalid GUTTER_AUTH_TRUSTED_PROXIES_JSON');
+  }
+  const proxies = z.array(z.string().min(1).max(128)).max(16).safeParse(trustedProxies);
+  if (!proxies.success) throw new Error('invalid GUTTER_AUTH_TRUSTED_PROXIES_JSON');
+  const localhost =
+    url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '[::1]';
+  if (url.protocol !== 'https:' && !localhost)
+    throw new Error('GUTTER_AUTH_ORIGIN must use https outside localhost');
+  return {
+    secret: await secret('BETTER_AUTH_SECRET'),
+    origin: url.origin,
+    trustedProxies: proxies.data,
+    secureCookies: url.protocol === 'https:',
+  };
+}
+
 export function allowedRootsJson(): string {
   return process.env.GUTTER_ALLOWED_ROOTS_JSON ?? '[]';
 }
@@ -56,7 +92,7 @@ export function derivedCacheConfig(): Readonly<{ root: string; quotaBytes: numbe
   return { root: root.data, quotaBytes: quota.data };
 }
 
-export const schemaVersion = '0007_metadata_integration';
+export const schemaVersion = '0008_auth_foundation';
 
 /** Local sidecars only; the worker never accepts a provider endpoint from a job payload. */
 export type MetadataSidecar = Readonly<{

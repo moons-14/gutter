@@ -1,8 +1,16 @@
-:8080 {
+{$GUTTER_SITE_ADDRESS::8080} {
 	root * /srv
 	encode zstd gzip
 	handle /api/reader/* {
 		reverse_proxy worker:3001
+	}
+	# Better Auth validates its configured /api/auth origin/path; do not strip this prefix.
+	# Caddy is the public ingress. Replace any client-supplied forwarding chain with the
+	# directly observed peer so the API's per-client rate limit cannot be spoofed.
+	handle /api/auth/* {
+		reverse_proxy api:3000 {
+			header_up X-Forwarded-For {remote_host}
+		}
 	}
 	handle_path /api/* {
 		reverse_proxy api:3000

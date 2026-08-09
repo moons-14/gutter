@@ -21,6 +21,11 @@ jobs:
           password="$(openssl rand -hex 32)"
           echo "::add-mask::$password"
           echo "POSTGRES_PASSWORD=$password" >> "$GITHUB_ENV"
+      - name: Generate Better Auth secret
+        run: |
+          install -d -m 700 secrets
+          openssl rand -base64 48 > secrets/better_auth_secret
+          chmod 444 secrets/better_auth_secret
       - run: docker compose up -d migrate
       - run: docker compose wait migrate
       - run: docker compose up -d api worker web
