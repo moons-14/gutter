@@ -17,9 +17,12 @@ async function stubReader(page: Page, offline = false): Promise<number[]> {
       const id = publication[1];
       return route.fulfill({
         contentType: 'application/json',
-        body: JSON.stringify({ session: id === '7'
-          ? { releaseId: '42', release }
-          : { releaseId: '43', release: { ...release, nextPublicationId: null } } }),
+        body: JSON.stringify({
+          session:
+            id === '7'
+              ? { releaseId: '42', release }
+              : { releaseId: '43', release: { ...release, nextPublicationId: null } },
+        }),
       });
     }
     if (/^\/api\/reader\/releases\/[1-9][0-9]*\/pages\/[0-9]+$/.test(pathname)) {

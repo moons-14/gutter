@@ -8,7 +8,7 @@
     "typecheck": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "build": "vite build",
     "test:ui": "vitest run",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test --config ../../playwright.config.ts"
   },
   "devDependencies": {
     "@testing-library/svelte": "5.4.2",
