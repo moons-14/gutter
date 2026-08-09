@@ -232,6 +232,22 @@ importers:
         specifier: 5.9.3
         version: 5.9.3
 
+  packages/reader-stream:
+    dependencies:
+      yauzl:
+        specifier: 3.4.0
+        version: 3.4.0
+    devDependencies:
+      '@types/node':
+        specifier: 24.13.3
+        version: 24.13.3
+      '@types/yauzl':
+        specifier: 3.4.0
+        version: 3.4.0
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
+
   packages/page-validator:
     dependencies:
       '@gutter/discovery-scanner':
