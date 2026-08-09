@@ -45,8 +45,16 @@ const auth = betterAuth({
     user: {
       create: {
         before: async (user, context) => {
-          if (context?.request?.headers.get('x-gutter-bootstrap') !== '1') return false;
-          return { data: { ...user, role: 'admin' } };
+          if (context?.request?.headers.get('x-gutter-bootstrap') === '1')
+            return { data: { ...user, role: 'admin' } };
+          // The admin plugin has already authenticated and authorized this exact endpoint.
+          // All other creation paths remain blocked in addition to the Hono signup boundary.
+          if (
+            context?.request &&
+            new URL(context.request.url).pathname === '/api/auth/admin/create-user'
+          )
+            return { data: user };
+          return false;
         },
       },
     },
@@ -55,4 +63,16 @@ const auth = betterAuth({
 
 export async function authHandler(request: Request): Promise<Response> {
   return auth.handler(request);
+}
+
+export async function authenticatedUser(
+  request: Request,
+): Promise<Readonly<{ id: string; role: string | null }> | null> {
+  const session = await auth.api.getSession({ headers: request.headers });
+  if (!session) return null;
+  return { id: session.user.id, role: session.user.role ?? null };
+}
+
+export function trustedMutationOrigin(request: Request): boolean {
+  return request.headers.get('origin') === config.origin;
 }

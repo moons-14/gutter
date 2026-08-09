@@ -3,11 +3,13 @@ import {
   databaseUrl,
   derivedCacheConfig,
   metadataProviderConfig,
+  readerCapabilitySecret,
   reconciliationConfig,
   validationTimeouts,
   watcherHintsConfig,
 } from '@gutter/config';
 import { DerivedCache } from '@gutter/derived-cache';
+import { verifyReaderCapability } from '@gutter/reader-stream';
 import {
   assertSchema,
   completeScanRun,
@@ -65,6 +67,7 @@ const readyRoots = new Map(
     .map((root) => [root.id, root]),
 );
 const shutdown = new AbortController();
+const readerCapabilityKey = await readerCapabilitySecret();
 const derivedCacheConfigValue = derivedCacheConfig();
 const derivedCache = new DerivedCache(derivedCacheConfigValue);
 const runDerivedCacheGc = async () => {
@@ -98,6 +101,7 @@ const derivedCacheGc = setInterval(
 );
 const readerServer = startReaderHttpServer({
   roots: readyRoots,
+  verifyCapability: (token, path) => verifyReaderCapability(readerCapabilityKey, token, path),
   authorize: getAuthorizedReaderPage,
   describe: getReaderReleaseDescriptor,
   describePublication: getReaderPublicationSession,

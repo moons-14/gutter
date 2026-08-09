@@ -14,6 +14,7 @@
     "@gutter/api-contract": "workspace:*",
     "@gutter/config": "workspace:*",
     "@gutter/db": "workspace:*",
+    "@gutter/reader-stream": "workspace:*",
     "@hono/node-server": "2.1.0",
     "@hono/zod-openapi": "1.5.1",
     "better-auth": "1.6.26",

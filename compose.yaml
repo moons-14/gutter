@@ -17,15 +17,22 @@ services:
     command: [node, --import, tsx, src/migrate.ts]
     environment:
       DATABASE_URL: 'postgresql://gutter:${POSTGRES_PASSWORD:-}@db:5432/gutter'
+      GUTTER_API_DB_PASSWORD_FILE: /run/secrets/api_db_password
+      GUTTER_WORKER_DB_PASSWORD_FILE: /run/secrets/worker_db_password
     depends_on: { db: { condition: service_healthy } }
     restart: 'no'
     networks: [internal]
+    secrets: [api_db_password, worker_db_password]
   api:
     build: { context: ., target: api }
     command: [node, --import, tsx, src/index.ts]
     environment:
-      DATABASE_URL: 'postgresql://gutter:${POSTGRES_PASSWORD:-}@db:5432/gutter'
+      DATABASE_HOST: db
+      DATABASE_NAME: gutter
+      DATABASE_USER: gutter_api
+      DATABASE_PASSWORD_FILE: /run/secrets/api_db_password
       BETTER_AUTH_SECRET_FILE: /run/secrets/better_auth_secret
+      GUTTER_READER_CAPABILITY_SECRET_FILE: /run/secrets/reader_capability_secret
       GUTTER_AUTH_ORIGIN: ${GUTTER_AUTH_ORIGIN:-http://localhost:8080}
       # Caddy is fixed at 172.30.0.20; API is otherwise unreachable from clients.
       GUTTER_AUTH_TRUSTED_PROXIES_JSON: '["172.30.0.20"]'
@@ -43,18 +50,23 @@ services:
       retries: 20
     networks:
       internal: { ipv4_address: 172.30.0.10 }
-    secrets: [better_auth_secret]
+    secrets: [api_db_password, better_auth_secret, reader_capability_secret]
   worker:
     build: { context: ., target: worker }
     command: [node, --import, tsx, src/index.ts]
     environment:
-      DATABASE_URL: 'postgresql://gutter:${POSTGRES_PASSWORD:-}@db:5432/gutter'
+      DATABASE_HOST: db
+      DATABASE_NAME: gutter
+      DATABASE_USER: gutter_worker
+      DATABASE_PASSWORD_FILE: /run/secrets/worker_db_password
+      GUTTER_READER_CAPABILITY_SECRET_FILE: /run/secrets/reader_capability_secret
       GUTTER_ALLOWED_ROOTS_JSON: '[]'
       GUTTER_DERIVED_CACHE_ROOT: /cache/derived
       GUTTER_DERIVED_CACHE_QUOTA_BYTES: '10737418240'
     depends_on: { migrate: { condition: service_completed_successfully } }
     volumes: [cache-data:/cache]
     networks: [internal]
+    secrets: [worker_db_password, reader_capability_secret]
   web:
     build:
       context: .
@@ -134,8 +146,14 @@ volumes:
   db-data:
   cache-data:
 secrets:
+  api_db_password:
+    file: ./secrets/api_db_password
   better_auth_secret:
     file: ./secrets/better_auth_secret
+  reader_capability_secret:
+    file: ./secrets/reader_capability_secret
+  worker_db_password:
+    file: ./secrets/worker_db_password
 networks:
   internal:
     internal: true

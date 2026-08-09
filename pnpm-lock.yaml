@@ -47,6 +47,9 @@ importers:
       '@gutter/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@gutter/reader-stream':
+        specifier: workspace:*
+        version: link:../../packages/reader-stream
       '@hono/node-server':
         specifier: 2.1.0
         version: 2.1.0(hono@4.13.0)
@@ -214,6 +217,9 @@ importers:
       pg:
         specifier: 8.22.0
         version: 8.22.0
+      pg-boss:
+        specifier: 12.27.0
+        version: 12.27.0
       tsx:
         specifier: 4.23.11
         version: 4.23.11

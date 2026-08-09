@@ -37,6 +37,103 @@ export const pool = new Pool({ connectionString: await databaseUrl() });
 export const db = drizzle(pool);
 
 const canonicalIdentityKey = /^[0-9a-f]{64}$/;
+export type LibraryAccessScope = Readonly<{
+  userId: string;
+  isAdmin: boolean;
+  rootIds: readonly string[];
+  revision: number;
+  scopeHash: string;
+}>;
+
+export async function libraryAccessScope(userId: string): Promise<LibraryAccessScope> {
+  const user = await pool.query<{ role: string | null }>('select role from "user" where id=$1', [
+    userId,
+  ]);
+  if (!user.rows[0]) throw new Error('user_not_found');
+  const isAdmin = user.rows[0].role === 'admin';
+  const grants = isAdmin
+    ? []
+    : (
+        await pool.query<{ root_id: string }>(
+          'select root_id from library_access_grants where user_id=$1 order by root_id',
+          [userId],
+        )
+      ).rows.map((row) => row.root_id);
+  const revision = isAdmin
+    ? 0
+    : Number(
+        (
+          await pool.query<{ revision: string }>(
+            'select revision from gutter_acl_revisions where user_id=$1',
+            [userId],
+          )
+        ).rows[0]?.revision ?? 0,
+      );
+  const scopeHash = createHash('sha256')
+    .update(JSON.stringify({ userId, isAdmin, grants, revision }), 'utf8')
+    .digest('hex');
+  return { userId, isAdmin, rootIds: grants, revision, scopeHash };
+}
+
+export function canAccessLibrary(scope: LibraryAccessScope, rootId: string): boolean {
+  return scope.isAdmin || scope.rootIds.includes(rootId);
+}
+
+export async function changeLibraryAccess(
+  actorUserId: string,
+  subjectUserId: string,
+  rootId: string,
+  action: 'grant' | 'revoke',
+  requestId: string,
+): Promise<number> {
+  if (!requestId || requestId.length > 128) throw new Error('invalid_request_id');
+  const client = await pool.connect();
+  try {
+    await client.query('begin');
+    const actor = await client.query<{ role: string | null }>(
+      'select role from "user" where id=$1 for update',
+      [actorUserId],
+    );
+    if (actor.rows[0]?.role !== 'admin') throw new Error('admin_required');
+    const changed =
+      action === 'grant'
+        ? await client.query(
+            `insert into library_access_grants(user_id,root_id,granted_by_user_id)
+             values($1,$2,$3) on conflict do nothing returning user_id`,
+            [subjectUserId, rootId, actorUserId],
+          )
+        : await client.query(
+            'delete from library_access_grants where user_id=$1 and root_id=$2 returning user_id',
+            [subjectUserId, rootId],
+          );
+    if (changed.rowCount === 0) {
+      const current = await client.query<{ revision: string }>(
+        'select revision from gutter_acl_revisions where user_id=$1',
+        [subjectUserId],
+      );
+      await client.query('commit');
+      return Number(current.rows[0]?.revision ?? 0);
+    }
+    const revision = await client.query<{ revision: string }>(
+      `insert into gutter_acl_revisions(user_id,revision) values($1,1)
+       on conflict(user_id) do update set revision=gutter_acl_revisions.revision+1,updated_at=now()
+       returning revision`,
+      [subjectUserId],
+    );
+    await client.query(
+      `insert into gutter_acl_audit(actor_user_id,subject_user_id,root_id,action,request_id)
+       values($1,$2,$3,$4,$5)`,
+      [actorUserId, subjectUserId, rootId, action, requestId],
+    );
+    await client.query('commit');
+    return Number(revision.rows[0]!.revision);
+  } catch (error) {
+    await client.query('rollback');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
 export async function metadataStatus(rootId: string, canonicalIdentity: string) {
   if (!canonicalIdentityKey.test(canonicalIdentity)) throw new Error('invalid_canonical_identity');
   return pool.query(
@@ -560,11 +657,16 @@ export type CatalogListQuery = Readonly<{
   values: unknown[];
   filters: ReturnType<typeof normalizeCatalogFilters>;
   cursor: ReturnType<typeof decodeCatalogCursor>;
+  filterHash: string;
 }>;
 /** Keyset selection is performed against the rebuildable list state before hydrating at most 101
  * series rows. The entity/kind predicates only decide membership; no aggregate is computed on read. */
-export function catalogSeriesListQuery(options: CatalogListOptions = {}): CatalogListQuery {
+export function catalogSeriesListQuery(
+  options: CatalogListOptions,
+  scope: LibraryAccessScope,
+): CatalogListQuery {
   const filters = normalizeCatalogFilters(options);
+  const filterHash = cursorFilterHash({ ...filters, accessScope: scope.scopeHash });
   const { sort, direction } = filters;
   const cursor = options.cursor ? decodeCatalogCursor(options.cursor) : null;
   if (
@@ -572,7 +674,7 @@ export function catalogSeriesListQuery(options: CatalogListOptions = {}): Catalo
     (!cursor ||
       cursor.sort !== sort ||
       cursor.direction !== direction ||
-      cursor.filterHash !== cursorFilterHash(filters))
+      cursor.filterHash !== filterHash)
   )
     throw new Error('invalid_catalog_cursor');
   const order = direction === 'asc' ? 'asc' : 'desc';
@@ -618,6 +720,7 @@ export function catalogSeriesListQuery(options: CatalogListOptions = {}): Catalo
            select 1 from catalog_publications p join catalog_releases r on r.publication_id=p.id
            join visible_source_items i on i.id=r.source_item_id join catalog_credits c on c.release_id=r.id
            join catalog_entities e on e.id=c.entity_id where p.series_id=ls.series_id and e.kind='publisher' and e.search_key=$6))
+         and ($10::boolean or ls.library_id=any($11::text[]))
          and ${cursorPredicate}
        order by ${key} ${order},ls.series_id ${order} limit $9
      )
@@ -636,15 +739,19 @@ export function catalogSeriesListQuery(options: CatalogListOptions = {}): Catalo
       cursor?.tuple[0] ?? null,
       cursor?.tuple[1] ?? null,
       filters.limit + 1,
+      scope.isAdmin,
+      [...scope.rootIds],
     ],
     filters,
     cursor,
+    filterHash,
   };
 }
 export async function listCatalogSeries(
-  options: CatalogListOptions = {},
+  options: CatalogListOptions,
+  scope: LibraryAccessScope,
 ): Promise<CatalogListResult> {
-  const query = catalogSeriesListQuery(options);
+  const query = catalogSeriesListQuery(options, scope);
   const result = await pool.query<{
     id: string;
     cursor_key: string;
@@ -663,23 +770,33 @@ export async function listCatalogSeries(
             scope: 'series',
             sort: query.filters.sort,
             direction: query.filters.direction,
-            filterHash: cursorFilterHash(query.filters),
+            filterHash: query.filterHash,
             tuple: [last.cursor_key, String(last.id)],
           })
         : null,
   };
 }
-export async function listCatalogLibraries(): Promise<Record<string, unknown>[]> {
+export async function listCatalogLibraries(
+  scope: LibraryAccessScope,
+): Promise<Record<string, unknown>[]> {
   return (
-    await pool.query(`select l.id,l.display_name as "displayName",r.state,r.reason_code as "reasonCode",r.checked_at as "checkedAt"
-    from catalog_libraries l join library_roots r on r.id=l.id where r.active order by l.id collate "C"`)
+    await pool.query(
+      `select l.id,l.display_name as "displayName",r.state,r.reason_code as "reasonCode",r.checked_at as "checkedAt"
+       from catalog_libraries l join library_roots r on r.id=l.id
+       where r.active and ($1::boolean or l.id=any($2::text[])) order by l.id collate "C"`,
+      [scope.isAdmin, [...scope.rootIds]],
+    )
   ).rows;
 }
-export async function catalogSeriesDetail(id: string): Promise<Record<string, unknown> | null> {
+export async function catalogSeriesDetail(
+  id: string,
+  scope: LibraryAccessScope,
+): Promise<Record<string, unknown> | null> {
   const series = await pool.query(
     `select s.id,s.display_name as "displayName",s.library_id as "libraryId" from catalog_series s
-    where s.id=$1 and exists (select 1 from catalog_publications p join catalog_releases r on r.publication_id=p.id join visible_source_items i on i.id=r.source_item_id where p.series_id=s.id)`,
-    [id],
+    where s.id=$1 and ($2::boolean or s.library_id=any($3::text[]))
+    and exists (select 1 from catalog_publications p join catalog_releases r on r.publication_id=p.id join visible_source_items i on i.id=r.source_item_id where p.series_id=s.id)`,
+    [id, scope.isAdmin, [...scope.rootIds]],
   );
   if (!series.rows[0]) return null;
   const publications = await pool.query(
@@ -692,12 +809,14 @@ export async function catalogSeriesDetail(id: string): Promise<Record<string, un
 }
 export async function catalogPublicationDetail(
   id: string,
+  scope: LibraryAccessScope,
 ): Promise<Record<string, unknown> | null> {
   const publication = await pool.query(
     `select p.id,p.display_name as "displayName",p.kind,p.volume,p.number_text as "number",s.id as "seriesId",s.display_name as "seriesName"
     from catalog_publications p join catalog_series s on s.id=p.series_id where p.id=$1
+    and ($2::boolean or s.library_id=any($3::text[]))
     and exists (select 1 from catalog_releases r join visible_source_items i on i.id=r.source_item_id where r.publication_id=p.id)`,
-    [id],
+    [id, scope.isAdmin, [...scope.rootIds]],
   );
   if (!publication.rows[0]) return null;
   const releases = await pool.query(
@@ -727,24 +846,29 @@ export async function catalogPublicationDetail(
 export async function catalogEntityDetail(
   kind: 'creator' | 'group' | 'publisher',
   id: string,
+  scope: LibraryAccessScope,
 ): Promise<Record<string, unknown> | null> {
   const entity = await pool.query(
     `select e.id,e.kind,e.display_name as "displayName" from catalog_entities e where e.id=$1 and e.kind=$2
-    and exists (select 1 from catalog_credits c join catalog_releases r on r.id=c.release_id join visible_source_items i on i.id=r.source_item_id where c.entity_id=e.id)`,
-    [id, kind],
+    and exists (select 1 from catalog_credits c join catalog_releases r on r.id=c.release_id
+    join visible_source_items i on i.id=r.source_item_id where c.entity_id=e.id
+    and ($3::boolean or r.root_id=any($4::text[])))`,
+    [id, kind, scope.isAdmin, [...scope.rootIds]],
   );
   if (!entity.rows[0]) return null;
   const publications = await pool.query(
     `select distinct p.id,p.display_name as "displayName",p.kind,s.id as "seriesId",s.display_name as "seriesName"
     from catalog_credits c join catalog_releases r on r.id=c.release_id join catalog_publications p on p.id=r.publication_id
     join catalog_series s on s.id=p.series_id join visible_source_items i on i.id=r.source_item_id
-    where c.entity_id=$1 order by p.display_name,p.id`,
-    [id],
+    where c.entity_id=$1 and ($2::boolean or r.root_id=any($3::text[]))
+    order by p.display_name,p.id`,
+    [id, scope.isAdmin, [...scope.rootIds]],
   );
   return { ...entity.rows[0], publications: publications.rows };
 }
 export async function listCatalogEntities(
   kind: 'creator' | 'group' | 'publisher',
+  scope: LibraryAccessScope,
   options: { q?: string; limit?: number } = {},
 ): Promise<Record<string, unknown>[]> {
   const query = searchKey(options.q) ?? null;
@@ -755,8 +879,9 @@ export async function listCatalogEntities(
      from catalog_entities e join catalog_credits c on c.entity_id=e.id join catalog_releases r on r.id=c.release_id
      join catalog_publications p on p.id=r.publication_id join visible_source_items i on i.id=r.source_item_id
      where e.kind=$1 and ($2::text is null or e.search_key like '%' || $2 || '%')
-     group by e.id order by e.display_name collate "C",e.id limit $3`,
-      [kind, query, limit],
+     and ($3::boolean or r.root_id=any($4::text[]))
+     group by e.id order by e.display_name collate "C",e.id limit $5`,
+      [kind, query, scope.isAdmin, [...scope.rootIds], limit],
     )
   ).rows;
 }
@@ -1620,6 +1745,28 @@ export type ReaderReleaseDescriptor = Readonly<{
 /** Stable browser-local identity for one configured root/source without exposing its path. */
 export function readerProgressKey(rootId: string, relativePath: string): string {
   return `source:${createHash('sha256').update(`${rootId}\u0000${relativePath}`).digest('base64url')}`;
+}
+
+export async function readerRootForRequestPath(pathname: string): Promise<string | null> {
+  const release = /^\/api\/reader\/releases\/([1-9][0-9]*)(?:\/pages\/[0-9]+)?$/.exec(pathname);
+  if (release) {
+    const result = await pool.query<{ root_id: string }>(
+      `select r.root_id from catalog_releases r join visible_source_items i on i.id=r.source_item_id
+       join library_roots root on root.id=r.root_id and root.active where r.id=$1 limit 1`,
+      [release[1]],
+    );
+    return result.rows[0]?.root_id ?? null;
+  }
+  const publication = /^\/api\/reader\/publications\/([1-9][0-9]*)$/.exec(pathname);
+  if (!publication) return null;
+  const result = await pool.query<{ library_id: string }>(
+    `select s.library_id from catalog_publications p join catalog_series s on s.id=p.series_id
+     join library_roots root on root.id=s.library_id and root.active where p.id=$1
+     and exists(select 1 from catalog_releases r join visible_source_items i on i.id=r.source_item_id
+       where r.publication_id=p.id) limit 1`,
+    [publication[1]],
+  );
+  return result.rows[0]?.library_id ?? null;
 }
 
 export async function getReaderReleaseDescriptor(

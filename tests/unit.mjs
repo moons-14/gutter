@@ -36,6 +36,8 @@ const {
 } = await import('../packages/catalog-domain/src/index.ts');
 const { startWatcherHints } = await import('../apps/worker/src/watcher-hints.ts');
 const { dispatchReconciliationRequests } = await import('../apps/worker/src/discovery-queue.ts');
+const { signReaderCapability, verifyReaderCapability } =
+  await import('../packages/reader-stream/src/index.ts');
 const encryptedCbz = Buffer.from(
   'UEsDBAoACQAAAIVOCF2vkRsVIQAAABUAAAAIABwAcGFnZS5qcGdVVAkAA0r8dmpK/HZqdXgLAAEE6AMAAARkAAAADs+a2joAGpSwmOXBRggO4AmBwyUoGVsL/3/bZ+ZlJe4kUEsHCK+RGxUhAAAAFQAAAFBLAQIeAwoACQAAAIVOCF2vkRsVIQAAABUAAAAIABgAAAAAAAEAAACkgQAAAABwYWdlLmpwZ1VUBQADSvx2anV4CwABBOgDAAAEZAAAAFBLBQYAAAAAAQABAE4AAABzAAAAAAA=',
   'base64',
@@ -86,6 +88,26 @@ test('catalog cursors keep database IDs and microsecond timestamps lossless', ()
     ),
     null,
   );
+});
+
+test('reader capabilities are short-lived and bound to the exact internal route', () => {
+  const secret = 'reader-capability-unit-secret-at-least-32-bytes';
+  const now = 1_800_000_000_000;
+  const path = '/api/reader/releases/42/pages/3';
+  const token = signReaderCapability(
+    secret,
+    { userId: 'user-a', rootId: 'root-a', path, aclRevision: 7 },
+    now,
+  );
+  const verified = verifyReaderCapability(secret, token, path, now + 9_000);
+  assert.equal(verified?.userId, 'user-a');
+  assert.equal(verified?.rootId, 'root-a');
+  assert.equal(verified?.aclRevision, 7);
+  assert.match(verified?.nonce ?? '', /^[A-Za-z0-9_-]{22}$/);
+  assert.equal(verifyReaderCapability(secret, token, '/api/reader/releases/42/pages/4', now), null);
+  assert.equal(verifyReaderCapability(`${secret}x`, token, path, now), null);
+  assert.equal(verifyReaderCapability(secret, `${token}x`, path, now), null);
+  assert.equal(verifyReaderCapability(secret, token, path, now + 11_000), null);
 });
 
 function zip(entries) {
@@ -541,8 +563,8 @@ async function withEnvironment(values, run) {
   }
 }
 
-test('M5 documents the authentication schema version', () => {
-  assert.equal(schemaVersion, '0008_auth_foundation');
+test('M5 documents the access-control schema version', () => {
+  assert.equal(schemaVersion, '0009_access_control');
 });
 
 test('catalog UI exposes entity discovery and publication credit links', async () => {
@@ -653,7 +675,12 @@ test('auth proxy preserves the Better Auth path and uses a fixed internal source
     readFile(join(process.cwd(), 'compose.yaml'), 'utf8'),
   ]);
   assert.match(caddy, /handle \/api\/auth\/\*/);
+  assert.match(caddy, /handle \/api\/reader\/\*[\s\S]*?reverse_proxy api:3000/);
+  assert.doesNotMatch(caddy, /handle \/api\/reader\/\*[\s\S]*?reverse_proxy worker:3001/);
   assert.match(compose, /GUTTER_AUTH_TRUSTED_PROXIES_JSON: '\["172\.30\.0\.20"\]'/);
+  assert.match(compose, /DATABASE_USER: gutter_api/);
+  assert.match(compose, /DATABASE_USER: gutter_worker/);
+  assert.match(compose, /GUTTER_READER_CAPABILITY_SECRET_FILE/);
   assert.match(compose, /ipv4_address: 172\.30\.0\.20/);
   assert.match(compose, /subnet: 172\.30\.0\.0\/24/);
 });

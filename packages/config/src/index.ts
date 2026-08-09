@@ -28,10 +28,35 @@ export async function secret(name: string): Promise<string> {
 }
 
 export async function databaseUrl(): Promise<string> {
-  return z
+  if (process.env.DATABASE_URL?.trim() || process.env.DATABASE_URL_FILE?.trim())
+    return z
+      .string()
+      .url()
+      .parse(await secret('DATABASE_URL'));
+  const host = z.string().min(1).parse(process.env.DATABASE_HOST);
+  const name = z
     .string()
-    .url()
-    .parse(await secret('DATABASE_URL'));
+    .regex(/^[A-Za-z0-9_-]+$/)
+    .parse(process.env.DATABASE_NAME);
+  const user = z
+    .string()
+    .regex(/^[A-Za-z0-9_-]+$/)
+    .parse(process.env.DATABASE_USER);
+  const password = await secret('DATABASE_PASSWORD');
+  const url = new URL('postgresql://localhost');
+  url.hostname = host;
+  url.port = process.env.DATABASE_PORT ?? '5432';
+  url.username = user;
+  url.password = password;
+  url.pathname = `/${name}`;
+  return url.toString();
+}
+
+export async function readerCapabilitySecret(): Promise<string> {
+  const value = await secret('GUTTER_READER_CAPABILITY_SECRET');
+  if (Buffer.byteLength(value, 'utf8') < 32)
+    throw new Error('GUTTER_READER_CAPABILITY_SECRET must contain at least 32 bytes');
+  return value;
 }
 
 /** Authentication is intentionally local-only: an explicit public origin and file-backed secret are required. */
@@ -92,7 +117,7 @@ export function derivedCacheConfig(): Readonly<{ root: string; quotaBytes: numbe
   return { root: root.data, quotaBytes: quota.data };
 }
 
-export const schemaVersion = '0008_auth_foundation';
+export const schemaVersion = '0009_access_control';
 
 /** Local sidecars only; the worker never accepts a provider endpoint from a job payload. */
 export type MetadataSidecar = Readonly<{

@@ -19,7 +19,9 @@ RUN pnpm --filter @gutter/db --prod deploy /out
 FROM node:24.19.0-bookworm-slim AS runtime-base
 WORKDIR /app
 ENV NODE_ENV=production
-RUN useradd --system --uid 10001 gutter
+RUN useradd --system --uid 10001 gutter \
+  && mkdir -p /cache/derived \
+  && chown -R gutter:gutter /cache
 USER gutter
 
 FROM runtime-base AS api

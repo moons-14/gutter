@@ -15,15 +15,22 @@ import {
   catalogEntityDetail,
   catalogPublicationDetail,
   catalogSeriesDetail,
+  canAccessLibrary,
+  changeLibraryAccess,
+  libraryAccessScope,
   listCatalogEntities,
   listCatalogLibraries,
   listCatalogSeries,
   pool,
+  readerRootForRequestPath,
+  type LibraryAccessScope,
 } from '@gutter/db';
+import { readerCapabilitySecret } from '@gutter/config';
+import { signReaderCapability } from '@gutter/reader-stream';
 import { Gauge, Registry, collectDefaultMetrics } from 'prom-client';
 import pino from 'pino';
 import { reconciliationMetricLabels } from './metrics.js';
-import { authHandler } from './auth.js';
+import { authenticatedUser, authHandler, trustedMutationOrigin } from './auth.js';
 
 const log = pino({
   redact: ['req.headers.authorization', 'req.headers.cookie', '*.password', '*.token'],
@@ -37,6 +44,7 @@ const reconciliationRequests = new Gauge({
   registers: [metrics],
 });
 const app = new OpenAPIHono();
+const readerCapabilityKey = await readerCapabilitySecret();
 
 app.use('*', async (c, next) => {
   const requestId = c.req.header('x-request-id') ?? crypto.randomUUID();
@@ -90,6 +98,79 @@ app.post('/api/auth/bootstrap', async (c) => {
 });
 app.all('/api/auth/sign-up/email', (c) => c.json({ error: 'public_signup_disabled' }, 403));
 app.all('/api/auth/*', (c) => authHandler(c.req.raw));
+app.all('/api/reader/*', async (c) => {
+  if (!['GET', 'HEAD'].includes(c.req.method)) return c.body(null, 404);
+  const user = await authenticatedUser(c.req.raw);
+  if (!user) return c.json({ error: 'not_found' }, 404);
+  const scope = await libraryAccessScope(user.id);
+  const pathname = new URL(c.req.url).pathname;
+  const rootId = await readerRootForRequestPath(pathname);
+  if (!rootId || !canAccessLibrary(scope, rootId)) return c.json({ error: 'not_found' }, 404);
+  const headers = new Headers();
+  for (const name of ['range', 'if-none-match', 'if-modified-since']) {
+    const value = c.req.header(name);
+    if (value) headers.set(name, value);
+  }
+  headers.set(
+    'x-gutter-reader-capability',
+    signReaderCapability(readerCapabilityKey, {
+      userId: user.id,
+      rootId,
+      path: pathname,
+      aclRevision: scope.revision,
+    }),
+  );
+  const upstream = await fetch(`http://worker:3001${pathname}`, {
+    method: c.req.method,
+    headers,
+    signal: c.req.raw.signal,
+  });
+  const responseHeaders = new Headers();
+  for (const name of [
+    'accept-ranges',
+    'content-length',
+    'content-range',
+    'content-type',
+    'etag',
+    'last-modified',
+  ]) {
+    const value = upstream.headers.get(name);
+    if (value) responseHeaders.set(name, value);
+  }
+  responseHeaders.set('cache-control', 'no-store');
+  return new Response(upstream.body, { status: upstream.status, headers: responseHeaders });
+});
+const requestAccess = new WeakMap<Request, LibraryAccessScope>();
+app.use('/catalog/*', async (c, next) => {
+  const user = await authenticatedUser(c.req.raw);
+  if (!user) return c.json({ error: 'authentication_required' }, 401);
+  requestAccess.set(c.req.raw, await libraryAccessScope(user.id));
+  await next();
+});
+for (const [method, action] of [
+  ['put', 'grant'],
+  ['delete', 'revoke'],
+] as const)
+  app[method]('/admin/library-access/:userId/:rootId', async (c) => {
+    if (!trustedMutationOrigin(c.req.raw)) return c.json({ error: 'invalid_origin' }, 403);
+    const actor = await authenticatedUser(c.req.raw);
+    if (!actor) return c.json({ error: 'authentication_required' }, 401);
+    if (actor.role !== 'admin') return c.json({ error: 'not_found' }, 404);
+    try {
+      const revision = await changeLibraryAccess(
+        actor.id,
+        c.req.param('userId'),
+        c.req.param('rootId'),
+        action,
+        c.req.header('x-request-id') ?? crypto.randomUUID(),
+      );
+      return c.json({ revision }, 200);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === '23503')
+        return c.json({ error: 'not_found' }, 404);
+      throw error;
+    }
+  });
 app.openapi(readinessRoute, async (c) => {
   try {
     await assertSchema();
@@ -100,13 +181,17 @@ app.openapi(readinessRoute, async (c) => {
   }
 });
 app.openapi(catalogLibrariesRoute, async (c) =>
-  c.json({ items: await listCatalogLibraries(), nextCursor: null }, 200),
+  c.json(
+    { items: await listCatalogLibraries(requestAccess.get(c.req.raw)!), nextCursor: null },
+    200,
+  ),
 );
 app.openapi(catalogSeriesRoute, async (c) => {
   const query = c.req.valid('query');
   try {
-    const page = await listCatalogSeries(query);
-    return c.json({ ...page, libraries: await listCatalogLibraries() }, 200);
+    const scope = requestAccess.get(c.req.raw)!;
+    const page = await listCatalogSeries(query, scope);
+    return c.json({ ...page, libraries: await listCatalogLibraries(scope) }, 200);
   } catch (error) {
     if (error instanceof Error && error.message === 'invalid_catalog_cursor')
       return c.json({ error: 'invalid_cursor' }, 400);
@@ -114,11 +199,14 @@ app.openapi(catalogSeriesRoute, async (c) => {
   }
 });
 app.openapi(catalogSeriesDetailRoute, async (c) => {
-  const item = await catalogSeriesDetail(c.req.valid('param').id);
+  const item = await catalogSeriesDetail(c.req.valid('param').id, requestAccess.get(c.req.raw)!);
   return item ? c.json(item, 200) : c.json({ error: 'not_found' }, 404);
 });
 app.openapi(catalogPublicationDetailRoute, async (c) => {
-  const item = await catalogPublicationDetail(c.req.valid('param').id);
+  const item = await catalogPublicationDetail(
+    c.req.valid('param').id,
+    requestAccess.get(c.req.raw)!,
+  );
   return item ? c.json(item, 200) : c.json({ error: 'not_found' }, 404);
 });
 for (const [path, kind] of [
@@ -127,7 +215,11 @@ for (const [path, kind] of [
   ['/catalog/publishers/{id}', 'publisher'],
 ] as const)
   app.openapi(catalogEntityRoute(path), async (c) => {
-    const item = await catalogEntityDetail(kind, c.req.valid('param').id);
+    const item = await catalogEntityDetail(
+      kind,
+      c.req.valid('param').id,
+      requestAccess.get(c.req.raw)!,
+    );
     return item ? c.json(item, 200) : c.json({ error: 'not_found' }, 404);
   });
 for (const [path, kind] of [
@@ -136,7 +228,12 @@ for (const [path, kind] of [
   ['/catalog/publishers', 'publisher'],
 ] as const)
   app.openapi(catalogEntitiesRoute(path), async (c) =>
-    c.json({ items: await listCatalogEntities(kind, c.req.valid('query')) }, 200),
+    c.json(
+      {
+        items: await listCatalogEntities(kind, requestAccess.get(c.req.raw)!, c.req.valid('query')),
+      },
+      200,
+    ),
   );
 app.get('/metrics', async (c) => {
   const rows = await pool.query<{ trigger: string; state: string; count: string }>(

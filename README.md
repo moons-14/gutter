@@ -20,15 +20,19 @@ the internal API. Run `docker compose --profile test run --rm test` for the live
 after `docker compose up -d db migrate api web`.
 
 For production, Docker Compose v2.24.4 or newer is required for the reset tags in the overlay.
-Create non-committed `secrets/postgres_password` and `secrets/database_url`, then run:
+Create non-committed `secrets/postgres_password`, `secrets/database_url`,
+`secrets/api_db_password`, `secrets/worker_db_password`, `secrets/better_auth_secret`, and
+`secrets/reader_capability_secret`, then run:
 
 ```sh
 docker compose -f compose.yaml -f compose.production.example.yaml up --build
 ```
 
-The overlay removes the direct development variables before PostgreSQL consumes its official
-`POSTGRES_PASSWORD_FILE` and API, worker, and migrate consume `DATABASE_URL_FILE`. The values are
-mandatory at runtime: use either direct development values or the file variants, never both.
+The overlay removes the direct development variables before PostgreSQL and the migrator consume
+their owner secrets. The migrator creates and rotates separate least-privilege `gutter_api` and
+`gutter_worker` login roles; API and worker receive only their own password file. Better Auth and
+the internal reader capability use separate secrets. All values are mandatory at runtime: use
+either direct development values or the file variants, never both.
 
 For NAS libraries, mount NFS/SMB on the host and bind only that host mount into `worker`. Copy the
 tracked example and adjust its one root id, host mount, and matching container path:
