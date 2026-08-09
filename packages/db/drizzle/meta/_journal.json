@@ -58,6 +58,13 @@
       "when": 1786748400000,
       "tag": "0008_auth_foundation",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1786834800000,
+      "tag": "0009_access_control",
+      "breakpoints": true
     }
   ]
 }

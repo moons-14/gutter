@@ -16,6 +16,21 @@ That request atomically consumes the bootstrap claim and creates the first accou
 role. `/api/auth/sign-up/email` is always rejected by Gutter, so later accounts require an admin
 flow (not yet exposed in the browser UI).
 
+Library access is deny-by-default for ordinary users. An authenticated administrator can grant or
+revoke a stable configured root with `PUT` or `DELETE`
+`/api/admin/library-access/<user-id>/<root-id>` from the configured same origin. Every effective
+change increments that user's ACL revision and appends an immutable audit row containing actor,
+subject, root, action, timestamp, and request ID. Audit rows are retained indefinitely; PostgreSQL
+rejects updates and deletes. Revocation invalidates existing catalog cursors immediately and the
+next reader request returns a non-enumerating 404. A byte stream already opened before revocation
+may finish, but its signed internal worker capability expires within ten seconds and is bound to
+the exact user, root, ACL revision, and request path.
+
+The production deployment uses distinct migrator, API, and worker database identities. Keep
+`database_url`, `api_db_password`, and `worker_db_password` separate and rotate the two runtime
+password files by rerunning the migrator before restarting API and worker. Worker has no access to
+authentication or ACL tables; API cannot mutate source inventory or audit history.
+
 For local operator recovery, revoke all sessions without changing credentials:
 
 `pnpm --filter @gutter/api auth revoke-sessions admin@example.invalid`

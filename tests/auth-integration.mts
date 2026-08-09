@@ -15,14 +15,21 @@ test(
   'M5 auth uses a disposable Compose-internal test runner',
   async () => {
     const directory = await mkdtemp(join(tmpdir(), 'gutter-auth-'));
-    const secret = join(directory, 'better_auth_secret');
+    const authSecret = join(directory, 'better_auth_secret');
+    const readerSecret = join(directory, 'reader_capability_secret');
+    const apiDbPassword = join(directory, 'api_db_password');
+    const workerDbPassword = join(directory, 'worker_db_password');
     const override = join(directory, 'compose.yaml');
     const compose = ['compose', '--project-name', project, '-f', 'compose.yaml', '-f', override];
     try {
-      await writeFile(secret, randomBytes(48).toString('base64url'), { mode: 0o444 });
+      await Promise.all(
+        [authSecret, readerSecret, apiDbPassword, workerDbPassword].map((path) =>
+          writeFile(path, randomBytes(48).toString('base64url'), { mode: 0o444 }),
+        ),
+      );
       await writeFile(
         override,
-        `services:\n  web:\n    ports: !override []\nsecrets:\n  better_auth_secret:\n    file: ${secret}\n`,
+        `services:\n  web:\n    ports: !override []\nsecrets:\n  api_db_password:\n    file: ${apiDbPassword}\n  better_auth_secret:\n    file: ${authSecret}\n  reader_capability_secret:\n    file: ${readerSecret}\n  worker_db_password:\n    file: ${workerDbPassword}\n`,
       );
       const effective = JSON.parse(
         (
@@ -59,7 +66,19 @@ test(
         );
       } catch (error) {
         const failure = error as Error & { stdout?: string; stderr?: string };
-        const diagnostic = `${failure.stdout ?? ''}${failure.stderr ?? ''}`.slice(-8_000);
+        const serviceLogs = await exec(
+          'docker',
+          [...compose, 'logs', '--no-color', 'api', 'worker'],
+          {
+            cwd: root,
+            timeout: 30_000,
+          },
+        )
+          .then((result) => result.stdout)
+          .catch(() => '');
+        const diagnostic = `${failure.stdout ?? ''}${failure.stderr ?? ''}${serviceLogs}`.slice(
+          -16_000,
+        );
         throw new Error(
           `auth peer rate-limit isolation failed:\n${diagnostic || 'no peer diagnostics'}`,
           {
@@ -75,7 +94,19 @@ test(
         );
       } catch (error) {
         const failure = error as Error & { stdout?: string; stderr?: string };
-        const diagnostic = `${failure.stdout ?? ''}${failure.stderr ?? ''}`.slice(-8_000);
+        const serviceLogs = await exec(
+          'docker',
+          [...compose, 'logs', '--no-color', 'api', 'worker'],
+          {
+            cwd: root,
+            timeout: 30_000,
+          },
+        )
+          .then((result) => result.stdout)
+          .catch(() => '');
+        const diagnostic = `${failure.stdout ?? ''}${failure.stderr ?? ''}${serviceLogs}`.slice(
+          -16_000,
+        );
         throw new Error(`auth runtime failed:\n${diagnostic || 'no runner diagnostics'}`, {
           cause: error,
         });

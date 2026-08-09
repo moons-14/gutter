@@ -9,20 +9,30 @@ services:
     environment:
       DATABASE_URL: !reset null
       DATABASE_URL_FILE: /run/secrets/database_url
-    secrets: [database_url]
+      GUTTER_API_DB_PASSWORD_FILE: /run/secrets/api_db_password
+      GUTTER_WORKER_DB_PASSWORD_FILE: /run/secrets/worker_db_password
+    secrets: [database_url, api_db_password, worker_db_password]
   api:
     environment:
       DATABASE_URL: !reset null
-      DATABASE_URL_FILE: /run/secrets/database_url
+      DATABASE_HOST: db
+      DATABASE_NAME: gutter
+      DATABASE_USER: gutter_api
+      DATABASE_PASSWORD_FILE: /run/secrets/api_db_password
       BETTER_AUTH_SECRET_FILE: /run/secrets/better_auth_secret
+      GUTTER_READER_CAPABILITY_SECRET_FILE: /run/secrets/reader_capability_secret
       GUTTER_AUTH_ORIGIN: https://gutter.example.invalid
       GUTTER_AUTH_TRUSTED_PROXIES_JSON: '["172.30.0.20"]'
-    secrets: [database_url, better_auth_secret]
+    secrets: [api_db_password, better_auth_secret, reader_capability_secret]
   worker:
     environment:
       DATABASE_URL: !reset null
-      DATABASE_URL_FILE: /run/secrets/database_url
-    secrets: [database_url]
+      DATABASE_HOST: db
+      DATABASE_NAME: gutter
+      DATABASE_USER: gutter_worker
+      DATABASE_PASSWORD_FILE: /run/secrets/worker_db_password
+      GUTTER_READER_CAPABILITY_SECRET_FILE: /run/secrets/reader_capability_secret
+    secrets: [worker_db_password, reader_capability_secret]
   web:
     # Caddy is the sole public ingress and TLS terminator. Replace this hostname before use.
     environment:
@@ -41,12 +51,18 @@ services:
       timeout: 3s
       retries: 20
 secrets:
+  api_db_password:
+    file: ./secrets/api_db_password
   postgres_password:
     file: ./secrets/postgres_password
   database_url:
     file: ./secrets/database_url
   better_auth_secret:
     file: ./secrets/better_auth_secret
+  reader_capability_secret:
+    file: ./secrets/reader_capability_secret
+  worker_db_password:
+    file: ./secrets/worker_db_password
 volumes:
   caddy-data:
   caddy-config:

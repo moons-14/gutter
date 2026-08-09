@@ -3,10 +3,28 @@ import { lstat, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { createReaderHttpServer } from '../apps/worker/src/reader-http.ts';
+import {
+  createReaderHttpServer as createInternalReaderHttpServer,
+  type ReaderHttpDependencies,
+} from '../apps/worker/src/reader-http.ts';
 import { DerivedCache } from '../packages/derived-cache/src/index.ts';
 import { cacheStatus } from '../apps/worker/src/cache-status.ts';
 import { ReaderStreamLimiter } from '../packages/reader-stream/src/index.ts';
+
+const createReaderHttpServer = (deps: Omit<ReaderHttpDependencies, 'verifyCapability'>) =>
+  createInternalReaderHttpServer({
+    ...deps,
+    verifyCapability: (_token, path) => ({
+      v: 1,
+      aud: 'gutter-worker',
+      userId: 'test-user',
+      rootId: 'library',
+      path,
+      aclRevision: 1,
+      expiresAt: Math.floor(Date.now() / 1000) + 10,
+      nonce: 'a'.repeat(22),
+    }),
+  });
 
 async function listening(server: ReturnType<typeof createReaderHttpServer>): Promise<string> {
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -14,6 +32,45 @@ async function listening(server: ReturnType<typeof createReaderHttpServer>): Pro
   assert.ok(address && typeof address !== 'string');
   return `http://127.0.0.1:${address.port}`;
 }
+
+test('internal reader rejects missing or forged capability before DB or source access', async () => {
+  let accessed = false;
+  const path = '/api/reader/releases/42/pages/0';
+  const server = createInternalReaderHttpServer({
+    roots: new Map(),
+    verifyCapability: (token, actualPath) =>
+      token === 'valid' && actualPath === path
+        ? {
+            v: 1,
+            aud: 'gutter-worker',
+            userId: 'user-a',
+            rootId: 'library',
+            path,
+            aclRevision: 1,
+            expiresAt: Math.floor(Date.now() / 1000) + 10,
+            nonce: 'a'.repeat(22),
+          }
+        : null,
+    authorize: async () => {
+      accessed = true;
+      return null;
+    },
+  });
+  const base = await listening(server);
+  try {
+    assert.equal((await fetch(`${base}${path}`)).status, 404);
+    assert.equal(
+      (await fetch(`${base}${path}`, { headers: { 'x-gutter-reader-capability': 'forged' } }))
+        .status,
+      404,
+    );
+    assert.equal(accessed, false);
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+  }
+});
 
 test('internal reader HTTP route authorizes opaque release ordinal and has finite conditional/range semantics', async () => {
   const root = await mkdtemp(join(tmpdir(), 'gutter-reader-http-'));

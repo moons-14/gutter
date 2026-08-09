@@ -128,6 +128,110 @@ test('auth bootstrap, origin, proxy rate limit, revocation, disable, and logout'
       post(jar, '/api/auth/sign-in/email', { email, password }),
       200,
     );
+    const ordinaryEmail = `reader-${randomBytes(6).toString('hex')}@example.invalid`;
+    const ordinaryPassword = `test-${randomBytes(24).toString('base64url')}`;
+    const createdUser = await post(jar, '/api/auth/admin/create-user', {
+      name: 'reader',
+      email: ordinaryEmail,
+      password: ordinaryPassword,
+      role: 'user',
+    });
+    assert.equal(createdUser.status, 200, 'admin creates an ordinary user');
+    const ordinaryId = ((await createdUser.json()) as { user?: { id?: string } }).user?.id;
+    assert.ok(ordinaryId, 'created user returns an opaque id');
+    const rootId = `runtime-${randomBytes(6).toString('hex')}`;
+    await database.query(
+      `insert into library_roots(id,configured_path,canonical_path,state,checked_at,config_generation,active)
+       values($1,$2,$2,'ready_empty',now(),$3,true)`,
+      [rootId, `/runtime/${rootId}`, 'a'.repeat(64)],
+    );
+    await database.query(
+      `insert into catalog_libraries(id,display_name) values($1,'Runtime library')`,
+      [rootId],
+    );
+    const inserted = await database.query<{ id: string }>(
+      `insert into catalog_series(library_id,identity_key,identity_canonical_json,display_name,search_key,sort_key)
+       select $1,repeat(substr(md5(value::text),1,32),2),jsonb_build_array(value),
+         'Runtime series '||value,'runtime series '||value,'runtime series '||value
+       from generate_series(1,2) value returning id`,
+      [rootId],
+    );
+    for (const [index, row] of inserted.rows.entries())
+      await database.query(
+        `insert into catalog_series_list_state(
+          series_id,library_id,display_name,sort_key,search_document,visible_publication_count,
+          source_updated_mtime_ms,discovered_at,metadata_updated_at)
+         values($1,$2,$3,$3,$3,1,$4,now(),now())`,
+        [row.id, rootId, `Runtime series ${index + 1}`, index + 1],
+      );
+    const ordinary = new CookieJar();
+    await expectStatus(
+      'ordinary user login accepted',
+      post(ordinary, '/api/auth/sign-in/email', {
+        email: ordinaryEmail,
+        password: ordinaryPassword,
+      }),
+      200,
+    );
+    assert.deepEqual(
+      ((await (await ordinary.fetch('/api/catalog/libraries')).json()) as { items: unknown[] })
+        .items,
+      [],
+      'deny-default catalog list is empty',
+    );
+    assert.equal(
+      (
+        await jar.fetch(`/api/admin/library-access/${ordinaryId}/${rootId}`, {
+          method: 'PUT',
+          headers: { origin: 'http://foreign.invalid' },
+        })
+      ).status,
+      403,
+      'foreign-origin grant mutation is denied',
+    );
+    const grant = await jar.fetch(`/api/admin/library-access/${ordinaryId}/${rootId}`, {
+      method: 'PUT',
+      headers: { origin: publicOrigin, 'x-request-id': `grant-${rootId}` },
+    });
+    assert.equal(grant.status, 200, 'admin grants library access');
+    const firstPage = await ordinary.fetch('/api/catalog/series?limit=1');
+    assert.equal(firstPage.status, 200, 'granted user can list the library');
+    const firstPageBody = (await firstPage.json()) as {
+      items: Array<{ id: string }>;
+      nextCursor?: string | null;
+    };
+    assert.equal(firstPageBody.items.length, 1);
+    assert.ok(firstPageBody.nextCursor, 'granted list emits an ACL-scoped cursor');
+    const revoke = await jar.fetch(`/api/admin/library-access/${ordinaryId}/${rootId}`, {
+      method: 'DELETE',
+      headers: { origin: publicOrigin, 'x-request-id': `revoke-${rootId}` },
+    });
+    assert.equal(revoke.status, 200, 'admin revokes library access');
+    assert.equal(
+      (
+        await ordinary.fetch(
+          `/api/catalog/series?limit=1&cursor=${encodeURIComponent(firstPageBody.nextCursor!)}`,
+        )
+      ).status,
+      400,
+      'revocation immediately invalidates an issued catalog cursor',
+    );
+    assert.deepEqual(
+      ((await (await ordinary.fetch('/api/catalog/libraries')).json()) as { items: unknown[] })
+        .items,
+      [],
+      'revocation immediately removes the library from list hydration',
+    );
+    assert.equal(
+      (await ordinary.fetch('/api/reader/releases/999999')).status,
+      404,
+      'revoked reader request is non-enumerable',
+    );
+    assert.equal(
+      (await new CookieJar().fetch('/api/reader/releases/999999')).status,
+      404,
+      'anonymous reader request is non-enumerable',
+    );
     await expectStatus(
       'foreign-origin logout denied',
       post(jar, '/api/auth/sign-out', {}, 'http://foreign.invalid'),

@@ -1,4 +1,5 @@
 import { close as closeDescriptor, constants, fstat, open as openDescriptor } from 'node:fs';
+import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { BigIntStats } from 'node:fs';
 import type { FileHandle } from 'node:fs/promises';
 import { open, realpath } from 'node:fs/promises';
@@ -6,6 +7,76 @@ import { dirname, extname, relative, resolve, sep } from 'node:path';
 import { Transform, type Readable } from 'node:stream';
 import { crc32 } from 'node:zlib';
 import yauzl from 'yauzl';
+
+export type ReaderCapability = Readonly<{
+  v: 1;
+  aud: 'gutter-worker';
+  userId: string;
+  rootId: string;
+  path: string;
+  aclRevision: number;
+  expiresAt: number;
+  nonce: string;
+}>;
+
+export function signReaderCapability(
+  secret: string,
+  value: Omit<ReaderCapability, 'v' | 'aud' | 'expiresAt' | 'nonce'>,
+  now = Date.now(),
+): string {
+  const payload: ReaderCapability = {
+    v: 1,
+    aud: 'gutter-worker',
+    ...value,
+    expiresAt: Math.floor(now / 1000) + 10,
+    nonce: randomBytes(16).toString('base64url'),
+  };
+  const encoded = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
+  const signature = createHmac('sha256', secret).update(encoded, 'utf8').digest('base64url');
+  return `${encoded}.${signature}`;
+}
+
+export function verifyReaderCapability(
+  secret: string,
+  token: string | undefined,
+  expectedPath: string,
+  now = Date.now(),
+): ReaderCapability | null {
+  if (!token || token.length > 4096) return null;
+  const parts = token.split('.');
+  if (parts.length !== 2) return null;
+  const [encoded, provided] = parts as [string, string];
+  const expected = createHmac('sha256', secret).update(encoded, 'utf8').digest();
+  let signature: Buffer;
+  try {
+    signature = Buffer.from(provided, 'base64url');
+  } catch {
+    return null;
+  }
+  if (signature.length !== expected.length || !timingSafeEqual(signature, expected)) return null;
+  try {
+    const value = JSON.parse(
+      Buffer.from(encoded, 'base64url').toString('utf8'),
+    ) as ReaderCapability;
+    if (
+      value.v !== 1 ||
+      value.aud !== 'gutter-worker' ||
+      value.path !== expectedPath ||
+      !value.userId ||
+      !value.rootId ||
+      !Number.isSafeInteger(value.aclRevision) ||
+      value.aclRevision < 0 ||
+      !Number.isSafeInteger(value.expiresAt) ||
+      value.expiresAt < Math.floor(now / 1000) ||
+      value.expiresAt > Math.floor(now / 1000) + 10 ||
+      !/^[A-Za-z0-9_-]{22}$/.test(value.nonce)
+    )
+      return null;
+    return value;
+  } catch {
+    return null;
+  }
+}
 
 export const defaultReaderStreamLimits = {
   chunkBytes: 64 * 1024,

@@ -20,6 +20,7 @@ import {
   rejectMetadata,
   setGlobalSourceSuppression,
   startScanRun,
+  type LibraryAccessScope,
 } from '../../packages/db/src/index.ts';
 import {
   PgBoss,
@@ -29,6 +30,14 @@ import {
 } from '../../apps/worker/src/discovery-queue.ts';
 import type { LibraryRootSnapshot } from '../../packages/library-roots/src/index.ts';
 import type { ScanItem, ScanSummary } from '../../packages/discovery-scanner/src/index.ts';
+
+const adminScope: LibraryAccessScope = {
+  userId: 'integration-admin',
+  isAdmin: true,
+  rootIds: [],
+  revision: 0,
+  scopeHash: 'a'.repeat(64),
+};
 
 const ids = ['integration-alpha', 'integration-bravo', 'queue-root'];
 const generation = 'a'.repeat(64);
@@ -250,7 +259,9 @@ try {
     1,
   );
   assert.deepEqual(
-    (await listCatalogSeries({ q: 'stale-b', limit: 10 })).items.map((row) => row.displayName),
+    (await listCatalogSeries({ q: 'stale-b', limit: 10 }, adminScope)).items.map(
+      (row) => row.displayName,
+    ),
     ['stale-b'],
   );
   const staleSource = await pool.query<{ id: string }>(
@@ -267,14 +278,16 @@ try {
     `select p.id from catalog_publications p join catalog_series s on s.id=p.series_id
      where s.library_id='integration-alpha' and p.display_name='stale-b'`,
   );
-  const rebuiltDetail = await catalogPublicationDetail(rebuiltPublication.rows[0]!.id);
+  const rebuiltDetail = await catalogPublicationDetail(rebuiltPublication.rows[0]!.id, adminScope);
   assert.equal(rebuiltDetail?.releases.length, 1);
   assert.deepEqual(
     rebuiltDetail?.credits.map((credit: { displayName: string }) => credit.displayName),
     ['Writer'],
   );
   assert.deepEqual(
-    (await listCatalogSeries({ q: 'stale-b', limit: 10 })).items.map((row) => row.displayName),
+    (await listCatalogSeries({ q: 'stale-b', limit: 10 }, adminScope)).items.map(
+      (row) => row.displayName,
+    ),
     ['stale-b'],
   );
   // A full projection rebuild is disposable: suppression/inactivity make the durable preferred
@@ -292,7 +305,7 @@ try {
   );
   await setGlobalSourceSuppression(Number(staleSourceId), 'test-dormant');
   await rebuildCatalogSeriesListStateForIntegration();
-  assert.deepEqual((await listCatalogSeries({ q: 'stale-b', limit: 10 })).items, []);
+  assert.deepEqual((await listCatalogSeries({ q: 'stale-b', limit: 10 }, adminScope)).items, []);
   assert.equal(
     (
       await pool.query(
@@ -305,11 +318,13 @@ try {
   await clearGlobalSourceSuppression(Number(staleSourceId));
   await pool.query('update source_items set active=false where id=$1', [staleSourceId]);
   await rebuildCatalogSeriesListStateForIntegration();
-  assert.deepEqual((await listCatalogSeries({ q: 'stale-b', limit: 10 })).items, []);
+  assert.deepEqual((await listCatalogSeries({ q: 'stale-b', limit: 10 }, adminScope)).items, []);
   await pool.query('update source_items set active=true where id=$1', [staleSourceId]);
   await rebuildCatalogSeriesListStateForIntegration();
   assert.deepEqual(
-    (await listCatalogSeries({ q: 'stale-b', limit: 10 })).items.map((row) => row.displayName),
+    (await listCatalogSeries({ q: 'stale-b', limit: 10 }, adminScope)).items.map(
+      (row) => row.displayName,
+    ),
     ['stale-b'],
   );
 

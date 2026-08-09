@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { openReaderStream, ReaderStreamError, ReaderStreamLimiter } from '@gutter/reader-stream';
+import type { ReaderCapability } from '@gutter/reader-stream';
 import { DerivedCache, DerivedCacheError } from '@gutter/derived-cache';
 import { recordCacheStatus } from './cache-status.js';
 
@@ -27,6 +28,7 @@ export type AuthorizedPage = Readonly<{
 }>;
 export type ReaderHttpDependencies = Readonly<{
   roots: ReadonlyMap<string, { canonicalPath: string }>;
+  verifyCapability: (token: string | undefined, path: string) => ReaderCapability | null;
   authorize: (releaseId: string, ordinal: number) => Promise<AuthorizedPage | null>;
   describe?: (releaseId: string) => Promise<ReaderReleaseDescriptor | null>;
   describePublication?: (publicationId: string) => Promise<Readonly<{
@@ -118,6 +120,10 @@ export function createReaderHttpServer(deps: ReaderHttpDependencies): Server {
   return createServer(async (request: IncomingMessage, response: ServerResponse) => {
     if (deps.shutdownSignal?.aborted) return send(response, 503);
     const pathname = request.url && new URL(request.url, 'http://worker').pathname;
+    const token = request.headers['x-gutter-reader-capability'];
+    const capability =
+      pathname && deps.verifyCapability(typeof token === 'string' ? token : undefined, pathname);
+    if (!pathname || !capability) return send(response, 404);
     const descriptorMatch = pathname && descriptorRoute.exec(pathname);
     if (descriptorMatch && request.method === 'GET' && deps.describe) {
       const descriptor = await deps.describe(descriptorMatch[1]!).catch(() => null);
@@ -141,7 +147,7 @@ export function createReaderHttpServer(deps: ReaderHttpDependencies): Server {
     const ordinal = Number(match[2]);
     const authorized = await deps.authorize(match[1]!, ordinal).catch(() => null);
     const root = authorized && deps.roots.get(authorized.rootId);
-    if (!authorized || !root) return send(response, 404);
+    if (!authorized || !root || authorized.rootId !== capability.rootId) return send(response, 404);
     const etagValue = [match[1], ordinal, authorized.observed.size, authorized.sourceMtimeMs].join(
       '-',
     );

@@ -10,11 +10,19 @@ import {
   pool,
   rebuildCatalogProjectionForIntegration,
   setGlobalSourceSuppression,
+  type LibraryAccessScope,
 } from '../../packages/db/src/index.ts';
 
 if (process.env.GUTTER_INTEGRATION_TEST !== '1')
   throw new Error('catalog integration requires GUTTER_INTEGRATION_TEST=1');
 const rootId = `catalog-perf-${randomUUID()}`;
+const adminScope: LibraryAccessScope = {
+  userId: 'integration-admin',
+  isAdmin: true,
+  rootIds: [],
+  revision: 0,
+  scopeHash: 'a'.repeat(64),
+};
 const indexFor = {
   name: 'catalog_series_list_state_(library_)?name_idx',
   source_updated: 'catalog_series_list_state_(library_)?source_updated_idx',
@@ -23,7 +31,7 @@ const indexFor = {
 } as const;
 
 async function explain(options: Parameters<typeof catalogSeriesListQuery>[0]) {
-  const query = catalogSeriesListQuery(options);
+  const query = catalogSeriesListQuery(options, adminScope);
   const result = await pool.query(`explain (analyze,format json) ${query.text}`, query.values);
   return JSON.stringify(result.rows[0]);
 }
@@ -74,12 +82,43 @@ try {
   );
   await pool.query('analyze catalog_series_list_state');
 
+  const deniedScope: LibraryAccessScope = {
+    userId: 'denied-user',
+    isAdmin: false,
+    rootIds: [],
+    revision: 0,
+    scopeHash: 'b'.repeat(64),
+  };
+  const grantedScope: LibraryAccessScope = {
+    userId: 'granted-user',
+    isAdmin: false,
+    rootIds: [rootId],
+    revision: 1,
+    scopeHash: 'c'.repeat(64),
+  };
+  assert.deepEqual(await listCatalogLibraries(deniedScope), []);
+  assert.deepEqual((await listCatalogSeries({ limit: 10 }, deniedScope)).items, []);
+  const scopedPage = await listCatalogSeries({ limit: 1 }, grantedScope);
+  assert.equal(scopedPage.items.length, 1);
+  assert.ok(scopedPage.nextCursor);
+  await assert.rejects(
+    listCatalogSeries(
+      { limit: 1, cursor: scopedPage.nextCursor! },
+      { ...grantedScope, revision: 2, scopeHash: 'd'.repeat(64) },
+    ),
+    /invalid_catalog_cursor/,
+    'an ACL revision change invalidates an existing cursor',
+  );
+
   for (const sort of ['name', 'source_updated', 'discovered', 'metadata_updated'] as const)
     for (const direction of ['asc', 'desc'] as const) {
       const plan = await explain({ libraryId: rootId, sort, direction, limit: 100 });
       assert.match(plan, new RegExp(indexFor[sort]));
       assert.doesNotMatch(plan, /"Offset"/);
-      const firstPage = await listCatalogSeries({ libraryId: rootId, sort, direction, limit: 2 });
+      const firstPage = await listCatalogSeries(
+        { libraryId: rootId, sort, direction, limit: 2 },
+        adminScope,
+      );
       assert.ok(firstPage.nextCursor);
       const cursorPlan = await explain({
         libraryId: rootId,
@@ -99,14 +138,17 @@ try {
       const actual: string[] = [];
       let cursor: string | null = null;
       do {
-        const page = await listCatalogSeries({
-          libraryId: rootId,
-          q: '漫画',
-          sort,
-          direction,
-          limit: 2,
-          ...(cursor ? { cursor } : {}),
-        });
+        const page = await listCatalogSeries(
+          {
+            libraryId: rootId,
+            q: '漫画',
+            sort,
+            direction,
+            limit: 2,
+            ...(cursor ? { cursor } : {}),
+          },
+          adminScope,
+        );
         actual.push(...page.items.map((item) => String(item.id)));
         cursor = page.nextCursor;
       } while (cursor);
@@ -117,7 +159,7 @@ try {
       assert.equal(new Set(actual).size, actual.length);
     }
   for (const q of ['漫', '漫画', '異世界'] as const) {
-    const page = await listCatalogSeries({ libraryId: rootId, q, limit: 100 });
+    const page = await listCatalogSeries({ libraryId: rootId, q, limit: 100 }, adminScope);
     assert.ok(page.items.some((item) => String(item.displayName).includes(q)));
   }
   const trigramPlan = await explain({ q: '異世界', limit: 100 });
@@ -125,7 +167,7 @@ try {
   assert.doesNotMatch(trigramPlan, /"Offset"/);
   const concurrent = await Promise.all(
     Array.from({ length: 5 }, () =>
-      listCatalogSeries({ libraryId: rootId, sort: 'name', limit: 10 }),
+      listCatalogSeries({ libraryId: rootId, sort: 'name', limit: 10 }, adminScope),
     ),
   );
   assert.ok(concurrent.every((page) => page.items.length === 10));
@@ -166,13 +208,18 @@ try {
     [sources.rows[0]!.id],
   );
   assert.ok(firstPublication.rows[0]);
+  assert.equal(
+    await catalogPublicationDetail(firstPublication.rows[0]!.id, deniedScope),
+    null,
+    'unauthorized details are indistinguishable from absent publications',
+  );
   await pool.query(
     `insert into catalog_preferred_release_overrides(root_id,publication_identity_key,preferred_source_item_id)
     values($1,$2,$3)`,
     [behaviorRoot, firstPublication.rows[0]!.identity_key, sources.rows[0]!.id],
   );
   const selected = async () =>
-    (await catalogPublicationDetail(firstPublication.rows[0]!.id)) as {
+    (await catalogPublicationDetail(firstPublication.rows[0]!.id, adminScope)) as {
       selectedReleaseId: string;
       releases: { sourceItemId: string; isPreferred: boolean }[];
     } | null;
@@ -194,7 +241,7 @@ try {
     `select p.id from catalog_publications p join catalog_releases r on r.publication_id=p.id where r.source_item_id=$1`,
     [sources.rows[1]!.id],
   );
-  const moved = (await catalogPublicationDetail(movedPublication.rows[0]!.id)) as {
+  const moved = (await catalogPublicationDetail(movedPublication.rows[0]!.id, adminScope)) as {
     releases: { sourceItemId: string }[];
   } | null;
   assert.equal(moved?.releases[0]?.sourceItemId, sources.rows[1]!.id);
@@ -214,7 +261,10 @@ try {
     `select p.id from catalog_publications p join catalog_releases r on r.publication_id=p.id where r.source_item_id=$1`,
     [sources.rows[0]!.id],
   );
-  const restored = (await catalogPublicationDetail(restoredPublication.rows[0]!.id)) as {
+  const restored = (await catalogPublicationDetail(
+    restoredPublication.rows[0]!.id,
+    adminScope,
+  )) as {
     releases: { sourceItemId: string }[];
   } | null;
   assert.equal(restored?.releases[0]?.sourceItemId, sources.rows[0]!.id);
@@ -281,13 +331,19 @@ try {
     release_id: '9007199254744999',
     source_item_id: '9007199254741999',
   });
-  const hugeDetail = await catalogPublicationDetail(hugeRelease.rows[0]!.publication_id);
+  const hugeDetail = await catalogPublicationDetail(
+    hugeRelease.rows[0]!.publication_id,
+    adminScope,
+  );
   assert.equal(hugeDetail?.releases[0]?.sourceItemId, '9007199254741999');
   await setGlobalSourceSuppression(hugeSource.rows[0]!.id, 'bigint');
-  assert.equal(await catalogPublicationDetail(hugeRelease.rows[0]!.publication_id), null);
+  assert.equal(
+    await catalogPublicationDetail(hugeRelease.rows[0]!.publication_id, adminScope),
+    null,
+  );
   await clearGlobalSourceSuppression(hugeSource.rows[0]!.id);
   assert.equal(
-    (await catalogPublicationDetail(hugeRelease.rows[0]!.publication_id))?.releases[0]
+    (await catalogPublicationDetail(hugeRelease.rows[0]!.publication_id, adminScope))?.releases[0]
       ?.sourceItemId,
     '9007199254741999',
   );
@@ -322,7 +378,7 @@ try {
   await pool.query('delete from catalog_entities');
   await pool.query('delete from catalog_libraries');
   await rebuildCatalogProjectionForIntegration();
-  assert.ok((await listCatalogLibraries()).some((library) => library.id === emptyRoot));
+  assert.ok((await listCatalogLibraries(adminScope)).some((library) => library.id === emptyRoot));
   await pool.query('delete from catalog_libraries where id=$1', [emptyRoot]);
   await pool.query('delete from library_roots where id=$1', [emptyRoot]);
 } finally {
