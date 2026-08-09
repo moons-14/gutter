@@ -1,6 +1,15 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { lstat, mkdir, mkdtemp, readFile, readdir, symlink, writeFile } from 'node:fs/promises';
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  symlink,
+  utimes,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -224,10 +233,13 @@ test('ComicInfo is bounded, UTF-8-only, and preserves source page authority', as
   const directory = await mkdtemp(join(tmpdir(), 'gutter-comicinfo-'));
   await mkdir(join(directory, 'chapter'));
   await writeFile(join(directory, 'chapter', '1.jpg'), 'page');
+  const comicInfoPath = join(directory, 'chapter', 'comicinfo.xml');
   await writeFile(
-    join(directory, 'chapter', 'comicinfo.xml'),
+    comicInfoPath,
     '<ComicInfo><Title>Metadata title</Title><Pages><Page Image="7"/></Pages></ComicInfo>',
   );
+  const stableTime = new Date(Date.now() - 5_000);
+  await utimes(comicInfoPath, stableTime, stableTime);
   const scanned = await scanRoot(directory);
   assert.equal(scanned.items[0]?.comicInfo?.document?.fields.title, 'Metadata title');
   assert.equal(scanned.items[0]?.comicInfo?.document?.pageAnnotations[0]?.image, 7);
@@ -530,7 +542,7 @@ async function withEnvironment(values, run) {
 }
 
 test('M2 documents the catalog schema version', () => {
-  assert.equal(schemaVersion, '0006_catalog_domain');
+  assert.equal(schemaVersion, '0007_metadata_integration');
 });
 
 test('catalog UI exposes entity discovery and publication credit links', async () => {

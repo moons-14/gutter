@@ -20,6 +20,7 @@ import {
 } from '@gutter/catalog-domain';
 import { basename, dirname, extname } from 'node:path';
 import { Pool } from 'pg';
+import { mergeCandidates, validCandidate, type Candidate, type MergedMetadata } from '@gutter/metadata-provider';
 import {
   manifestSha256,
   scanPage,
@@ -29,6 +30,89 @@ import {
 
 export const pool = new Pool({ connectionString: await databaseUrl() });
 export const db = drizzle(pool);
+
+const canonicalIdentityKey = /^[0-9a-f]{64}$/;
+export async function metadataStatus(rootId: string, canonicalIdentity: string) {
+  if (!canonicalIdentityKey.test(canonicalIdentity)) throw new Error('invalid_canonical_identity');
+  return pool.query(
+    `select d.state,d.approved_snapshot,d.approved_provenance,d.approved_manifest_sha256,d.decided_at,d.updated_at,
+            coalesce(jsonb_agg(jsonb_build_object('providerId',c.provider_id,'providerPriority',c.provider_priority,'configOrder',c.config_order,'values',c.values,'provenance',c.provenance) order by c.provider_priority,c.config_order,c.provider_id) filter (where c.provider_id is not null),'[]'::jsonb) as candidates
+       from metadata_decisions d full join metadata_provider_candidates c using(root_id,canonical_identity_key)
+      where coalesce(d.root_id,c.root_id)=$1 and coalesce(d.canonical_identity_key,c.canonical_identity_key)=$2
+      group by d.state,d.approved_snapshot,d.approved_provenance,d.approved_manifest_sha256,d.decided_at,d.updated_at`,
+    [rootId, canonicalIdentity],
+  );
+}
+export async function approveMetadata(rootId: string, canonicalIdentity: string): Promise<MergedMetadata> {
+  const status = await metadataStatus(rootId, canonicalIdentity);
+  const row = status.rows[0];
+  const candidates = (row?.candidates ?? []) as Candidate[];
+  const merged = mergeCandidates(candidates);
+  if (!Object.keys(merged.values).length) throw new Error('metadata_candidate_not_found');
+  const manifest = await pool.query<{ manifest_sha256: string | null }>(
+    `select i.manifest_sha256 from catalog_releases r join catalog_publications p on p.id=r.publication_id join source_items i on i.id=r.source_item_id where r.root_id=$1 and p.identity_key=$2 and i.active order by i.updated_at desc limit 1`, [rootId, canonicalIdentity]);
+  const client = await pool.connect();
+  try {
+    await client.query('begin');
+    await client.query(
+    `insert into metadata_decisions(root_id,canonical_identity_key,state,approved_snapshot,approved_provenance,approved_manifest_sha256)
+     values($1,$2,'approved',$3::jsonb,$4::jsonb,$5)
+     on conflict(root_id,canonical_identity_key) do update set state='approved',approved_snapshot=excluded.approved_snapshot,approved_provenance=excluded.approved_provenance,approved_manifest_sha256=excluded.approved_manifest_sha256,decided_at=now(),updated_at=now()`,
+      [rootId, canonicalIdentity, JSON.stringify(merged.values), JSON.stringify(merged.provenance), manifest.rows[0]?.manifest_sha256 ?? null],
+    );
+    const sources = await client.query<{ id: CatalogId; effective: CatalogMetadata }>(
+      `select i.id,m.effective from catalog_releases r join catalog_publications p on p.id=r.publication_id
+       join source_items i on i.id=r.source_item_id join source_metadata m on m.source_item_id=i.id
+       where r.root_id=$1 and p.identity_key=$2 and i.active`,
+      [rootId, canonicalIdentity],
+    );
+    const affected = await Promise.all(sources.rows.map((source) =>
+      reconcileCatalogItem(client, rootId, source.id, source.effective),
+    ));
+    await refreshCatalogSeriesListStateTx(client, affected);
+    await client.query('commit');
+  } catch (error) {
+    await client.query('rollback');
+    throw error;
+  } finally {
+    client.release();
+  }
+  return merged;
+}
+export async function rejectMetadata(rootId: string, canonicalIdentity: string): Promise<void> {
+  if (!canonicalIdentityKey.test(canonicalIdentity)) throw new Error('invalid_canonical_identity');
+  await pool.query(`insert into metadata_decisions(root_id,canonical_identity_key,state) values($1,$2,'rejected') on conflict(root_id,canonical_identity_key) do update set state='rejected',decided_at=now(),updated_at=now()`, [rootId, canonicalIdentity]);
+}
+export async function recordMetadataCandidate(rootId: string, canonicalIdentity: string, candidate: Candidate): Promise<void> {
+  if (!canonicalIdentityKey.test(canonicalIdentity) || !validCandidate(candidate)) throw new Error('invalid_metadata_candidate');
+  await pool.query(
+    `insert into metadata_provider_candidates(root_id,canonical_identity_key,provider_id,provider_priority,config_order,values,provenance)
+     values($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb)
+     on conflict(root_id,canonical_identity_key,provider_id) do update set provider_priority=excluded.provider_priority,config_order=excluded.config_order,values=excluded.values,provenance=excluded.provenance,observed_at=now()`,
+    [rootId, canonicalIdentity, candidate.providerId, candidate.providerPriority, candidate.configOrder, JSON.stringify(candidate.values), JSON.stringify(candidate.provenance)],
+  );
+}
+
+/** Worker-local dispatch input. Source paths are resolved here and never leave this boundary. */
+export async function metadataLookupIntents(
+  rootId: string,
+  relativePaths: readonly string[],
+): Promise<readonly { canonicalIdentity: string; searchTerms: readonly string[]; publicIds: readonly string[] }[]> {
+  if (!relativePaths.length) return [];
+  const rows = await pool.query<{ identity_key: string; effective: CatalogMetadata }>(
+    `select distinct p.identity_key,m.effective from source_items i join source_metadata m on m.source_item_id=i.id
+     join catalog_releases r on r.source_item_id=i.id join catalog_publications p on p.id=r.publication_id
+     where i.root_id=$1 and i.active and i.relative_path=any($2::text[])`,
+    [rootId, [...new Set(relativePaths)].slice(0, 100)],
+  );
+  return rows.rows.map(({ identity_key, effective }) => ({
+    canonicalIdentity: identity_key,
+    searchTerms: [identityText(effective.title), identityText(effective.series)].filter(
+      (value): value is string => value !== null,
+    ).slice(0, 8),
+    publicIds: [],
+  }));
+}
 
 export class StaleScanRunError extends Error {
   override readonly name = 'StaleScanRunError';
@@ -144,6 +228,7 @@ async function reconcileCatalogItem(
   rootId: string,
   sourceItemId: CatalogId,
   effective: CatalogMetadata,
+  invalidateApprovedManifest: string | null = null,
 ): Promise<CatalogId> {
   await client.query(
     'insert into catalog_libraries(id,display_name) values($1,$1) on conflict(id) do nothing',
@@ -179,6 +264,20 @@ async function reconcileCatalogItem(
     title,
     sourceDisambiguator,
   ]);
+  // Approval is a display-only overlay. Identity and relationships above are always source-derived.
+  if (invalidateApprovedManifest !== null)
+    await client.query(
+      `update metadata_decisions set state='pending_reapproval',updated_at=now()
+       where root_id=$1 and canonical_identity_key=$2 and state='approved'
+         and approved_manifest_sha256 is distinct from $3`,
+      [rootId, publicationIdentity.hash, invalidateApprovedManifest],
+    );
+  const decision = await client.query<{ title: unknown }>(
+    `select approved_snapshot->'title' as title from metadata_decisions
+     where root_id=$1 and canonical_identity_key=$2 and state='approved'`,
+    [rootId, publicationIdentity.hash],
+  );
+  const displayTitle = identityText(decision.rows[0]?.title) ?? title;
   const publication = await client.query<{ id: CatalogId }>(
     `insert into catalog_publications(series_id,identity_key,publication_identity_canonical_json,kind,display_name,search_key,sort_key,volume,number_text)
      values($1,$2,$3,$4,$5,$6,$7,$8,$9)
@@ -188,9 +287,9 @@ async function reconcileCatalogItem(
       publicationIdentity.hash,
       publicationIdentity.canonicalJson,
       kind,
-      title,
-      searchKey(title) ?? '',
-      sortKey(title) ?? '',
+      displayTitle,
+      searchKey(displayTitle) ?? '',
+      sortKey(displayTitle) ?? '',
       volume,
       number,
     ],
@@ -311,6 +410,8 @@ export async function rebuildCatalogProjectionForIntegration(): Promise<void> {
   const client = await pool.connect();
   try {
     await client.query('begin');
+    // Provider observations are disposable projections; operator decisions are durable and survive rebuild.
+    await client.query('delete from metadata_provider_candidates');
     await client.query('delete from catalog_series_list_state');
     await client.query('delete from catalog_credits');
     await client.query('delete from catalog_releases');
@@ -1185,6 +1286,7 @@ export async function persistScanItems(
             rootId,
             itemId,
             metadata.effective,
+            sourceChanged ? itemManifest : null,
           );
           await refreshCatalogSeriesListStateTx(
             client,
@@ -1192,6 +1294,16 @@ export async function persistScanItems(
           );
         }
       }
+      await client.query(
+        `delete from metadata_provider_candidates c
+          where c.root_id=$1 and not exists (
+            select 1 from metadata_decisions d where d.root_id=c.root_id and d.canonical_identity_key=c.canonical_identity_key and d.state='approved'
+          ) and not exists (
+            select 1 from catalog_releases r join catalog_publications p on p.id=r.publication_id join source_items i on i.id=r.source_item_id
+             where r.root_id=c.root_id and p.identity_key=c.canonical_identity_key and i.active
+          )`,
+        [rootId],
+      );
       await client.query('commit');
     } catch (error) {
       await client.query('rollback');
@@ -1245,6 +1357,16 @@ export async function completeScanRun(
     await client.query(
       `delete from validation_intents v using source_items i
        where v.source_item_id=i.id and i.root_id=$1 and not i.active`,
+      [rootId],
+    );
+    await client.query(
+      `delete from metadata_provider_candidates c
+        where c.root_id=$1 and not exists (
+          select 1 from metadata_decisions d where d.root_id=c.root_id and d.canonical_identity_key=c.canonical_identity_key and d.state='approved'
+        ) and not exists (
+          select 1 from catalog_releases r join catalog_publications p on p.id=r.publication_id join source_items i on i.id=r.source_item_id
+           where r.root_id=c.root_id and p.identity_key=c.canonical_identity_key and i.active
+        )`,
       [rootId],
     );
     const affected = new Set<CatalogId>();

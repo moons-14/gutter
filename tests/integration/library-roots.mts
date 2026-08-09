@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import {
   assertSchema,
+  approveMetadata,
   cancelScanRun,
   clearGlobalSourceSuppression,
   completeScanRun,
@@ -10,16 +11,20 @@ import {
   listCatalogSeries,
   catalogPublicationDetail,
   pool,
+  metadataStatus,
   persistScanItems,
+  recordMetadataCandidate,
   rebuildCatalogSeriesListStateForIntegration,
   rebuildCatalogProjectionForIntegration,
   reconcileLibraryRoots,
+  rejectMetadata,
   setGlobalSourceSuppression,
   startScanRun,
 } from '../../packages/db/src/index.ts';
 import {
   PgBoss,
   enqueueDiscovery,
+  startReconciliationQueue,
   startDiscoveryQueue,
 } from '../../apps/worker/src/discovery-queue.ts';
 import type { LibraryRootSnapshot } from '../../packages/library-roots/src/index.ts';
@@ -312,6 +317,69 @@ try {
     [snapshot('queue-root', '/queue-current', 'ready_empty')],
     generation,
   );
+
+  // Reconciliation metadata dispatch is post-persist, once per canonical identity, and lease-bound.
+  let reconciliationWorker:
+    | ((jobs: readonly { id?: string; data: { requestId: string } }[]) => Promise<void>)
+    | undefined;
+  const reconciliationEvents: string[] = [];
+  let forwardedLease: AbortSignal | undefined;
+  let reconciliationCancelled = false;
+  const reconciliationBoss = {
+    createQueue: async () => undefined,
+    work: async (
+      _queue: string,
+      _options: unknown,
+      handler: (jobs: readonly { id?: string; data: { requestId: string } }[]) => Promise<void>,
+    ) => {
+      reconciliationWorker = handler;
+    },
+  } as unknown as PgBoss;
+  await startReconciliationQueue({
+    boss: reconciliationBoss,
+    readyRoots: new Map([
+      [
+        'queue-root',
+        { ...snapshot('queue-root', '/queue-current')!, canonicalPath: '/queue-current' },
+      ],
+    ]),
+    configGeneration: generation,
+    signal: new AbortController().signal,
+    claimRequest: async () => ({ runId: 1, rootId: 'queue-root' }),
+    scanRootBatched: async (_root, options) => {
+      await options.onItems?.([queueItem, { ...queueItem, relativePath: 'queue-duplicate' }]);
+      return { items: [], summary };
+    },
+    persist: async () => {
+      reconciliationEvents.push('persist');
+      return { updated: 2, unchanged: 0 };
+    },
+    metadataLookupIntents: async () => {
+      reconciliationEvents.push('lookup');
+      return [
+        { canonicalIdentity: 'd'.repeat(64), searchTerms: ['queue'], publicIds: [] },
+        { canonicalIdentity: 'd'.repeat(64), searchTerms: ['duplicate'], publicIds: [] },
+      ];
+    },
+    dispatchMetadata: async (_root, identity, _terms, _ids, signal) => {
+      reconciliationEvents.push(`dispatch:${identity}`);
+      forwardedLease = signal;
+      reconciliationCancelled = true;
+    },
+    cancelled: async () => reconciliationCancelled,
+    complete: async () => reconciliationEvents.push('complete'),
+    fail: async () => undefined,
+    cancel: async () => reconciliationEvents.push('cancel'),
+    log: quietLog(),
+  });
+  assert.ok(reconciliationWorker);
+  await assert.rejects(
+    reconciliationWorker!([{ id: 'reconciliation-test', data: { requestId: 'request-test' } }]),
+    { name: 'AbortError' },
+  );
+  assert.deepEqual(reconciliationEvents, ['persist', 'lookup', `dispatch:${'d'.repeat(64)}`, 'cancel']);
+  assert.ok(forwardedLease?.aborted);
+
   const queueName = `catalog.discovery.integration.${randomUUID()}`;
   const boss = new PgBoss({ connectionString: process.env.DATABASE_URL });
   const queueEvents: string[] = [];
@@ -470,6 +538,78 @@ try {
     ).rows,
     [{ locator: '1.jpg' }, { locator: '2.jpg' }],
   );
+
+  const metadataIdentity = (
+    await pool.query<{ identity_key: string }>(
+      `select p.identity_key from catalog_releases r join catalog_publications p on p.id=r.publication_id
+       join source_items i on i.id=r.source_item_id where i.root_id=$1 and i.relative_path=$2`,
+      ['integration-alpha', 'chapter'],
+    )
+  ).rows[0]!.identity_key;
+  const sourceProjection = await pool.query<{ display_name: string; series_name: string }>(
+    `select p.display_name,s.display_name as series_name from catalog_releases r
+     join catalog_publications p on p.id=r.publication_id join catalog_series s on s.id=p.series_id
+     where r.root_id=$1 and p.identity_key=$2`,
+    ['integration-alpha', metadataIdentity],
+  );
+  await recordMetadataCandidate('integration-alpha', metadataIdentity, {
+    providerId: 'integration-sidecar', providerPriority: 0, configOrder: 0,
+    values: { title: 'Approved provider title' }, provenance: { title: 'integration-sidecar' },
+  });
+  await approveMetadata('integration-alpha', metadataIdentity);
+  assert.equal((await metadataStatus('integration-alpha', metadataIdentity)).rows[0]?.state, 'approved');
+  const approvedProjection = await pool.query<{ identity_key: string; display_name: string; series_name: string }>(
+    `select p.identity_key,p.display_name,s.display_name as series_name from catalog_releases r
+     join catalog_publications p on p.id=r.publication_id join catalog_series s on s.id=p.series_id
+     where r.root_id=$1 and p.identity_key=$2`,
+    ['integration-alpha', metadataIdentity],
+  );
+  assert.deepEqual(approvedProjection.rows[0], {
+    identity_key: metadataIdentity,
+    display_name: 'Approved provider title',
+    series_name: sourceProjection.rows[0]!.series_name,
+  });
+  await rebuildCatalogProjectionForIntegration();
+  assert.equal(
+    (await pool.query<{ display_name: string }>(
+      'select display_name from catalog_publications where identity_key=$1', [metadataIdentity],
+    )).rows[0]?.display_name,
+    'Approved provider title',
+  );
+  const changedManifestRun = await startScanRun('integration-alpha', generation);
+  await persistScanItems(changedManifestRun, 'integration-alpha', [{ ...item, mtimeMs: 1 }]);
+  await completeScanRun(changedManifestRun, 'integration-alpha', summary);
+  assert.equal((await metadataStatus('integration-alpha', metadataIdentity)).rows[0]?.state, 'pending_reapproval');
+  assert.equal(
+    (await pool.query<{ display_name: string }>(
+      'select display_name from catalog_publications where identity_key=$1', [metadataIdentity],
+    )).rows[0]?.display_name,
+    sourceProjection.rows[0]!.display_name,
+  );
+  await recordMetadataCandidate('integration-alpha', metadataIdentity, {
+    providerId: 'integration-sidecar', providerPriority: 0, configOrder: 0,
+    values: { title: 'Approved provider title' }, provenance: { title: 'integration-sidecar' },
+  });
+  await approveMetadata('integration-alpha', metadataIdentity);
+  assert.equal(
+    (await pool.query<{ display_name: string }>(
+      'select display_name from catalog_publications where identity_key=$1', [metadataIdentity],
+    )).rows[0]?.display_name,
+    'Approved provider title',
+  );
+
+  const orphanIdentity = 'b'.repeat(64);
+  await recordMetadataCandidate('integration-alpha', orphanIdentity, {
+    providerId: 'orphan-sidecar', providerPriority: 0, configOrder: 0,
+    values: { title: 'Orphan candidate' }, provenance: { title: 'orphan-sidecar' },
+  });
+  await rejectMetadata('integration-alpha', orphanIdentity);
+  const cleanupRun = await startScanRun('integration-alpha', generation);
+  await persistScanItems(cleanupRun, 'integration-alpha', [{ ...item, mtimeMs: 1 }]);
+  await completeScanRun(cleanupRun, 'integration-alpha', summary);
+  const orphanStatus = (await metadataStatus('integration-alpha', orphanIdentity)).rows[0];
+  assert.equal(orphanStatus?.state, 'rejected');
+  assert.deepEqual(orphanStatus?.candidates, []);
 
   const metadataRun = await startScanRun('integration-alpha', generation);
   const metadataItem: ScanItem = {

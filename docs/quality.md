@@ -7,7 +7,7 @@ GPL/AGPL labels. M1 ships no GPL code/assets and calls no SaaS; package manifest
 versions exactly.
 
 Redact authorization/cookie/password/token fields, never commit default secrets, and keep API and
-worker private. Health is process-only; readiness validates PostgreSQL and `0006_catalog_domain`.
+worker private. Health is process-only; readiness validates PostgreSQL and `0007_metadata_integration`.
 Run the PostgreSQL root/discovery-reconciliation oracle with
 `docker compose --profile integration run --rm --build integration`; it uses the dedicated,
 sentinel-guarded `gutter_integration` database.

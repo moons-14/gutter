@@ -2,6 +2,7 @@ import {
   allowedRootsJson,
   databaseUrl,
   derivedCacheConfig,
+  metadataProviderConfig,
   reconciliationConfig,
   validationTimeouts,
   watcherHintsConfig,
@@ -17,6 +18,7 @@ import {
   dueReconciliationRequests,
   heartbeatScanRun,
   isScanCancellationRequested,
+  metadataLookupIntents,
   failScanRun,
   persistScanItems,
   protectSeenPaths,
@@ -44,6 +46,7 @@ import { dispatchValidationIntents, startValidationQueue } from './validation-qu
 import { startWatcherHints } from './watcher-hints.js';
 import { startReaderHttpServer } from './reader-http.js';
 import { cacheStatus, recordCacheStatus } from './cache-status.js';
+import { dispatchMetadataLookup } from './metadata-dispatcher.js';
 
 const log = pino({ redact: ['*.password', '*.token'] });
 await assertSchema();
@@ -102,6 +105,8 @@ const readerServer = startReaderHttpServer({
   shutdownSignal: shutdown.signal,
 });
 const reconciliation = reconciliationConfig();
+// Validate worker-owned metadata sidecars and their mounted tokens at startup.
+await metadataProviderConfig();
 const watcherHints = watcherHintsConfig();
 await startReconciliationQueue({
   boss,
@@ -111,6 +116,8 @@ await startReconciliationQueue({
   scanRootBatched,
   claimRequest: startRequestedScan,
   persist: persistScanItems,
+  metadataLookupIntents,
+  dispatchMetadata: dispatchMetadataLookup,
   complete: completeScanRun,
   fail: failScanRun,
   cancel: cancelScanRun,

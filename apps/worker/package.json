@@ -8,6 +8,7 @@
     "typecheck": "tsc --noEmit",
     "build": "tsc",
     "scan": "node --import tsx src/scan.ts",
+    "metadata": "node --import tsx src/metadata.ts",
     "cache": "node --import tsx src/cache.ts"
   },
   "dependencies": {
@@ -16,6 +17,7 @@
     "@gutter/db": "workspace:*",
     "@gutter/discovery-scanner": "workspace:*",
     "@gutter/library-roots": "workspace:*",
+    "@gutter/metadata-provider": "workspace:*",
     "@gutter/page-validator": "workspace:*",
     "@gutter/reader-stream": "workspace:*",
     "chokidar": "5.0.0",
