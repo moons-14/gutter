@@ -28,12 +28,22 @@ export type AuthorizedPage = Readonly<{
 export type ReaderHttpDependencies = Readonly<{
   roots: ReadonlyMap<string, { canonicalPath: string }>;
   authorize: (releaseId: string, ordinal: number) => Promise<AuthorizedPage | null>;
+  describe?: (releaseId: string) => Promise<ReaderReleaseDescriptor | null>;
   limiter?: ReaderStreamLimiter;
   cache?: DerivedCache;
   shutdownSignal?: AbortSignal;
 }>;
 
+export type ReaderReleaseDescriptor = Readonly<{
+  progressKey: string;
+  revision: string;
+  validOrdinals: number[];
+  validPageCount: number;
+  nextPublicationId: string | null;
+}>;
+
 const route = /^\/api\/reader\/releases\/([1-9][0-9]*)\/pages\/([0-9]+)$/;
+const descriptorRoute = /^\/api\/reader\/releases\/([1-9][0-9]*)$/;
 function range(value: string | undefined, size: number): { start: number; end: number } | null {
   if (!value || !/^bytes=/.test(value) || value.includes(',')) return null;
   const match = /^bytes=(\d*)-(\d*)$/.exec(value);
@@ -102,7 +112,17 @@ async function* selectedDirectoryBytes(
 export function createReaderHttpServer(deps: ReaderHttpDependencies): Server {
   return createServer(async (request: IncomingMessage, response: ServerResponse) => {
     if (deps.shutdownSignal?.aborted) return send(response, 503);
-    const match = request.url && route.exec(new URL(request.url, 'http://worker').pathname);
+    const pathname = request.url && new URL(request.url, 'http://worker').pathname;
+    const descriptorMatch = pathname && descriptorRoute.exec(pathname);
+    if (descriptorMatch && request.method === 'GET' && deps.describe) {
+      const descriptor = await deps.describe(descriptorMatch[1]!).catch(() => null);
+      response.writeHead(descriptor ? 200 : 404, {
+        'Cache-Control': 'no-store',
+        'Content-Type': 'application/json; charset=utf-8',
+      });
+      return response.end(JSON.stringify({ release: descriptor }));
+    }
+    const match = pathname && route.exec(pathname);
     if (!match || !['GET', 'HEAD'].includes(request.method ?? '')) return send(response, 404);
     const ordinal = Number(match[2]);
     const authorized = await deps.authorize(match[1]!, ordinal).catch(() => null);
@@ -160,7 +180,7 @@ export function createReaderHttpServer(deps: ReaderHttpDependencies): Server {
         response.writeHead(304, {
           ETag: etag,
           'Last-Modified': lastModified,
-          'Cache-Control': 'private, no-cache',
+          'Cache-Control': 'no-store',
         });
         return response.end();
       }
@@ -222,13 +242,13 @@ export function createReaderHttpServer(deps: ReaderHttpDependencies): Server {
         response.writeHead(416, {
           'Content-Range': `bytes */${opened.size}`,
           ETag: etag,
-          'Cache-Control': 'private, no-cache',
+          'Cache-Control': 'no-store',
         });
         return response.end();
       }
       const headers: Record<string, string | number> = {
         'Content-Type': opened.mediaType,
-        'Cache-Control': 'private, no-cache',
+        'Cache-Control': 'no-store',
         ETag: etag,
         'Last-Modified': lastModified,
         Vary: 'Range',

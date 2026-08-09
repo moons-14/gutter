@@ -24,6 +24,7 @@ import {
   pool,
   getValidationSource,
   getAuthorizedReaderPage,
+  getReaderReleaseDescriptor,
   releaseValidationIntent,
   reconcileLibraryRoots,
   renewValidationLease,
@@ -94,6 +95,7 @@ const derivedCacheGc = setInterval(
 const readerServer = startReaderHttpServer({
   roots: readyRoots,
   authorize: getAuthorizedReaderPage,
+  describe: getReaderReleaseDescriptor,
   cache: derivedCache,
   shutdownSignal: shutdown.signal,
 });

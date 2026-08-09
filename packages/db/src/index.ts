@@ -3,7 +3,7 @@ import type { LibraryRootSnapshot } from '@gutter/library-roots';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
 import { fileURLToPath } from 'node:url';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   canonicalIdentity,
   cursorFilterHash,
@@ -1441,6 +1441,88 @@ export type ReaderPageAuthorization = Readonly<{
   manifestSha256: string;
   validationGeneration: number;
 }>;
+
+/**
+ * Opaque reader session authority.  The web client receives only the revision-scoped progress
+ * identity and ordinals proven valid by the current completed validation run; pageCount is never
+ * navigation authority.
+ */
+export type ReaderReleaseDescriptor = Readonly<{
+  progressKey: string;
+  revision: string;
+  validOrdinals: number[];
+  validPageCount: number;
+  nextPublicationId: string | null;
+}>;
+
+/** Stable browser-local identity for one configured root/source without exposing its path. */
+export function readerProgressKey(rootId: string, relativePath: string): string {
+  return `source:${createHash('sha256').update(`${rootId}\u0000${relativePath}`).digest('base64url')}`;
+}
+
+export async function getReaderReleaseDescriptor(
+  releaseId: string,
+): Promise<ReaderReleaseDescriptor | null> {
+  if (!/^[1-9][0-9]*$/.test(releaseId)) return null;
+  const result = await pool.query<{
+    manifest_sha256: string;
+    validation_generation: number;
+    root_id: string;
+    relative_path: string;
+    valid_ordinals: number[];
+    next_publication_id: string | null;
+  }>(
+    `select i.manifest_sha256,i.validation_generation,i.root_id,i.relative_path,
+      array_agg(sp.ordinal order by sp.ordinal) as valid_ordinals,
+      (
+        select next_publication.id::text
+        from catalog_publications next_publication
+        where next_publication.series_id=p.series_id
+          and (
+            next_publication.sort_key collate "C" > p.sort_key collate "C"
+            or (next_publication.sort_key = p.sort_key and next_publication.id > p.id)
+          )
+          and exists (
+            select 1 from catalog_releases next_release
+            join source_items next_item on next_item.id=next_release.source_item_id
+            join page_validation_runs next_run on next_run.source_item_id=next_item.id
+              and next_run.manifest_sha256=next_item.manifest_sha256
+              and next_run.generation=next_item.validation_generation and next_run.state='completed'
+            join source_pages next_page on next_page.source_item_id=next_item.id
+            join page_validation_results next_result on next_result.source_item_id=next_item.id
+              and next_result.locator=next_page.locator and next_result.manifest_sha256=next_item.manifest_sha256
+              and next_result.generation=next_item.validation_generation and next_result.state='valid'
+            where next_release.publication_id=next_publication.id and next_item.active
+              and next_item.quarantine_reason is null
+              and exists (select 1 from library_roots next_root where next_root.id=next_item.root_id and next_root.active)
+          )
+        order by next_publication.sort_key collate "C",next_publication.id
+        limit 1
+      ) as next_publication_id
+     from catalog_releases r
+     join catalog_publications p on p.id=r.publication_id
+     join source_items i on i.id=r.source_item_id
+     join page_validation_runs run on run.source_item_id=i.id and run.manifest_sha256=i.manifest_sha256
+       and run.generation=i.validation_generation and run.state='completed'
+     join source_pages sp on sp.source_item_id=i.id
+     join page_validation_results result on result.source_item_id=i.id and result.locator=sp.locator
+       and result.manifest_sha256=i.manifest_sha256 and result.generation=i.validation_generation and result.state='valid'
+     where r.id=$1 and i.active and i.quarantine_reason is null
+       and exists (select 1 from library_roots root where root.id=i.root_id and root.active)
+     group by i.manifest_sha256,i.validation_generation,i.root_id,i.relative_path,p.series_id,p.sort_key,p.id`,
+    [releaseId],
+  );
+  const row = result.rows[0];
+  return row
+    ? {
+        progressKey: readerProgressKey(row.root_id, row.relative_path),
+        revision: `${row.manifest_sha256}:${row.validation_generation}`,
+        validOrdinals: row.valid_ordinals,
+        validPageCount: row.valid_ordinals.length,
+        nextPublicationId: row.next_publication_id,
+      }
+    : null;
+}
 
 export async function getAuthorizedReaderPage(
   releaseId: string,

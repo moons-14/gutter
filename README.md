@@ -1,8 +1,9 @@
 # gutter
 
 MIT-licensed, self-hosted comic-library foundation. M3 keeps library sources read-only while the
-internal worker streams authorized pages and maintains a disposable derived-byte cache; authentication
-and a reader UI are not implemented.
+internal worker streams authorized pages, publishes opaque revision-aware descriptors, and maintains a
+disposable derived-byte cache. S20-1 also provides a minimal descriptor-gated reader shell; reader
+interactions, gestures, prefetch, and browser-local progress/preferences remain pending.
 
 ## Linux quickstart
 
@@ -96,8 +97,9 @@ docker compose exec worker node --import tsx src/cache.ts gc
 
 Do not mount remote storage in API containers. Restore PostgreSQL only with an operator-managed
 `pg_dump`/`pg_restore` workflow while the application is stopped. Put Caddy/Nginx or Tailscale in
-front of port 8080 for remote access. TLS, auth, external metadata providers, and reader streaming are
-later milestones. Run focused root/discovery checks with `pnpm unit` and start the snapshot flow with the
+front of port 8080 for remote access. TLS, auth, and external metadata providers are later milestones.
+Reader interaction modes, gestures, and browser-local progress/preferences remain pending. Run focused
+root/discovery checks with `pnpm unit` and start the snapshot flow with the
 Compose command above. Run the PostgreSQL reconciliation oracle with
 `docker compose --profile integration run --rm --build integration`; it uses a dedicated
 `gutter_integration` database and requires its test-only environment sentinel.

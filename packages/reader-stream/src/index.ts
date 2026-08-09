@@ -1,4 +1,4 @@
-import { constants } from 'node:fs';
+import { close as closeDescriptor, constants, fstat, open as openDescriptor } from 'node:fs';
 import type { BigIntStats } from 'node:fs';
 import type { FileHandle } from 'node:fs/promises';
 import { open, realpath } from 'node:fs/promises';
@@ -110,6 +110,24 @@ function observation(stat: BigIntStats): SourceObservation {
 }
 function limitsFor(partial: ReaderStreamLimits = {}) {
   return { ...defaultReaderStreamLimits, ...partial };
+}
+
+function openArchiveDescriptor(path: string): Promise<number> {
+  return new Promise((resolveDescriptor, reject) =>
+    openDescriptor(path, constants.O_RDONLY | constants.O_NOFOLLOW, (error, descriptor) =>
+      error ? reject(error) : resolveDescriptor(descriptor),
+    ),
+  );
+}
+function observeArchiveDescriptor(descriptor: number): Promise<SourceObservation> {
+  return new Promise((resolveObservation, reject) =>
+    fstat(descriptor, { bigint: true }, (error, stat) =>
+      error ? reject(error) : resolveObservation(observation(stat)),
+    ),
+  );
+}
+function closeArchiveDescriptor(descriptor: number): Promise<void> {
+  return new Promise((resolveClose) => closeDescriptor(descriptor, () => resolveClose()));
 }
 
 export class ReaderStreamLimiter {
@@ -260,7 +278,10 @@ async function openDirectory(
     } finally {
       await sourceHandle.close().catch(() => undefined);
     }
-    const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    let handle: FileHandle | undefined = await open(
+      path,
+      constants.O_RDONLY | constants.O_NOFOLLOW,
+    );
     try {
       const stat = await handle.stat({ bigint: true });
       const expected = page.observed;
@@ -274,9 +295,12 @@ async function openDirectory(
       aborted(signal);
       const stream = new BoundedChunks(expected.size, limitsFor(options.limits).chunkBytes, signal);
       const input = handle.createReadStream({
-        autoClose: false,
+        autoClose: true,
         highWaterMark: limitsFor(options.limits).chunkBytes,
       });
+      // The read stream owns this FileHandle after construction.  Closing the handle before its
+      // asynchronous destroy has completed can otherwise make its pending read fail with EBADF.
+      handle = undefined;
       input.once('error', (error) => stream.destroy(error));
       input.pipe(stream);
       return {
@@ -284,7 +308,6 @@ async function openDirectory(
           stream,
           () => {
             input.destroy();
-            void handle.close();
             release();
           },
           signal,
@@ -293,7 +316,7 @@ async function openDirectory(
         mediaType,
       };
     } catch (error) {
-      await handle.close().catch(() => undefined);
+      await handle?.close().catch(() => undefined);
       throw error;
     }
   } catch (error) {
@@ -334,87 +357,93 @@ async function openCbz(options: ReaderStreamOptions, release: () => void): Promi
   if (!safeRelative(page.locator)) fail('locator_unsafe');
   const mediaType = verifyMedia(page.locator);
   const { root, target } = await pinnedTarget(source);
-  let handle: FileHandle | undefined;
+  let descriptor: number | undefined;
+  let zip: yauzl.ZipFile | undefined;
   try {
     if (!contained(root, await realpath(dirname(target)))) fail('locator_unsafe');
-    handle = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW);
-    const file = handle;
-    if (!sameObservation(observation(await file.stat({ bigint: true })), source.observed))
+    descriptor = await openArchiveDescriptor(target);
+    if (!sameObservation(await observeArchiveDescriptor(descriptor), source.observed))
       fail('source_stale');
     await afterOpen?.();
     aborted(signal);
+    const archiveDescriptor = descriptor;
     const found = await new Promise<{ zip: yauzl.ZipFile; entry: yauzl.Entry }>(
       (resolveEntry, reject) => {
         let abortEnumeration: (() => void) | undefined;
         const onAbort = () => abortEnumeration?.();
         signal?.addEventListener('abort', onAbort, { once: true });
-        yauzl.fromFd(file.fd, { lazyEntries: true, autoClose: false }, (error, zip) => {
-          if (error || !zip) {
-            signal?.removeEventListener('abort', onAbort);
-            reject(signal?.aborted ? new ReaderStreamError('cancelled') : archiveError(error));
-            return;
-          }
-          let entries = 0;
-          let total = 0;
-          let result: yauzl.Entry | undefined;
-          let settled = false;
-          const close = (error?: Error) => {
-            if (settled) return;
-            settled = true;
-            signal?.removeEventListener('abort', onAbort);
-            error
-              ? ((handle = undefined), zip.close(), reject(error))
-              : result
-                ? resolveEntry({ zip, entry: result })
-                : ((handle = undefined),
-                  zip.close(),
-                  reject(new ReaderStreamError('page_missing')));
-          };
-          abortEnumeration = () => close(new ReaderStreamError('cancelled'));
-          if (signal?.aborted) return abortEnumeration();
-          zip.on('error', (error) => close(archiveError(error)));
-          zip.on('entry', (entry) => {
-            entries++;
-            total += entry.uncompressedSize;
-            const limits = limitsFor(options.limits);
-            if (entries > limits.archiveEntries)
-              return close(new ReaderStreamError('archive_entry_limit'));
-            if (entry.generalPurposeBitFlag & 1)
-              return close(new ReaderStreamError('archive_encrypted'));
-            if (unsafeArchivePath(entry.fileName))
-              return close(new ReaderStreamError('archive_path_unsafe'));
-            if (entry.uncompressedSize > limits.pageBytes)
-              return close(new ReaderStreamError('archive_entry_too_large'));
-            if (total > limits.archiveTotalBytes)
-              return close(new ReaderStreamError('archive_total_limit'));
-            if (
-              entry.uncompressedSize / Math.max(entry.compressedSize, 1) >
-              limits.archiveCompressionRatio
-            )
-              return close(new ReaderStreamError('archive_ratio_limit'));
-            if (entry.fileName === page.locator) {
-              if (!matches(entry, page)) return close(new ReaderStreamError('source_stale'));
-              result = entry;
+        yauzl.fromFd(
+          archiveDescriptor,
+          { lazyEntries: true, autoClose: false },
+          (error, openedZip) => {
+            if (error || !openedZip) {
+              signal?.removeEventListener('abort', onAbort);
+              reject(signal?.aborted ? new ReaderStreamError('cancelled') : archiveError(error));
+              return;
             }
-            zip.readEntry();
-          });
-          zip.on('end', () => close());
-          zip.readEntry();
-        });
+            zip = openedZip;
+            descriptor = undefined;
+            let entries = 0;
+            let total = 0;
+            let result: yauzl.Entry | undefined;
+            let settled = false;
+            const close = (error?: Error) => {
+              if (settled) return;
+              settled = true;
+              signal?.removeEventListener('abort', onAbort);
+              error
+                ? (openedZip.close(), reject(error))
+                : result
+                  ? resolveEntry({ zip: openedZip, entry: result })
+                  : (openedZip.close(), reject(new ReaderStreamError('page_missing')));
+            };
+            abortEnumeration = () => close(new ReaderStreamError('cancelled'));
+            if (signal?.aborted) return abortEnumeration();
+            openedZip.on('error', (error) => close(archiveError(error)));
+            openedZip.on('entry', (entry) => {
+              entries++;
+              total += entry.uncompressedSize;
+              const limits = limitsFor(options.limits);
+              if (entries > limits.archiveEntries)
+                return close(new ReaderStreamError('archive_entry_limit'));
+              if (entry.generalPurposeBitFlag & 1)
+                return close(new ReaderStreamError('archive_encrypted'));
+              if (unsafeArchivePath(entry.fileName))
+                return close(new ReaderStreamError('archive_path_unsafe'));
+              if (entry.uncompressedSize > limits.pageBytes)
+                return close(new ReaderStreamError('archive_entry_too_large'));
+              if (total > limits.archiveTotalBytes)
+                return close(new ReaderStreamError('archive_total_limit'));
+              if (
+                entry.uncompressedSize / Math.max(entry.compressedSize, 1) >
+                limits.archiveCompressionRatio
+              )
+                return close(new ReaderStreamError('archive_ratio_limit'));
+              if (entry.fileName === page.locator) {
+                if (!matches(entry, page)) return close(new ReaderStreamError('source_stale'));
+                result = entry;
+              }
+              openedZip.readEntry();
+            });
+            openedZip.on('end', () => close());
+            openedZip.readEntry();
+          },
+        );
       },
     );
-    const { zip, entry } = found;
-    // yauzl's FdSlicer owns this descriptor once fromFd succeeds.
-    handle = undefined;
+    const { entry } = found;
+    const archive = zip;
+    if (!archive) fail('source_unavailable');
+    // yauzl's FdSlicer owns this raw descriptor once fromFd succeeds.
     aborted(signal);
     const input = await new Promise<Readable>((resolveStream, reject) =>
-      zip.openReadStream(entry, (error, stream) =>
-        error || !stream ? (zip.close(), reject(archiveError(error))) : resolveStream(stream),
+      archive.openReadStream(entry, (error, stream) =>
+        error || !stream ? (archive.close(), reject(archiveError(error))) : resolveStream(stream),
       ),
     );
     if (signal?.aborted) {
       input.destroy();
-      zip.close();
+      archive.close();
       fail('cancelled');
     }
     const stream = new BoundedChunks(
@@ -430,7 +459,7 @@ async function openCbz(options: ReaderStreamOptions, release: () => void): Promi
         stream,
         () => {
           input.destroy();
-          zip.close();
+          archive.close();
           release();
         },
         signal,
@@ -439,7 +468,8 @@ async function openCbz(options: ReaderStreamOptions, release: () => void): Promi
       mediaType,
     };
   } catch (error) {
-    await handle?.close().catch(() => undefined);
+    zip?.close();
+    if (descriptor !== undefined) await closeArchiveDescriptor(descriptor);
     release();
     if (error instanceof ReaderStreamError) throw error;
     fail('source_unavailable');

@@ -45,8 +45,10 @@ keyset cursors for name, source update, discovery and metadata update order; cur
 strings and timestamp keys remain PostgreSQL microsecond text. A configured but temporarily unavailable
 root retains its last active catalog; only an explicitly inactive/removed root is hidden. It is suitable
 for trusted local/LAN deployment, not Internet exposure. M2 watcher hints are optional,
-default-off, and never deletion truth; it has no reader, auth,
-mutable root API, or external provider. Page validation is a worker-only, read-only follow-up: it
+default-off, and never deletion truth. The delivered S20-1 reader foundation keeps descriptors and
+page bytes worker-owned and network-only; interaction modes, gestures, prefetch, and browser-local
+progress/preferences remain pending. There is no auth, mutable root API, or external provider. Page
+validation is a worker-only, read-only follow-up: it
 checks ZIP CRCs and fully decodes a first frame with sharp. Each page has a 128 MiB cap, an item has a
 2 GiB aggregate cap, and decoder input is capped at 100M pixels. Same-size/same-mtime replacement is
 a documented best-effort limitation. Claims carry a monotonically increasing lease epoch; expired

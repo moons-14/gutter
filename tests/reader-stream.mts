@@ -271,7 +271,7 @@ test('CBZ rejects unsupported media before archive resource acquisition and appl
   );
 });
 
-test('reader limiter holds permits through actual streams, bounds the queue, and releases on cancellation', async () => {
+test('reader limiter holds permits through actual streams, bounds the queue, and releases cancellation ownership once', async () => {
   const root = await mkdtemp(join(tmpdir(), 'gutter-reader-limiter-'));
   const data = Buffer.alloc(32 * 1024, 9);
   await writeFile(join(root, '001.jpg'), data);
@@ -318,6 +318,27 @@ test('reader limiter holds permits through actual streams, bounds the queue, and
   controller.abort();
   releaseCancelled();
   await expectCode(pending, 'cancelled');
+  assert.equal(limiter.active, 0);
+
+  const streamController = new AbortController();
+  const opened = await openReaderStream({
+    source: item,
+    page: { locator: '001.jpg', observed: { size: data.length } },
+    limiter,
+    signal: streamController.signal,
+  });
+  const closed = new Promise<void>((resolve) => {
+    opened.stream.once('close', resolve);
+  });
+  const errors: ReaderStreamError[] = [];
+  opened.stream.on('error', (error) => errors.push(error as ReaderStreamError));
+  streamController.abort();
+  await closed;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(
+    errors.map((error) => error.code),
+    ['cancelled'],
+  );
   assert.equal(limiter.active, 0);
 });
 

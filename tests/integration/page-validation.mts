@@ -4,6 +4,8 @@ import {
   claimValidationIntents,
   completeScanRun,
   completeValidationIntent,
+  getReaderReleaseDescriptor,
+  readerProgressKey,
   migrateSchema,
   persistScanItems,
   pool,
@@ -245,6 +247,25 @@ try {
     ).rows[0]?.count,
     1,
   );
+  const release = (
+    await pool.query<{
+      id: string;
+      manifest_sha256: string;
+      root_id: string;
+      relative_path: string;
+    }>(
+      `select r.id::text as id,i.manifest_sha256,i.root_id,i.relative_path from catalog_releases r join source_items i on i.id=r.source_item_id
+       where i.root_id=$1 and i.relative_path='chapter'`,
+      [rootId],
+    )
+  ).rows[0]!;
+  assert.deepEqual(await getReaderReleaseDescriptor(release.id), {
+    progressKey: readerProgressKey(release.root_id, release.relative_path),
+    revision: `${release.manifest_sha256}:3`,
+    validOrdinals: [0],
+    validPageCount: 1,
+    nextPublicationId: null,
+  });
 
   const failing: ScanItem = { ...item, relativePath: 'failing', mtimeMs: 7 };
   const failureRun = await startScanRun(rootId, generation);

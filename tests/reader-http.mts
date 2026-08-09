@@ -43,6 +43,7 @@ test('internal reader HTTP route authorizes opaque release ordinal and has finit
   try {
     const first = await fetch(`${base}/api/reader/releases/42/pages/0`);
     assert.equal(first.status, 200);
+    assert.equal(first.headers.get('cache-control'), 'no-store');
     assert.equal(await first.text(), data.toString());
     assert.equal(first.headers.get('accept-ranges'), 'bytes');
     const etag = first.headers.get('etag');
@@ -76,6 +77,43 @@ test('internal reader HTTP route authorizes opaque release ordinal and has finit
       headers: { 'If-None-Match': etag! },
     });
     assert.equal(staleConditional.status, 409);
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+  }
+});
+
+test('reader descriptor exposes only ready opaque navigation authority', async () => {
+  const server = createReaderHttpServer({
+    roots: new Map(),
+    authorize: async () => null,
+    describe: async (releaseId) =>
+      releaseId === '42'
+        ? {
+            progressKey: 'source:opaque-stable-key',
+            revision: 'a'.repeat(64) + ':7',
+            validOrdinals: [0, 2, 5],
+            validPageCount: 3,
+            nextPublicationId: null,
+          }
+        : null,
+  });
+  const base = await listening(server);
+  try {
+    const response = await fetch(`${base}/api/reader/releases/42`);
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+    assert.deepEqual(await response.json(), {
+      release: {
+        progressKey: 'source:opaque-stable-key',
+        revision: 'a'.repeat(64) + ':7',
+        validOrdinals: [0, 2, 5],
+        validPageCount: 3,
+        nextPublicationId: null,
+      },
+    });
+    assert.equal((await fetch(`${base}/api/reader/releases/43`)).status, 404);
   } finally {
     await new Promise<void>((resolve, reject) =>
       server.close((error) => (error ? reject(error) : resolve())),
