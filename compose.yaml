@@ -25,6 +25,10 @@ services:
     command: [node, --import, tsx, src/index.ts]
     environment:
       DATABASE_URL: 'postgresql://gutter:${POSTGRES_PASSWORD:-}@db:5432/gutter'
+      BETTER_AUTH_SECRET_FILE: /run/secrets/better_auth_secret
+      GUTTER_AUTH_ORIGIN: ${GUTTER_AUTH_ORIGIN:-http://localhost:8080}
+      # Caddy is fixed at 172.30.0.20; API is otherwise unreachable from clients.
+      GUTTER_AUTH_TRUSTED_PROXIES_JSON: '["172.30.0.20"]'
     depends_on: { migrate: { condition: service_completed_successfully } }
     healthcheck:
       test:
@@ -37,7 +41,9 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
-    networks: [internal]
+    networks:
+      internal: { ipv4_address: 172.30.0.10 }
+    secrets: [better_auth_secret]
   worker:
     build: { context: ., target: worker }
     command: [node, --import, tsx, src/index.ts]
@@ -60,7 +66,8 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
-    networks: [internal]
+    networks:
+      internal: { ipv4_address: 172.30.0.20 }
   test:
     build: { context: ., target: api }
     profiles: [test]
@@ -71,6 +78,36 @@ services:
         node -e "Promise.all(['http://web:8080/api/health','http://web:8080/manifest.webmanifest','http://web:8080/service-worker.js'].map(url=>fetch(url))).then(async rs=>{if(!rs.every(r=>r.ok))throw Error('smoke response');if(!(await rs[1].text()).includes('192x192'))throw Error('manifest');}).catch(e=>{console.error(e);process.exit(1)})"
     depends_on: { api: { condition: service_healthy }, web: { condition: service_healthy } }
     networks: [internal]
+  auth-test:
+    build: { context: ., target: auth-test }
+    command: [node, --import, tsx, --test, --test-reporter=spec, tests/auth-runtime.mts]
+    environment:
+      AUTH_BASE_URL: http://web:8080
+      AUTH_PUBLIC_ORIGIN: http://localhost:8080
+      DATABASE_URL: 'postgresql://gutter:${POSTGRES_PASSWORD:-}@db:5432/gutter'
+    depends_on: { web: { condition: service_healthy } }
+    profiles: [auth-test]
+    networks: [internal]
+  auth-rate-peer-a:
+    build: { context: ., target: auth-test }
+    command: [node, tests/auth-rate-peer.mjs]
+    environment:
+      AUTH_BASE_URL: http://web:8080
+      AUTH_PUBLIC_ORIGIN: http://localhost:8080
+      AUTH_PEER_LABEL: a
+    profiles: [auth-test]
+    networks:
+      internal: { ipv4_address: 172.30.0.31 }
+  auth-rate-peer-b:
+    build: { context: ., target: auth-test }
+    command: [node, tests/auth-rate-peer.mjs]
+    environment:
+      AUTH_BASE_URL: http://web:8080
+      AUTH_PUBLIC_ORIGIN: http://localhost:8080
+      AUTH_PEER_LABEL: b
+    profiles: [auth-test]
+    networks:
+      internal: { ipv4_address: 172.30.0.32 }
   integration:
     build: { context: ., target: build }
     command: [sh, -ec, 'pnpm unit && pnpm integration']
@@ -96,6 +133,12 @@ services:
 volumes:
   db-data:
   cache-data:
+secrets:
+  better_auth_secret:
+    file: ./secrets/better_auth_secret
 networks:
   internal:
     internal: true
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24

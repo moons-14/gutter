@@ -14,14 +14,41 @@ services:
     environment:
       DATABASE_URL: !reset null
       DATABASE_URL_FILE: /run/secrets/database_url
-    secrets: [database_url]
+      BETTER_AUTH_SECRET_FILE: /run/secrets/better_auth_secret
+      GUTTER_AUTH_ORIGIN: https://gutter.example.invalid
+      GUTTER_AUTH_TRUSTED_PROXIES_JSON: '["172.30.0.20"]'
+    secrets: [database_url, better_auth_secret]
   worker:
     environment:
       DATABASE_URL: !reset null
       DATABASE_URL_FILE: /run/secrets/database_url
     secrets: [database_url]
+  web:
+    # Caddy is the sole public ingress and TLS terminator. Replace this hostname before use.
+    environment:
+      GUTTER_SITE_ADDRESS: https://gutter.example.invalid
+    cap_add: [NET_BIND_SERVICE]
+    ports: !override ['80:80', '443:443', '443:443/udp']
+    volumes:
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      internal: { ipv4_address: 172.30.0.20 }
+      edge: {}
+    healthcheck:
+      test: [CMD-SHELL, 'wget -q -O /dev/null http://127.0.0.1:2019/config/']
+      interval: 5s
+      timeout: 3s
+      retries: 20
 secrets:
   postgres_password:
     file: ./secrets/postgres_password
   database_url:
     file: ./secrets/database_url
+  better_auth_secret:
+    file: ./secrets/better_auth_secret
+volumes:
+  caddy-data:
+  caddy-config:
+networks:
+  edge:

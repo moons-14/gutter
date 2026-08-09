@@ -23,6 +23,7 @@ import {
 import { Gauge, Registry, collectDefaultMetrics } from 'prom-client';
 import pino from 'pino';
 import { reconciliationMetricLabels } from './metrics.js';
+import { authHandler } from './auth.js';
 
 const log = pino({
   redact: ['req.headers.authorization', 'req.headers.cookie', '*.password', '*.token'],
@@ -54,6 +55,41 @@ app.use('*', async (c, next) => {
   );
 });
 app.openapi(healthRoute, (c) => c.json({ status: 'ok' }, 200));
+app.post('/api/auth/bootstrap', async (c) => {
+  const client = await pool.connect();
+  try {
+    // This session lock fences CLI recovery from an in-flight bootstrap request.
+    await client.query("select pg_advisory_lock(hashtext('gutter_auth_bootstrap'))");
+    const claim = await client.query(
+      'update gutter_auth_bootstrap set claimed_at=now() where id=true and claimed_at is null returning id',
+    );
+    if (claim.rowCount !== 1) return c.json({ error: 'bootstrap_unavailable' }, 403);
+    const body = await c.req.json().catch(() => null);
+    if (body === null) {
+      await client.query('update gutter_auth_bootstrap set claimed_at=null where id=true');
+      return c.json({ error: 'invalid_bootstrap_request' }, 400);
+    }
+    const headers = new Headers(c.req.raw.headers);
+    headers.set('content-type', 'application/json');
+    headers.set('x-gutter-bootstrap', '1');
+    const request = new Request(new URL('/api/auth/sign-up/email', c.req.url), {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+    });
+    const response = await authHandler(request);
+    if (!response.ok)
+      await client.query('update gutter_auth_bootstrap set claimed_at=null where id=true');
+    return response;
+  } finally {
+    await client
+      .query("select pg_advisory_unlock(hashtext('gutter_auth_bootstrap'))")
+      .catch(() => undefined);
+    client.release();
+  }
+});
+app.all('/api/auth/sign-up/email', (c) => c.json({ error: 'public_signup_disabled' }, 403));
+app.all('/api/auth/*', (c) => authHandler(c.req.raw));
 app.openapi(readinessRoute, async (c) => {
   try {
     await assertSchema();
