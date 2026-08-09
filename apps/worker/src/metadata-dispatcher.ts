@@ -1,14 +1,18 @@
 import {
   lookupSidecar,
   metadataProtocolVersion,
+  type Candidate,
   type LookupRequest,
   type LookupResponse,
 } from '@gutter/metadata-provider';
-import { recordMetadataCandidate } from '@gutter/db';
 import { metadataProviderConfig, type MetadataProviderConfig } from '@gutter/config';
 
 type Lookup = typeof lookupSidecar;
-type RecordCandidate = typeof recordMetadataCandidate;
+type RecordCandidate = (
+  rootId: string,
+  canonicalIdentity: string,
+  candidate: Candidate,
+) => Promise<void>;
 
 export async function dispatchConfiguredSidecars(
   config: MetadataProviderConfig,
@@ -17,7 +21,7 @@ export async function dispatchConfiguredSidecars(
   request: LookupRequest,
   signal: AbortSignal | undefined,
   lookup: Lookup = lookupSidecar,
-  record: RecordCandidate = recordMetadataCandidate,
+  record: RecordCandidate,
 ): Promise<void> {
   let next = 0;
   const run = async (): Promise<void> => {
@@ -79,5 +83,14 @@ export async function dispatchMetadataLookup(
       ),
     ].slice(0, 8),
   };
-  await dispatchConfiguredSidecars(config, rootId, canonicalIdentity, request, signal);
+  const { recordMetadataCandidate } = await import('@gutter/db');
+  await dispatchConfiguredSidecars(
+    config,
+    rootId,
+    canonicalIdentity,
+    request,
+    signal,
+    lookupSidecar,
+    recordMetadataCandidate,
+  );
 }
