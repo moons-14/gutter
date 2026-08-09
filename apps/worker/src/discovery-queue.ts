@@ -150,6 +150,23 @@ export async function startReconciliationQueue(
       rootId: string,
       items: readonly ScanItem[],
     ) => Promise<{ updated: number; unchanged: number }>;
+    metadataLookupIntents?: (
+      rootId: string,
+      relativePaths: readonly string[],
+    ) => Promise<
+      readonly {
+        canonicalIdentity: string;
+        searchTerms: readonly string[];
+        publicIds: readonly string[];
+      }[]
+    >;
+    dispatchMetadata?: (
+      rootId: string,
+      canonicalIdentity: string,
+      searchTerms: readonly string[],
+      publicIds: readonly string[],
+      signal: AbortSignal,
+    ) => Promise<void>;
     complete: (runId: number, rootId: string, summary: ScanSummary) => Promise<void>;
     fail: (runId: number, summary: ScanSummary) => Promise<void>;
     cancel: (runId: number, summary: ScanSummary) => Promise<void>;
@@ -184,6 +201,7 @@ export async function startReconciliationQueue(
         await deps.fail(claimed.runId, failedSummary());
         return;
       }
+      let cancelledByRun = false;
       try {
         const lease = new AbortController();
         const relayAbort = () => lease.abort(deps.signal.reason);
@@ -197,6 +215,7 @@ export async function startReconciliationQueue(
         const pulse = async () => {
           if (lease.signal.aborted) throw new DOMException('scan lease lost', 'AbortError');
           if (await deps.cancelled?.(claimed.runId)) {
+            cancelledByRun = true;
             lease.abort(new DOMException('scan cancelled', 'AbortError'));
             throw new DOMException('scan cancelled', 'AbortError');
           }
@@ -206,6 +225,7 @@ export async function startReconciliationQueue(
           }
         };
         let heartbeatBusy = false;
+        const dispatchedMetadata = new Set<string>();
         const heartbeat = setInterval(() => {
           if (heartbeatBusy || lease.signal.aborted) return;
           heartbeatBusy = true;
@@ -230,6 +250,25 @@ export async function startReconciliationQueue(
                 updated: outcome.updated + batch.updated,
                 unchanged: outcome.unchanged + batch.unchanged,
               };
+              // Dispatch only after the source transaction commits. The payload is source-derived
+              // catalog identity plus bounded lookup fields; paths remain inside the DB helper.
+              if (deps.metadataLookupIntents && deps.dispatchMetadata) {
+                const intents = await deps.metadataLookupIntents(
+                  root.id,
+                  items.map((item) => item.relativePath),
+                );
+                for (const intent of intents) {
+                  if (dispatchedMetadata.has(intent.canonicalIdentity)) continue;
+                  dispatchedMetadata.add(intent.canonicalIdentity);
+                  await deps.dispatchMetadata(
+                    root.id,
+                    intent.canonicalIdentity,
+                    intent.searchTerms,
+                    intent.publicIds,
+                    lease.signal,
+                  );
+                }
+              }
               await pulse();
             },
             onProtected: async (paths) => deps.protect?.(claimed.runId, root.id, paths),
@@ -242,7 +281,8 @@ export async function startReconciliationQueue(
         }
         await deps.complete(claimed.runId, root.id, { ...result.summary, ...outcome });
       } catch (error) {
-        await (aborted(error, deps.signal) ? deps.cancel : deps.fail)(
+        // Durable cancellation and process shutdown cancel; a heartbeat ownership loss fails so it can retry.
+        await (cancelledByRun || aborted(error, deps.signal) ? deps.cancel : deps.fail)(
           claimed.runId,
           failedSummary(),
         );

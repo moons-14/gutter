@@ -8,7 +8,7 @@ or authorization source: the worker opens the currently authorized source before
 Compose topology declares one worker service, so cache coalescing/leases are process-local; do not
 scale workers onto a shared cache volume without durable coordination.
 
-`migrate` is the sole schema applier. The idempotent `0006_catalog_domain` migration adds rebuildable
+`migrate` is the sole schema applier. The idempotent `0007_metadata_integration` migration adds rebuildable
 libraries, series, publications, releases and exact creator/group/publisher credits. Each identity
 stores its canonical JSON alongside its SHA-256 key, so rebuild inputs remain inspectable. Catalog reads
 start at `visible_source_items`, so suppression, quarantine, inactivity and zero-valid items are

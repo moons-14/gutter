@@ -1,4 +1,5 @@
 packages:
+  - 'packages/metadata-provider'
   - apps/*
   - packages/*
 injectWorkspacePackages: true
