@@ -3,7 +3,7 @@
 ## M0 Foundation
 
 - [ ] M0-1 Verify Compose test-profile smoke on a Docker-capable CI runner.
-- [ ] M0-2 Replace placeholder local PWA icon with branded 192/512 raster assets.
+- [x] M0-2 Replace placeholder local PWA icon with original, local branded 192/512 raster assets.
 
 ## M1-M2 actionable backlog
 
@@ -12,6 +12,11 @@
 - [x] M1-3 ComicInfo tolerant metadata fallback and global admin hide state.
 - [x] M2-1 Durable 15-minute reconcile and manual full scan, with optional default-off watcher hints.
 - [x] M2-2 Rebuildable catalog hierarchy, exact credits, cursor list APIs, and mobile catalog UI.
+
+The immutable library-root boundary foundation was delivered in
+[`c360d85`](https://github.com/moons-14/gutter/commit/c360d85) / PR #13. The separate mutable,
+authenticated admin registration follow-up remains open and is deferred to M5; it is not part of
+the delivered foundation.
 
 ## Epics
 

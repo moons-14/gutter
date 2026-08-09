@@ -24,10 +24,13 @@ repacks, or uploads the operator's comic files.
 
 ## Before starting the next epic
 
-Reconcile the status and scope of open cleanup tickets [#2](https://github.com/moons-14/gutter/issues/2)
-(branded icon) and [#3](https://github.com/moons-14/gutter/issues/3) (root-boundary follow-up).
-They should be closed, rescheduled, or explicitly incorporated before the v1 release gate; this
-document does not claim either is complete.
+Cleanup ticket [#2](https://github.com/moons-14/gutter/issues/2) is complete: the original local
+PWA icon source and its generated 192/512 PNG artifacts are committed and covered by deterministic
+artifact checks. [#3](https://github.com/moons-14/gutter/issues/3) remains **OPEN**: its immutable
+library-root boundary foundation was delivered in
+[`c360d85`](https://github.com/moons-14/gutter/commit/c360d85) / PR #13, while mutable authenticated
+admin registration is deliberately deferred to M5. The v1 gate must not treat that deferred
+registration work as delivered by the immutable foundation.
 
 ## Explicit post-v1 non-goals
 

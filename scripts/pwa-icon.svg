@@ -1,4 +1,8 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
-  <rect width="512" height="512" rx="96" fill="#101114"/>
-  <path d="M128 128h256v256H128z" fill="#ff7355"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="Gutter">
+  <rect width="512" height="512" fill="#101114"/>
+  <!-- The mark stays inside the maskable-icon safe area (80% of the canvas). -->
+  <circle cx="256" cy="256" r="160" fill="#ff7355"/>
+  <circle cx="256" cy="256" r="92" fill="#101114"/>
+  <path d="M344 164h96v92h-96z" fill="#101114"/>
+  <path d="M256 232h160v128H320v-64h-64z" fill="#ff7355"/>
 </svg>
