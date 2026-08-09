@@ -25,6 +25,7 @@ import {
   getValidationSource,
   getAuthorizedReaderPage,
   getReaderReleaseDescriptor,
+  getReaderPublicationSession,
   releaseValidationIntent,
   reconcileLibraryRoots,
   renewValidationLease,
@@ -96,6 +97,7 @@ const readerServer = startReaderHttpServer({
   roots: readyRoots,
   authorize: getAuthorizedReaderPage,
   describe: getReaderReleaseDescriptor,
+  describePublication: getReaderPublicationSession,
   cache: derivedCache,
   shutdownSignal: shutdown.signal,
 });

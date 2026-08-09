@@ -1,15 +1,25 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
   import {
     canMove, defaultPresentation, gestureStep, loadPresentation, loadProgress, move,
-    pagePosition, savePresentation, saveProgress, setPresentation, visibleOrdinals,
+    foregroundResourceKeys, pagePosition, PageResourceScheduler, retainedResourceKeys, savePresentation,
+    saveProgress, setPresentation, storeNextHandoff, takeNextHandoff, visibleOrdinals,
     type ReaderDescriptor, type ReaderState,
   } from '$lib/reader';
 
   export let data: { id: string };
+  export let publication = false;
   let state: ReaderState | null = null;
   let error = '';
   let pageError: number | null = null;
+  let resourceVersion = 0;
+  let scheduler: PageResourceScheduler | null = null;
+  let refreshedDescriptor = false;
+  let refreshingDescriptor = false;
+  let direction: -1 | 1 = 1;
+  let nextSession: { releaseId: string; ordinal: number } | null = null;
+  let nextTransferred = false;
+  let incomingHandoff: ReturnType<typeof takeNextHandoff> = null;
   let showResume = false;
   let startX: number | null = null;
   let pendingResume: number | null = null;
@@ -22,25 +32,56 @@
   let fullscreenError = '';
   const visibility = new Map<number, number>();
 
-  onMount(async () => {
+  async function loadDescriptor(refresh = false) {
     try {
-      const response = await fetch(`/api/reader/releases/${data.id}`, { cache: 'no-store' });
-      const body: { release: ReaderDescriptor | null } = await response.json();
-      if (!response.ok || !body.release || body.release.validOrdinals.length === 0)
+      error = '';
+      nextSession = null;
+      nextTransferred = false;
+      const response = await fetch(
+        publication ? `/api/reader/publications/${data.id}` : `/api/reader/releases/${data.id}`,
+        { cache: 'no-store' },
+      );
+      const body: { release: ReaderDescriptor | null; session: { releaseId: string; release: ReaderDescriptor } | null } = await response.json();
+      const releaseId = publication ? body.session?.releaseId : data.id;
+      const descriptor = publication ? body.session?.release : body.release;
+      if (!response.ok || !releaseId || !descriptor || descriptor.validOrdinals.length === 0)
         throw new Error('reader_unavailable');
-      const saved = loadProgress(body.release);
+      const saved = refresh ? null : loadProgress(descriptor);
       state = {
-        descriptor: body.release,
-        ordinal: body.release.validOrdinals[0]!,
+        releaseId,
+        descriptor,
+        ordinal: descriptor.validOrdinals[0]!,
         presentation: loadPresentation(),
         persistProgress: saved === null,
       };
+      incomingHandoff = publication ? takeNextHandoff(data.id) : null;
+      if (incomingHandoff && (incomingHandoff.releaseId !== releaseId || incomingHandoff.ordinal !== descriptor.validOrdinals[0])) {
+        URL.revokeObjectURL(incomingHandoff.resource.url);
+        incomingHandoff = null;
+      }
       pendingResume = saved;
       showResume = saved !== null && saved !== state.ordinal;
     } catch {
       error = 'このリリースは現在読めません。';
+    } finally {
+      refreshingDescriptor = false;
     }
+  }
+
+  onMount(() => { void loadDescriptor(); });
+  onDestroy(() => {
+    scheduler?.clear();
+    if (tapTimer) clearTimeout(tapTimer);
   });
+
+  function transferNext(key: string) {
+    if (!scheduler || nextTransferred || !state?.descriptor.nextPublicationId || !nextSession) return;
+    if (key !== `next:${state.descriptor.nextPublicationId}`) return;
+    const resource = scheduler.take(key);
+    if (!resource) return;
+    storeNextHandoff({ publicationId: state.descriptor.nextPublicationId, ...nextSession, resource });
+    nextTransferred = true;
+  }
 
   $: if (state) {
     savePresentation(state.presentation);
@@ -48,8 +89,57 @@
   }
   $: position = state ? pagePosition(state) : null;
   $: visible = state ? visibleOrdinals(state) : [];
+  $: rendered = state
+    ? visible.filter((page) => retainedResourceKeys(state!, direction).includes(`page:${page}`))
+    : [];
+  $: if (state && !refreshingDescriptor) {
+    const ordinalIndex = state.descriptor.validOrdinals.indexOf(state.ordinal);
+    const ahead = state.descriptor.validOrdinals[ordinalIndex + direction];
+    const pageKey = (page: number) => `page:${page}`;
+    const nextKey = `next:${state.descriptor.nextPublicationId ?? ''}`;
+    const nearEnd = ordinalIndex >= state.descriptor.validOrdinals.length - 2;
+    const retained = retainedResourceKeys(state, direction);
+    if (!scheduler) {
+      scheduler = new PageResourceScheduler(
+        async (key, signal) => {
+          if (key.startsWith('page:')) return `/api/reader/releases/${state?.releaseId}/pages/${key.slice(5)}`;
+          const publicationId = key.slice(5);
+          const response = await fetch(`/api/reader/publications/${publicationId}`, { cache: 'no-store', signal });
+          const body: { session: { releaseId: string; release: ReaderDescriptor } | null } = await response.json();
+          if (!response.ok || !body.session || body.session.release.validOrdinals.length === 0) throw new Error('next_unavailable');
+          nextSession = { releaseId: body.session.releaseId, ordinal: body.session.release.validOrdinals[0] };
+          return `/api/reader/releases/${body.session.releaseId}/pages/${body.session.release.validOrdinals[0]}`;
+        },
+        () => resourceVersion += 1,
+        () => {
+          if (!refreshedDescriptor) {
+            refreshedDescriptor = true;
+            refreshingDescriptor = true;
+            scheduler?.clear();
+            scheduler = null;
+            void loadDescriptor(true);
+          }
+          else pageError = state?.ordinal ?? null;
+        },
+        transferNext,
+      );
+    }
+    if (scheduler) {
+      scheduler.retain(retained);
+      if (incomingHandoff) {
+        const key = pageKey(state.ordinal);
+        if (!scheduler.adopt(key, incomingHandoff.resource)) URL.revokeObjectURL(incomingHandoff.resource.url);
+        incomingHandoff = null;
+      }
+      for (const key of foregroundResourceKeys(state, direction)) scheduler.request(key, 'foreground');
+      if (ahead !== undefined && !visible.includes(ahead) && retained.includes(pageKey(ahead)))
+        scheduler.request(pageKey(ahead), 'prefetch');
+      if (nearEnd && state.descriptor.nextPublicationId && retained.includes(nextKey) && !nextTransferred)
+        scheduler.request(nextKey, 'prefetch');
+    }
+  }
 
-  function navigate(step: -1 | 1) { if (state) { state = { ...move(state, step), persistProgress: true }; pageError = null; } }
+  function navigate(step: -1 | 1) { if (state) { direction = step; state = { ...move(state, step), persistProgress: true }; pageError = null; } }
   function resume() {
     if (state && pendingResume !== null) state = { ...state, ordinal: pendingResume, persistProgress: true };
     showResume = false;
@@ -160,12 +250,18 @@
     {#if showResume}
       <div class="resume" role="dialog" aria-label="読書を再開"><p>前回の続きがあります。</p><button onclick={resume}>続きから読む</button><button onclick={startOver}>最初から読む</button></div>
     {/if}
-    <div class:spread={state.presentation.mode === 'spread'} class="pages" style:transform={`scale(${state.presentation.zoom})`} aria-live="polite">
-      {#each visible as page (page)}
+    <div class:spread={state.presentation.mode === 'spread'} class="pages" data-resource-version={resourceVersion} style:transform={`scale(${state.presentation.zoom})`} aria-live="polite">
+      {#each rendered as page (page)}
         {#if pageError === page}
           <div class="page-error" role="alert">このページを表示できません。<button onclick={() => pageError = null}>再試行</button></div>
         {:else}
-          <img use:pageVisible={{ page, continuous: state.presentation.mode === 'vertical' || state.presentation.mode === 'webtoon' }} loading="lazy" src={`/api/reader/releases/${data.id}/pages/${page}`} alt={`ページ ${state.descriptor.validOrdinals.indexOf(page) + 1}`} onerror={() => pageError = page} />
+          {#if resourceVersion >= 0 && scheduler?.failure(`page:${page}`)}
+            <div class="page-error" role="alert">{scheduler.failure(`page:${page}`) === 'offline' ? 'オフラインのためこのページを表示できません。' : 'このページを表示できません。'}<button onclick={() => scheduler?.retry(`page:${page}`, 'foreground')}>再試行</button></div>
+          {:else if resourceVersion >= 0 && scheduler?.get(`page:${page}`)}
+            <img use:pageVisible={{ page, continuous: state.presentation.mode === 'vertical' || state.presentation.mode === 'webtoon' }} loading="lazy" src={scheduler.get(`page:${page}`)?.url} alt={`ページ ${state.descriptor.validOrdinals.indexOf(page) + 1}`} onerror={() => pageError = page} />
+          {:else}
+            <div aria-live="polite">ページを読み込み中…</div>
+          {/if}
         {/if}
       {/each}
     </div>
@@ -182,7 +278,7 @@
       {#if fullscreenError}<span role="alert">{fullscreenError}<button onclick={toggleFullscreen}>再試行</button></span>{/if}
     </nav>
     {#if !canMove(state, 1)}
-      <aside class="end" aria-label="読了">読了{#if state.descriptor.nextPublicationId}<a href={`/reader/${state.descriptor.nextPublicationId}`}>次の作品を読む</a>{/if}</aside>
+      <aside class="end" aria-label="読了">読了{#if state.descriptor.nextPublicationId}<a href={`/reader/publications/${state.descriptor.nextPublicationId}`}>次の作品を読む</a>{/if}</aside>
     {/if}
   {/if}
 </section>

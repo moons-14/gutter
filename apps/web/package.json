@@ -7,7 +7,8 @@
     "lint": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "typecheck": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "build": "vite build",
-    "test:ui": "vitest run"
+    "test:ui": "vitest run",
+    "test:e2e": "playwright test"
   },
   "devDependencies": {
     "@testing-library/svelte": "5.4.2",

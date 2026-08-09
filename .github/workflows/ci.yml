@@ -10,7 +10,7 @@ jobs:
       - run: corepack enable && corepack prepare pnpm@11.20.0 --activate
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec playwright install --with-deps chromium webkit
-      - run: pnpm audit:licenses && pnpm check && pnpm lint && pnpm typecheck && pnpm unit && pnpm build
+      - run: pnpm audit:licenses && pnpm check && pnpm lint && pnpm typecheck && pnpm unit && pnpm build && pnpm --filter @gutter/web test:e2e
   compose-smoke:
     needs: quality
     runs-on: ubuntu-latest

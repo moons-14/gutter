@@ -121,6 +121,49 @@ test('reader descriptor exposes only ready opaque navigation authority', async (
   }
 });
 
+test('publication reader session returns only the selected opaque release descriptor', async () => {
+  const server = createReaderHttpServer({
+    roots: new Map(),
+    authorize: async () => null,
+    describePublication: async (publicationId) =>
+      publicationId === '42'
+        ? {
+            releaseId: '9',
+            release: {
+              progressKey: 'source:opaque-stable-key',
+              revision: 'a'.repeat(64) + ':7',
+              validOrdinals: [0, 2],
+              validPageCount: 2,
+              nextPublicationId: null,
+            },
+          }
+        : null,
+  });
+  const base = await listening(server);
+  try {
+    const response = await fetch(`${base}/api/reader/publications/42`);
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+    assert.deepEqual(await response.json(), {
+      session: {
+        releaseId: '9',
+        release: {
+          progressKey: 'source:opaque-stable-key',
+          revision: 'a'.repeat(64) + ':7',
+          validOrdinals: [0, 2],
+          validPageCount: 2,
+          nextPublicationId: null,
+        },
+      },
+    });
+    assert.equal((await fetch(`${base}/api/reader/publications/9`)).status, 404);
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+  }
+});
+
 test('worker shutdown aborts an active reader stream before closing its listener', async () => {
   const root = await mkdtemp(join(tmpdir(), 'gutter-reader-shutdown-'));
   const data = Buffer.alloc(16 * 1024 * 1024, 7);

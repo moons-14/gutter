@@ -1524,6 +1524,37 @@ export async function getReaderReleaseDescriptor(
     : null;
 }
 
+/** Resolve a publication to its current reader-ready release without exposing source metadata. */
+export async function getReaderPublicationSession(
+  publicationId: string,
+): Promise<Readonly<{ releaseId: string; release: ReaderReleaseDescriptor }> | null> {
+  if (!/^[1-9][0-9]*$/.test(publicationId)) return null;
+  const result = await pool.query<{ id: string }>(
+    `select r.id::text as id
+     from catalog_releases r
+     join catalog_publications p on p.id=r.publication_id
+     join source_items i on i.id=r.source_item_id
+     join page_validation_runs run on run.source_item_id=i.id and run.manifest_sha256=i.manifest_sha256
+       and run.generation=i.validation_generation and run.state='completed'
+     join source_pages sp on sp.source_item_id=i.id
+     join page_validation_results result on result.source_item_id=i.id and result.locator=sp.locator
+       and result.manifest_sha256=i.manifest_sha256 and result.generation=i.validation_generation and result.state='valid'
+     left join catalog_preferred_release_overrides o on o.root_id=r.root_id
+       and o.publication_identity_key=p.identity_key and o.preferred_source_item_id=i.id
+     where p.id=$1 and i.active and i.quarantine_reason is null
+       and exists (select 1 from library_roots root where root.id=i.root_id and root.active)
+     group by r.id,o.preferred_source_item_id,i.id,r.metadata_completeness,i.mtime_ms,i.relative_path
+     order by coalesce(o.preferred_source_item_id=i.id,false) desc,r.metadata_completeness desc,
+       count(sp.ordinal) desc,i.mtime_ms desc,i.relative_path collate "C" asc,r.id asc
+     limit 1`,
+    [publicationId],
+  );
+  const releaseId = result.rows[0]?.id;
+  if (!releaseId) return null;
+  const release = await getReaderReleaseDescriptor(releaseId);
+  return release ? { releaseId, release } : null;
+}
+
 export async function getAuthorizedReaderPage(
   releaseId: string,
   ordinal: number,

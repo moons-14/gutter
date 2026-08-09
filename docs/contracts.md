@@ -24,9 +24,10 @@ SHA-256 hash of normalized filters, are valid only while the result set is uncha
 lossless decimal bigint IDs plus PostgreSQL microsecond timestamp text. This is request-shape
 validation, not an authorization token. Issue #4 adds
 worker-only streaming CRC/full-first-frame image validation. M2 may use disabled-by-default watcher
-hints that discard event paths and only enqueue full-root reconciliation. The delivered S20-1 reader
-foundation keeps descriptors and page bytes worker-owned and network-only; interaction modes,
-gestures, prefetch, and browser-local progress/preferences remain pending. There is no auth, mutable
+hints that discard event paths and only enqueue full-root reconciliation. The M3 #20 validation reader
+keeps descriptors and page bytes worker-owned and network-only; its bounded route-local page window
+uses no persistent byte store while presentation and revision-aware progress remain browser-local.
+There is no auth, mutable
 registration API/UI, external provider, or source writes.
 User-specific hiding is deferred until authentication and will use a separate table. Run the
 focused PostgreSQL oracle with `docker compose --profile integration run --rm --build integration`.

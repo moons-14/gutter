@@ -29,6 +29,10 @@ export type ReaderHttpDependencies = Readonly<{
   roots: ReadonlyMap<string, { canonicalPath: string }>;
   authorize: (releaseId: string, ordinal: number) => Promise<AuthorizedPage | null>;
   describe?: (releaseId: string) => Promise<ReaderReleaseDescriptor | null>;
+  describePublication?: (publicationId: string) => Promise<Readonly<{
+    releaseId: string;
+    release: ReaderReleaseDescriptor;
+  }> | null>;
   limiter?: ReaderStreamLimiter;
   cache?: DerivedCache;
   shutdownSignal?: AbortSignal;
@@ -44,6 +48,7 @@ export type ReaderReleaseDescriptor = Readonly<{
 
 const route = /^\/api\/reader\/releases\/([1-9][0-9]*)\/pages\/([0-9]+)$/;
 const descriptorRoute = /^\/api\/reader\/releases\/([1-9][0-9]*)$/;
+const publicationRoute = /^\/api\/reader\/publications\/([1-9][0-9]*)$/;
 function range(value: string | undefined, size: number): { start: number; end: number } | null {
   if (!value || !/^bytes=/.test(value) || value.includes(',')) return null;
   const match = /^bytes=(\d*)-(\d*)$/.exec(value);
@@ -121,6 +126,15 @@ export function createReaderHttpServer(deps: ReaderHttpDependencies): Server {
         'Content-Type': 'application/json; charset=utf-8',
       });
       return response.end(JSON.stringify({ release: descriptor }));
+    }
+    const publicationMatch = pathname && publicationRoute.exec(pathname);
+    if (publicationMatch && request.method === 'GET' && deps.describePublication) {
+      const session = await deps.describePublication(publicationMatch[1]!).catch(() => null);
+      response.writeHead(session ? 200 : 404, {
+        'Cache-Control': 'no-store',
+        'Content-Type': 'application/json; charset=utf-8',
+      });
+      return response.end(JSON.stringify({ session }));
     }
     const match = pathname && route.exec(pathname);
     if (!match || !['GET', 'HEAD'].includes(request.method ?? '')) return send(response, 404);

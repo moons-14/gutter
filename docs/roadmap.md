@@ -21,9 +21,10 @@ the delivered foundation.
 ## Epics
 
 - M3: source streaming, derived content-addressed cache, GC, and mobile reader modes/gestures. S20-1
-  delivers the internal worker stream, opaque descriptor, worker-only disposable cache, and minimal
-  descriptor-gated web shell. Reader interaction modes, gestures, prefetch, and browser-local
-  progress/preferences remain pending; authentication and public source-path APIs are out of scope.
+  delivers the internal worker stream, opaque descriptor, and worker-only disposable cache; #20 is in
+  validation for a bounded network-only reader with local presentation/revision-aware progress. Authentication and public
+  source-path APIs remain out of scope. Browser coverage includes Chromium desktop and Pixel; WebKit
+  iPhone coverage is best effort only and makes no native-app claim.
 - M4: versioned metadata-provider HTTP sidecars and selected public API/PATs.
 - M5: Better Auth passkey/TOTP, no-signup policy, library ACL, multi-user flows.
 - M6: scale benchmark, operations, v1 API stabilization, backup/restore runbooks.
