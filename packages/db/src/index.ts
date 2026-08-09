@@ -20,7 +20,12 @@ import {
 } from '@gutter/catalog-domain';
 import { basename, dirname, extname } from 'node:path';
 import { Pool } from 'pg';
-import { mergeCandidates, validCandidate, type Candidate, type MergedMetadata } from '@gutter/metadata-provider';
+import {
+  mergeCandidates,
+  validCandidate,
+  type Candidate,
+  type MergedMetadata,
+} from '@gutter/metadata-provider';
 import {
   manifestSha256,
   scanPage,
@@ -43,22 +48,33 @@ export async function metadataStatus(rootId: string, canonicalIdentity: string) 
     [rootId, canonicalIdentity],
   );
 }
-export async function approveMetadata(rootId: string, canonicalIdentity: string): Promise<MergedMetadata> {
+export async function approveMetadata(
+  rootId: string,
+  canonicalIdentity: string,
+): Promise<MergedMetadata> {
   const status = await metadataStatus(rootId, canonicalIdentity);
   const row = status.rows[0];
   const candidates = (row?.candidates ?? []) as Candidate[];
   const merged = mergeCandidates(candidates);
   if (!Object.keys(merged.values).length) throw new Error('metadata_candidate_not_found');
   const manifest = await pool.query<{ manifest_sha256: string | null }>(
-    `select i.manifest_sha256 from catalog_releases r join catalog_publications p on p.id=r.publication_id join source_items i on i.id=r.source_item_id where r.root_id=$1 and p.identity_key=$2 and i.active order by i.updated_at desc limit 1`, [rootId, canonicalIdentity]);
+    `select i.manifest_sha256 from catalog_releases r join catalog_publications p on p.id=r.publication_id join source_items i on i.id=r.source_item_id where r.root_id=$1 and p.identity_key=$2 and i.active order by i.updated_at desc limit 1`,
+    [rootId, canonicalIdentity],
+  );
   const client = await pool.connect();
   try {
     await client.query('begin');
     await client.query(
-    `insert into metadata_decisions(root_id,canonical_identity_key,state,approved_snapshot,approved_provenance,approved_manifest_sha256)
+      `insert into metadata_decisions(root_id,canonical_identity_key,state,approved_snapshot,approved_provenance,approved_manifest_sha256)
      values($1,$2,'approved',$3::jsonb,$4::jsonb,$5)
      on conflict(root_id,canonical_identity_key) do update set state='approved',approved_snapshot=excluded.approved_snapshot,approved_provenance=excluded.approved_provenance,approved_manifest_sha256=excluded.approved_manifest_sha256,decided_at=now(),updated_at=now()`,
-      [rootId, canonicalIdentity, JSON.stringify(merged.values), JSON.stringify(merged.provenance), manifest.rows[0]?.manifest_sha256 ?? null],
+      [
+        rootId,
+        canonicalIdentity,
+        JSON.stringify(merged.values),
+        JSON.stringify(merged.provenance),
+        manifest.rows[0]?.manifest_sha256 ?? null,
+      ],
     );
     const sources = await client.query<{ id: CatalogId; effective: CatalogMetadata }>(
       `select i.id,m.effective from catalog_releases r join catalog_publications p on p.id=r.publication_id
@@ -66,9 +82,11 @@ export async function approveMetadata(rootId: string, canonicalIdentity: string)
        where r.root_id=$1 and p.identity_key=$2 and i.active`,
       [rootId, canonicalIdentity],
     );
-    const affected = await Promise.all(sources.rows.map((source) =>
-      reconcileCatalogItem(client, rootId, source.id, source.effective),
-    ));
+    const affected = await Promise.all(
+      sources.rows.map((source) =>
+        reconcileCatalogItem(client, rootId, source.id, source.effective),
+      ),
+    );
     await refreshCatalogSeriesListStateTx(client, affected);
     await client.query('commit');
   } catch (error) {
@@ -81,15 +99,31 @@ export async function approveMetadata(rootId: string, canonicalIdentity: string)
 }
 export async function rejectMetadata(rootId: string, canonicalIdentity: string): Promise<void> {
   if (!canonicalIdentityKey.test(canonicalIdentity)) throw new Error('invalid_canonical_identity');
-  await pool.query(`insert into metadata_decisions(root_id,canonical_identity_key,state) values($1,$2,'rejected') on conflict(root_id,canonical_identity_key) do update set state='rejected',decided_at=now(),updated_at=now()`, [rootId, canonicalIdentity]);
+  await pool.query(
+    `insert into metadata_decisions(root_id,canonical_identity_key,state) values($1,$2,'rejected') on conflict(root_id,canonical_identity_key) do update set state='rejected',decided_at=now(),updated_at=now()`,
+    [rootId, canonicalIdentity],
+  );
 }
-export async function recordMetadataCandidate(rootId: string, canonicalIdentity: string, candidate: Candidate): Promise<void> {
-  if (!canonicalIdentityKey.test(canonicalIdentity) || !validCandidate(candidate)) throw new Error('invalid_metadata_candidate');
+export async function recordMetadataCandidate(
+  rootId: string,
+  canonicalIdentity: string,
+  candidate: Candidate,
+): Promise<void> {
+  if (!canonicalIdentityKey.test(canonicalIdentity) || !validCandidate(candidate))
+    throw new Error('invalid_metadata_candidate');
   await pool.query(
     `insert into metadata_provider_candidates(root_id,canonical_identity_key,provider_id,provider_priority,config_order,values,provenance)
      values($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb)
      on conflict(root_id,canonical_identity_key,provider_id) do update set provider_priority=excluded.provider_priority,config_order=excluded.config_order,values=excluded.values,provenance=excluded.provenance,observed_at=now()`,
-    [rootId, canonicalIdentity, candidate.providerId, candidate.providerPriority, candidate.configOrder, JSON.stringify(candidate.values), JSON.stringify(candidate.provenance)],
+    [
+      rootId,
+      canonicalIdentity,
+      candidate.providerId,
+      candidate.providerPriority,
+      candidate.configOrder,
+      JSON.stringify(candidate.values),
+      JSON.stringify(candidate.provenance),
+    ],
   );
 }
 
@@ -97,7 +131,13 @@ export async function recordMetadataCandidate(rootId: string, canonicalIdentity:
 export async function metadataLookupIntents(
   rootId: string,
   relativePaths: readonly string[],
-): Promise<readonly { canonicalIdentity: string; searchTerms: readonly string[]; publicIds: readonly string[] }[]> {
+): Promise<
+  readonly {
+    canonicalIdentity: string;
+    searchTerms: readonly string[];
+    publicIds: readonly string[];
+  }[]
+> {
   if (!relativePaths.length) return [];
   const rows = await pool.query<{ identity_key: string; effective: CatalogMetadata }>(
     `select distinct p.identity_key,m.effective from source_items i join source_metadata m on m.source_item_id=i.id
@@ -107,9 +147,9 @@ export async function metadataLookupIntents(
   );
   return rows.rows.map(({ identity_key, effective }) => ({
     canonicalIdentity: identity_key,
-    searchTerms: [identityText(effective.title), identityText(effective.series)].filter(
-      (value): value is string => value !== null,
-    ).slice(0, 8),
+    searchTerms: [identityText(effective.title), identityText(effective.series)]
+      .filter((value): value is string => value !== null)
+      .slice(0, 8),
     publicIds: [],
   }));
 }

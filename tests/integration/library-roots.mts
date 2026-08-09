@@ -377,7 +377,12 @@ try {
     reconciliationWorker!([{ id: 'reconciliation-test', data: { requestId: 'request-test' } }]),
     { name: 'AbortError' },
   );
-  assert.deepEqual(reconciliationEvents, ['persist', 'lookup', `dispatch:${'d'.repeat(64)}`, 'cancel']);
+  assert.deepEqual(reconciliationEvents, [
+    'persist',
+    'lookup',
+    `dispatch:${'d'.repeat(64)}`,
+    'cancel',
+  ]);
   assert.ok(forwardedLease?.aborted);
 
   const queueName = `catalog.discovery.integration.${randomUUID()}`;
@@ -553,12 +558,22 @@ try {
     ['integration-alpha', metadataIdentity],
   );
   await recordMetadataCandidate('integration-alpha', metadataIdentity, {
-    providerId: 'integration-sidecar', providerPriority: 0, configOrder: 0,
-    values: { title: 'Approved provider title' }, provenance: { title: 'integration-sidecar' },
+    providerId: 'integration-sidecar',
+    providerPriority: 0,
+    configOrder: 0,
+    values: { title: 'Approved provider title' },
+    provenance: { title: 'integration-sidecar' },
   });
   await approveMetadata('integration-alpha', metadataIdentity);
-  assert.equal((await metadataStatus('integration-alpha', metadataIdentity)).rows[0]?.state, 'approved');
-  const approvedProjection = await pool.query<{ identity_key: string; display_name: string; series_name: string }>(
+  assert.equal(
+    (await metadataStatus('integration-alpha', metadataIdentity)).rows[0]?.state,
+    'approved',
+  );
+  const approvedProjection = await pool.query<{
+    identity_key: string;
+    display_name: string;
+    series_name: string;
+  }>(
     `select p.identity_key,p.display_name,s.display_name as series_name from catalog_releases r
      join catalog_publications p on p.id=r.publication_id join catalog_series s on s.id=p.series_id
      where r.root_id=$1 and p.identity_key=$2`,
@@ -571,37 +586,55 @@ try {
   });
   await rebuildCatalogProjectionForIntegration();
   assert.equal(
-    (await pool.query<{ display_name: string }>(
-      'select display_name from catalog_publications where identity_key=$1', [metadataIdentity],
-    )).rows[0]?.display_name,
+    (
+      await pool.query<{ display_name: string }>(
+        'select display_name from catalog_publications where identity_key=$1',
+        [metadataIdentity],
+      )
+    ).rows[0]?.display_name,
     'Approved provider title',
   );
   const changedManifestRun = await startScanRun('integration-alpha', generation);
   await persistScanItems(changedManifestRun, 'integration-alpha', [{ ...item, mtimeMs: 1 }]);
   await completeScanRun(changedManifestRun, 'integration-alpha', summary);
-  assert.equal((await metadataStatus('integration-alpha', metadataIdentity)).rows[0]?.state, 'pending_reapproval');
   assert.equal(
-    (await pool.query<{ display_name: string }>(
-      'select display_name from catalog_publications where identity_key=$1', [metadataIdentity],
-    )).rows[0]?.display_name,
+    (await metadataStatus('integration-alpha', metadataIdentity)).rows[0]?.state,
+    'pending_reapproval',
+  );
+  assert.equal(
+    (
+      await pool.query<{ display_name: string }>(
+        'select display_name from catalog_publications where identity_key=$1',
+        [metadataIdentity],
+      )
+    ).rows[0]?.display_name,
     sourceProjection.rows[0]!.display_name,
   );
   await recordMetadataCandidate('integration-alpha', metadataIdentity, {
-    providerId: 'integration-sidecar', providerPriority: 0, configOrder: 0,
-    values: { title: 'Approved provider title' }, provenance: { title: 'integration-sidecar' },
+    providerId: 'integration-sidecar',
+    providerPriority: 0,
+    configOrder: 0,
+    values: { title: 'Approved provider title' },
+    provenance: { title: 'integration-sidecar' },
   });
   await approveMetadata('integration-alpha', metadataIdentity);
   assert.equal(
-    (await pool.query<{ display_name: string }>(
-      'select display_name from catalog_publications where identity_key=$1', [metadataIdentity],
-    )).rows[0]?.display_name,
+    (
+      await pool.query<{ display_name: string }>(
+        'select display_name from catalog_publications where identity_key=$1',
+        [metadataIdentity],
+      )
+    ).rows[0]?.display_name,
     'Approved provider title',
   );
 
   const orphanIdentity = 'b'.repeat(64);
   await recordMetadataCandidate('integration-alpha', orphanIdentity, {
-    providerId: 'orphan-sidecar', providerPriority: 0, configOrder: 0,
-    values: { title: 'Orphan candidate' }, provenance: { title: 'orphan-sidecar' },
+    providerId: 'orphan-sidecar',
+    providerPriority: 0,
+    configOrder: 0,
+    values: { title: 'Orphan candidate' },
+    provenance: { title: 'orphan-sidecar' },
   });
   await rejectMetadata('integration-alpha', orphanIdentity);
   const cleanupRun = await startScanRun('integration-alpha', generation);

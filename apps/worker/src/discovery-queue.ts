@@ -150,12 +150,23 @@ export async function startReconciliationQueue(
       rootId: string,
       items: readonly ScanItem[],
     ) => Promise<{ updated: number; unchanged: number }>;
-    metadataLookupIntents?: (rootId: string, relativePaths: readonly string[]) => Promise<readonly {
-      canonicalIdentity: string;
-      searchTerms: readonly string[];
-      publicIds: readonly string[];
-    }[]>;
-    dispatchMetadata?: (rootId: string, canonicalIdentity: string, searchTerms: readonly string[], publicIds: readonly string[], signal: AbortSignal) => Promise<void>;
+    metadataLookupIntents?: (
+      rootId: string,
+      relativePaths: readonly string[],
+    ) => Promise<
+      readonly {
+        canonicalIdentity: string;
+        searchTerms: readonly string[];
+        publicIds: readonly string[];
+      }[]
+    >;
+    dispatchMetadata?: (
+      rootId: string,
+      canonicalIdentity: string,
+      searchTerms: readonly string[],
+      publicIds: readonly string[],
+      signal: AbortSignal,
+    ) => Promise<void>;
     complete: (runId: number, rootId: string, summary: ScanSummary) => Promise<void>;
     fail: (runId: number, summary: ScanSummary) => Promise<void>;
     cancel: (runId: number, summary: ScanSummary) => Promise<void>;
@@ -242,11 +253,20 @@ export async function startReconciliationQueue(
               // Dispatch only after the source transaction commits. The payload is source-derived
               // catalog identity plus bounded lookup fields; paths remain inside the DB helper.
               if (deps.metadataLookupIntents && deps.dispatchMetadata) {
-                const intents = await deps.metadataLookupIntents(root.id, items.map((item) => item.relativePath));
+                const intents = await deps.metadataLookupIntents(
+                  root.id,
+                  items.map((item) => item.relativePath),
+                );
                 for (const intent of intents) {
                   if (dispatchedMetadata.has(intent.canonicalIdentity)) continue;
                   dispatchedMetadata.add(intent.canonicalIdentity);
-                  await deps.dispatchMetadata(root.id, intent.canonicalIdentity, intent.searchTerms, intent.publicIds, lease.signal);
+                  await deps.dispatchMetadata(
+                    root.id,
+                    intent.canonicalIdentity,
+                    intent.searchTerms,
+                    intent.publicIds,
+                    lease.signal,
+                  );
                 }
               }
               await pulse();

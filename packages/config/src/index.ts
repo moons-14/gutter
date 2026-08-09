@@ -76,12 +76,21 @@ export type MetadataProviderConfig = Readonly<{
 }>;
 
 /** Resolve both paths before reading so a secret mount cannot be escaped by traversal or symlink. */
-export async function sidecarToken(tokenFile: string, secretsDirectory = '/run/secrets'): Promise<string> {
+export async function sidecarToken(
+  tokenFile: string,
+  secretsDirectory = '/run/secrets',
+): Promise<string> {
   try {
     const root = await realpath(secretsDirectory);
     const candidate = await realpath(tokenFile);
     const pathFromRoot = relative(root, candidate);
-    if (!pathFromRoot || pathFromRoot === '..' || pathFromRoot.startsWith(`..${sep}`) || isAbsolute(pathFromRoot)) throw new Error('outside_secrets');
+    if (
+      !pathFromRoot ||
+      pathFromRoot === '..' ||
+      pathFromRoot.startsWith(`..${sep}`) ||
+      isAbsolute(pathFromRoot)
+    )
+      throw new Error('outside_secrets');
     const token = (await readFile(candidate, 'utf8')).trim();
     if (token) return token;
   } catch {
@@ -96,34 +105,90 @@ export async function sidecarToken(tokenFile: string, secretsDirectory = '/run/s
  */
 export async function metadataProviderConfig(): Promise<MetadataProviderConfig> {
   const values = {
-    timeoutMs: z.coerce.number().int().min(100).max(60_000).safeParse(process.env.GUTTER_METADATA_TIMEOUT_MS ?? '5000'),
-    retries: z.coerce.number().int().min(0).max(3).safeParse(process.env.GUTTER_METADATA_RETRIES ?? '1'),
-    concurrency: z.coerce.number().int().min(1).max(8).safeParse(process.env.GUTTER_METADATA_CONCURRENCY ?? '2'),
-    payloadBytes: z.coerce.number().int().min(1024).max(1_000_000).safeParse(process.env.GUTTER_METADATA_PAYLOAD_BYTES ?? '65536'),
+    timeoutMs: z.coerce
+      .number()
+      .int()
+      .min(100)
+      .max(60_000)
+      .safeParse(process.env.GUTTER_METADATA_TIMEOUT_MS ?? '5000'),
+    retries: z.coerce
+      .number()
+      .int()
+      .min(0)
+      .max(3)
+      .safeParse(process.env.GUTTER_METADATA_RETRIES ?? '1'),
+    concurrency: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(8)
+      .safeParse(process.env.GUTTER_METADATA_CONCURRENCY ?? '2'),
+    payloadBytes: z.coerce
+      .number()
+      .int()
+      .min(1024)
+      .max(1_000_000)
+      .safeParse(process.env.GUTTER_METADATA_PAYLOAD_BYTES ?? '65536'),
   };
-  if (!values.timeoutMs.success || !values.retries.success || !values.concurrency.success || !values.payloadBytes.success)
+  if (
+    !values.timeoutMs.success ||
+    !values.retries.success ||
+    !values.concurrency.success ||
+    !values.payloadBytes.success
+  )
     throw new Error('invalid GUTTER_METADATA_* bounds');
   let rawSidecars: unknown;
-  try { rawSidecars = JSON.parse(process.env.GUTTER_METADATA_SIDECARS_JSON ?? '[]'); } catch { throw new Error('invalid GUTTER_METADATA_SIDECARS_JSON'); }
-  const parsed = z.array(z.object({
-    id: z.string().regex(/^[a-z][a-z0-9_-]{0,62}$/),
-    endpoint: z.string().url(),
-    'token-file': z.string().startsWith('/run/secrets/').min('/run/secrets/x'.length),
-    priority: z.number().int(),
-    order: z.number().int().min(0),
-  }).strict()).safeParse(rawSidecars);
+  try {
+    rawSidecars = JSON.parse(process.env.GUTTER_METADATA_SIDECARS_JSON ?? '[]');
+  } catch {
+    throw new Error('invalid GUTTER_METADATA_SIDECARS_JSON');
+  }
+  const parsed = z
+    .array(
+      z
+        .object({
+          id: z.string().regex(/^[a-z][a-z0-9_-]{0,62}$/),
+          endpoint: z.string().url(),
+          'token-file': z.string().startsWith('/run/secrets/').min('/run/secrets/x'.length),
+          priority: z.number().int(),
+          order: z.number().int().min(0),
+        })
+        .strict(),
+    )
+    .safeParse(rawSidecars);
   if (!parsed.success) throw new Error('invalid GUTTER_METADATA_SIDECARS_JSON');
   const seen = new Set<string>();
   const sidecars: MetadataSidecar[] = [];
   for (const entry of parsed.data) {
     const endpoint = new URL(entry.endpoint);
-    if (endpoint.protocol !== 'http:' || !/^[a-z][a-z0-9-]{0,62}$/.test(endpoint.hostname) || endpoint.username || endpoint.password || endpoint.pathname !== '/' || endpoint.search || endpoint.hash || seen.has(entry.id))
+    if (
+      endpoint.protocol !== 'http:' ||
+      !/^[a-z][a-z0-9-]{0,62}$/.test(endpoint.hostname) ||
+      endpoint.username ||
+      endpoint.password ||
+      endpoint.pathname !== '/' ||
+      endpoint.search ||
+      endpoint.hash ||
+      seen.has(entry.id)
+    )
       throw new Error('invalid GUTTER_METADATA_SIDECARS_JSON');
     seen.add(entry.id);
     const token = await sidecarToken(entry['token-file']);
-    sidecars.push({ id: entry.id, endpoint: endpoint.toString(), token, priority: entry.priority, order: entry.order });
+    sidecars.push({
+      id: entry.id,
+      endpoint: endpoint.toString(),
+      token,
+      priority: entry.priority,
+      order: entry.order,
+    });
   }
-  return { timeoutMs: values.timeoutMs.data, retries: values.retries.data, concurrency: values.concurrency.data, payloadBytes: values.payloadBytes.data, sidecars };
+  return {
+    timeoutMs: values.timeoutMs.data,
+    retries: values.retries.data,
+    concurrency: values.concurrency.data,
+    payloadBytes: values.payloadBytes.data,
+    sidecars,
+  };
 }
 
 /** Reconciliation is deliberately durable DB state, not a pg-boss cron schedule. */
