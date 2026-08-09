@@ -1,6 +1,9 @@
 :8080 {
 	root * /srv
 	encode zstd gzip
+	handle /api/reader/* {
+		reverse_proxy worker:3001
+	}
 	handle_path /api/* {
 		reverse_proxy api:3000
 	}

@@ -20,7 +20,9 @@ the delivered foundation.
 
 ## Epics
 
-- M3: source streaming, derived content-addressed cache, GC, and mobile reader modes/gestures.
+- M3: source streaming, derived content-addressed cache, GC, and mobile reader modes/gestures. The
+  internal worker reader stream is deliberately only a source-read primitive: no web reader UI,
+  authentication, cache, or public source-path API is delivered by this boundary.
 - M4: versioned metadata-provider HTTP sidecars and selected public API/PATs.
 - M5: Better Auth passkey/TOTP, no-signup policy, library ACL, multi-user flows.
 - M6: scale benchmark, operations, v1 API stabilization, backup/restore runbooks.

@@ -114,6 +114,9 @@ importers:
       '@gutter/page-validator':
         specifier: workspace:*
         version: file:packages/page-validator(@types/node@24.13.3)
+      '@gutter/reader-stream':
+        specifier: workspace:*
+        version: link:../../packages/reader-stream
       chokidar:
         specifier: 5.0.0
         version: 5.0.0

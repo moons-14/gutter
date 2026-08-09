@@ -21,6 +21,7 @@ import {
   protectSeenPrefix,
   pool,
   getValidationSource,
+  getAuthorizedReaderPage,
   releaseValidationIntent,
   reconcileLibraryRoots,
   renewValidationLease,
@@ -37,6 +38,7 @@ import { dispatchReconciliationRequests, startReconciliationQueue } from './disc
 import { validateSourceItem } from '@gutter/page-validator';
 import { dispatchValidationIntents, startValidationQueue } from './validation-queue.js';
 import { startWatcherHints } from './watcher-hints.js';
+import { startReaderHttpServer } from './reader-http.js';
 
 const log = pino({ redact: ['*.password', '*.token'] });
 await assertSchema();
@@ -55,6 +57,11 @@ const readyRoots = new Map(
     .map((root) => [root.id, root]),
 );
 const shutdown = new AbortController();
+const readerServer = startReaderHttpServer({
+  roots: readyRoots,
+  authorize: getAuthorizedReaderPage,
+  shutdownSignal: shutdown.signal,
+});
 const reconciliation = reconciliationConfig();
 const watcherHints = watcherHintsConfig();
 await startReconciliationQueue({
@@ -137,6 +144,9 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const)
     shutdown.abort();
     clearInterval(validationDispatcher);
     clearInterval(reconciliationCoordinator);
+    await new Promise<void>((resolve, reject) =>
+      readerServer.close((error) => (error ? reject(error) : resolve())),
+    );
     await watcher.close();
     try {
       await boss.stop();

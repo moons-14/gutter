@@ -15,6 +15,7 @@
     "@gutter/discovery-scanner": "workspace:*",
     "@gutter/library-roots": "workspace:*",
     "@gutter/page-validator": "workspace:*",
+    "@gutter/reader-stream": "workspace:*",
     "chokidar": "5.0.0",
     "pg-boss": "12.27.0",
     "pino": "10.3.1",

@@ -1424,6 +1424,69 @@ export async function getValidationSource(intent: ValidationIntent): Promise<{
   };
 }
 
+/**
+ * Internal reader authorization boundary.  A page is readable only when its release still points
+ * at an active, non-quarantined source with a completed *current* validation run and the exact
+ * ordinal has a valid result from that same run.  Source paths never cross this boundary.
+ */
+export type ReaderPageAuthorization = Readonly<{
+  rootId: string;
+  relativePath: string;
+  kind: 'directory' | 'cbz';
+  ordinal: number;
+  locator: string;
+  observed: import('@gutter/discovery-scanner').ScanPage['observed'];
+  sourceSize: number;
+  sourceMtimeMs: number;
+}>;
+
+export async function getAuthorizedReaderPage(
+  releaseId: string,
+  ordinal: number,
+): Promise<ReaderPageAuthorization | null> {
+  if (!/^[1-9][0-9]*$/.test(releaseId) || !Number.isSafeInteger(ordinal) || ordinal < 0)
+    return null;
+  const result = await pool.query<{
+    root_id: string;
+    relative_path: string;
+    kind: 'directory' | 'cbz';
+    ordinal: number;
+    locator: string;
+    observed: import('@gutter/discovery-scanner').ScanPage['observed'];
+    size_bytes: string;
+    mtime_ms: number;
+  }>(
+    `select i.root_id,i.relative_path,i.kind,p.ordinal,p.locator,p.observed,i.size_bytes,i.mtime_ms
+       from catalog_releases r
+       join source_items i on i.id=r.source_item_id
+       join source_pages p on p.source_item_id=i.id and p.ordinal=$2
+       join page_validation_results vr on vr.source_item_id=i.id and vr.locator=p.locator
+         and vr.manifest_sha256=i.manifest_sha256 and vr.generation=i.validation_generation
+         and vr.state='valid'
+      where r.id=$1 and i.active and i.quarantine_reason is null
+        and exists (select 1 from library_roots lr where lr.id=i.root_id and lr.active)
+        and exists (
+          select 1 from page_validation_runs run
+           where run.source_item_id=i.id and run.manifest_sha256=i.manifest_sha256
+             and run.generation=i.validation_generation and run.state='completed'
+        )`,
+    [releaseId, ordinal],
+  );
+  const row = result.rows[0];
+  return row
+    ? {
+        rootId: row.root_id,
+        relativePath: row.relative_path,
+        kind: row.kind,
+        ordinal: row.ordinal,
+        locator: row.locator,
+        observed: row.observed,
+        sourceSize: Number(row.size_bytes),
+        sourceMtimeMs: row.mtime_ms,
+      }
+    : null;
+}
+
 /** A worker owns an intent only while this exact generation and monotonically claimed lease epoch remain unexpired. */
 export async function renewValidationLease(intent: ValidationIntent): Promise<boolean> {
   const result = await pool.query(

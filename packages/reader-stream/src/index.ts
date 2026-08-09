@@ -213,7 +213,8 @@ function bindCleanup(
     stream.destroy(error);
     finish(error);
   };
-  signal?.addEventListener('abort', onAbort, { once: true });
+  if (signal?.aborted) onAbort();
+  else signal?.addEventListener('abort', onAbort, { once: true });
   stream.once('end', () => finish());
   stream.once('error', (error) => finish(error));
   stream.once('close', () => finish());
@@ -344,9 +345,13 @@ async function openCbz(options: ReaderStreamOptions, release: () => void): Promi
     aborted(signal);
     const found = await new Promise<{ zip: yauzl.ZipFile; entry: yauzl.Entry }>(
       (resolveEntry, reject) => {
+        let abortEnumeration: (() => void) | undefined;
+        const onAbort = () => abortEnumeration?.();
+        signal?.addEventListener('abort', onAbort, { once: true });
         yauzl.fromFd(file.fd, { lazyEntries: true, autoClose: false }, (error, zip) => {
           if (error || !zip) {
-            reject(archiveError(error));
+            signal?.removeEventListener('abort', onAbort);
+            reject(signal?.aborted ? new ReaderStreamError('cancelled') : archiveError(error));
             return;
           }
           let entries = 0;
@@ -356,6 +361,7 @@ async function openCbz(options: ReaderStreamOptions, release: () => void): Promi
           const close = (error?: Error) => {
             if (settled) return;
             settled = true;
+            signal?.removeEventListener('abort', onAbort);
             error
               ? ((handle = undefined), zip.close(), reject(error))
               : result
@@ -364,6 +370,8 @@ async function openCbz(options: ReaderStreamOptions, release: () => void): Promi
                   zip.close(),
                   reject(new ReaderStreamError('page_missing')));
           };
+          abortEnumeration = () => close(new ReaderStreamError('cancelled'));
+          if (signal?.aborted) return abortEnumeration();
           zip.on('error', (error) => close(archiveError(error)));
           zip.on('entry', (entry) => {
             entries++;
@@ -398,11 +406,17 @@ async function openCbz(options: ReaderStreamOptions, release: () => void): Promi
     const { zip, entry } = found;
     // yauzl's FdSlicer owns this descriptor once fromFd succeeds.
     handle = undefined;
+    aborted(signal);
     const input = await new Promise<Readable>((resolveStream, reject) =>
       zip.openReadStream(entry, (error, stream) =>
         error || !stream ? (zip.close(), reject(archiveError(error))) : resolveStream(stream),
       ),
     );
+    if (signal?.aborted) {
+      input.destroy();
+      zip.close();
+      fail('cancelled');
+    }
     const stream = new BoundedChunks(
       page.observed.size,
       limitsFor(options.limits).chunkBytes,

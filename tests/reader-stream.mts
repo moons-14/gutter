@@ -214,6 +214,27 @@ test('CBZ detects stream-time payload corruption and releases the permit', async
   assert.equal(limiter.active, 0);
 });
 
+test('CBZ cancellation during central-directory enumeration closes the archive and releases its permit', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'gutter-reader-cbz-cancel-'));
+  const data = Buffer.from('cancel while enumerating');
+  await writeFile(join(root, 'comic.cbz'), storedZip('001.jpg', data));
+  const controller = new AbortController();
+  const limiter = new ReaderStreamLimiter(1, 0);
+  await expectCode(
+    openReaderStream({
+      source: await source(root, 'comic.cbz', 'cbz'),
+      page: page('001.jpg', data),
+      signal: controller.signal,
+      limiter,
+      afterOpen: () => {
+        setImmediate(() => controller.abort());
+      },
+    }),
+    'cancelled',
+  );
+  assert.equal(limiter.active, 0);
+});
+
 test('CBZ rejects unsupported media before archive resource acquisition and applies ratios to zero-byte entries', async () => {
   const root = await mkdtemp(join(tmpdir(), 'gutter-reader-cbz-prebody-'));
   const data = Buffer.from('page');

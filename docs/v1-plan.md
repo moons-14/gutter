@@ -37,3 +37,14 @@ registration work as delivered by the immutable foundation.
 Native mobile applications, Kavita database migration, source-file mutation/uploads, Redis, and
 external SaaS dependencies remain out of scope after v1 unless a later, separately approved
 product decision changes that boundary.
+
+## M3 streaming boundary
+
+The worker alone mounts library sources and serves an internal Compose-only reader route using an
+opaque release ID and persisted page ordinal. It admits a page only after the exact current
+validation generation has completed and marked that page valid. Directory pages support one byte
+range; CBZ entry streams intentionally return a full `200` with `Accept-Ranges: none` because they
+are decompressed, bounded streams. Weak ETags and Last-Modified are validation/source observations,
+not durable cache promises. A same-size-and-mtime source replacement between observation and open
+is a known best-effort TOCTOU limitation; the stream still pins no-follow descriptors and never
+mutates source files.
