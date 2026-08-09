@@ -1,10 +1,12 @@
 import {
   allowedRootsJson,
   databaseUrl,
+  derivedCacheConfig,
   reconciliationConfig,
   validationTimeouts,
   watcherHintsConfig,
 } from '@gutter/config';
+import { DerivedCache } from '@gutter/derived-cache';
 import {
   assertSchema,
   completeScanRun,
@@ -39,6 +41,7 @@ import { validateSourceItem } from '@gutter/page-validator';
 import { dispatchValidationIntents, startValidationQueue } from './validation-queue.js';
 import { startWatcherHints } from './watcher-hints.js';
 import { startReaderHttpServer } from './reader-http.js';
+import { cacheStatus, recordCacheStatus } from './cache-status.js';
 
 const log = pino({ redact: ['*.password', '*.token'] });
 await assertSchema();
@@ -57,9 +60,41 @@ const readyRoots = new Map(
     .map((root) => [root.id, root]),
 );
 const shutdown = new AbortController();
+const derivedCacheConfigValue = derivedCacheConfig();
+const derivedCache = new DerivedCache(derivedCacheConfigValue);
+const runDerivedCacheGc = async () => {
+  const before = await cacheStatus(
+    derivedCacheConfigValue.root,
+    derivedCacheConfigValue.quotaBytes,
+  );
+  await derivedCache.gc();
+  const after = await cacheStatus(derivedCacheConfigValue.root, derivedCacheConfigValue.quotaBytes);
+  await recordCacheStatus(
+    derivedCacheConfigValue.root,
+    'gc',
+    Math.max(0, before.usedBytes - after.usedBytes),
+  );
+};
+void runDerivedCacheGc().catch((error) =>
+  log.warn(
+    { code: (error as NodeJS.ErrnoException).code ?? 'CACHE_GC_FAILED' },
+    'derived cache GC failed',
+  ),
+);
+const derivedCacheGc = setInterval(
+  () =>
+    void runDerivedCacheGc().catch((error) =>
+      log.warn(
+        { code: (error as NodeJS.ErrnoException).code ?? 'CACHE_GC_FAILED' },
+        'derived cache GC failed',
+      ),
+    ),
+  60_000,
+);
 const readerServer = startReaderHttpServer({
   roots: readyRoots,
   authorize: getAuthorizedReaderPage,
+  cache: derivedCache,
   shutdownSignal: shutdown.signal,
 });
 const reconciliation = reconciliationConfig();
@@ -144,6 +179,7 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const)
     shutdown.abort();
     clearInterval(validationDispatcher);
     clearInterval(reconciliationCoordinator);
+    clearInterval(derivedCacheGc);
     await new Promise<void>((resolve, reject) =>
       readerServer.close((error) => (error ? reject(error) : resolve())),
     );

@@ -374,7 +374,11 @@ export class DerivedCache {
         await directory.sync();
         await directory.close();
         const published = await this.valid(key, canonicalJson);
-        return published ?? { key, body, mimeType: descriptor.mimeType, hit: false };
+        // `valid` reports a cache hit by default, but this call just produced the artifact.
+        // A cold generation is a miss even though it is immediately readable from disk.
+        return published
+          ? { ...published, hit: false }
+          : { key, body, mimeType: descriptor.mimeType, hit: false };
       } finally {
         active.delete(staging);
         if (!active.size) activeStagingByRoot.delete(this.root);

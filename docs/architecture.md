@@ -2,8 +2,11 @@
 
 M2 dependency direction is `apps -> packages`; packages never import apps. `web` is static and
 same-origin proxies `/api` through Caddy. `api`, `worker`, `migrate`, and PostgreSQL are internal;
-only web publishes port 8080. PostgreSQL is `postgres:18.1`; named `db-data` and `cache-data`
-volumes persist state.
+only web publishes port 8080. PostgreSQL is `postgres:18.1`; named `db-data` and worker-only
+`cache-data` volumes persist state. The cache is derived and disposable, not a database projection
+or authorization source: the worker opens the currently authorized source before cache lookup. The
+Compose topology declares one worker service, so cache coalescing/leases are process-local; do not
+scale workers onto a shared cache volume without durable coordination.
 
 `migrate` is the sole schema applier. The idempotent `0006_catalog_domain` migration adds rebuildable
 libraries, series, publications, releases and exact creator/group/publisher credits. Each identity

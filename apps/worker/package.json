@@ -7,10 +7,12 @@
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
     "build": "tsc",
-    "scan": "node --import tsx src/scan.ts"
+    "scan": "node --import tsx src/scan.ts",
+    "cache": "node --import tsx src/cache.ts"
   },
   "dependencies": {
     "@gutter/config": "workspace:*",
+    "@gutter/derived-cache": "workspace:*",
     "@gutter/db": "workspace:*",
     "@gutter/discovery-scanner": "workspace:*",
     "@gutter/library-roots": "workspace:*",

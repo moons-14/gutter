@@ -188,6 +188,21 @@ test('derived cache coalesces, validates hits, repairs corruption, and is dispos
   }
 });
 
+test('derived cache reports a cold generation as a miss and only a preexisting artifact as a hit', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'gutter-cache-'));
+  try {
+    const cache = new DerivedCache({ root, quotaBytes: 1000 });
+    const first = await cache.getOrCreate(descriptor('hit-state'), async () => Buffer.from('body'));
+    const second = await cache.getOrCreate(descriptor('hit-state'), async () => {
+      throw new Error('producer must not run for a valid cache artifact');
+    });
+    assert.equal(first.hit, false);
+    assert.equal(second.hit, true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('derived cache keeps leased entries during deterministic GC and bypasses when quota cannot fit', async () => {
   const root = await mkdtemp(join(tmpdir(), 'gutter-cache-'));
   try {

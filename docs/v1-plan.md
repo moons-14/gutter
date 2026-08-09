@@ -48,3 +48,9 @@ are decompressed, bounded streams. Weak ETags and Last-Modified are validation/s
 not durable cache promises. A same-size-and-mtime source replacement between observation and open
 is a known best-effort TOCTOU limitation; the stream still pins no-follow descriptors and never
 mutates source files.
+
+The M3 derived cache contains only fully materialized, content-addressed page bytes. Its identity
+includes source observation, manifest/validation generation, locator, page observation and renderer
+version. A cache loss or corruption simply rereads the pinned source. With the Compose single-worker
+deployment, cache generation coalescing and leases are deliberately process-local; operator cache
+status has filesystem-authoritative size/quota and advisory/rebuildable counters only.

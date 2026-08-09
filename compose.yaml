@@ -44,6 +44,8 @@ services:
     environment:
       DATABASE_URL: 'postgresql://gutter:${POSTGRES_PASSWORD:-}@db:5432/gutter'
       GUTTER_ALLOWED_ROOTS_JSON: '[]'
+      GUTTER_DERIVED_CACHE_ROOT: /cache/derived
+      GUTTER_DERIVED_CACHE_QUOTA_BYTES: '10737418240'
     depends_on: { migrate: { condition: service_completed_successfully } }
     volumes: [cache-data:/cache]
     networks: [internal]

@@ -1438,6 +1438,8 @@ export type ReaderPageAuthorization = Readonly<{
   observed: import('@gutter/discovery-scanner').ScanPage['observed'];
   sourceSize: number;
   sourceMtimeMs: number;
+  manifestSha256: string;
+  validationGeneration: number;
 }>;
 
 export async function getAuthorizedReaderPage(
@@ -1455,8 +1457,11 @@ export async function getAuthorizedReaderPage(
     observed: import('@gutter/discovery-scanner').ScanPage['observed'];
     size_bytes: string;
     mtime_ms: number;
+    manifest_sha256: string;
+    validation_generation: number;
   }>(
-    `select i.root_id,i.relative_path,i.kind,p.ordinal,p.locator,p.observed,i.size_bytes,i.mtime_ms
+    `select i.root_id,i.relative_path,i.kind,p.ordinal,p.locator,p.observed,i.size_bytes,i.mtime_ms,
+            i.manifest_sha256,i.validation_generation
        from catalog_releases r
        join source_items i on i.id=r.source_item_id
        join source_pages p on p.source_item_id=i.id and p.ordinal=$2
@@ -1483,6 +1488,8 @@ export async function getAuthorizedReaderPage(
         observed: row.observed,
         sourceSize: Number(row.size_bytes),
         sourceMtimeMs: row.mtime_ms,
+        manifestSha256: row.manifest_sha256,
+        validationGeneration: row.validation_generation,
       }
     : null;
 }

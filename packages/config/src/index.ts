@@ -36,6 +36,24 @@ export function allowedRootsJson(): string {
   return process.env.GUTTER_ALLOWED_ROOTS_JSON ?? '[]';
 }
 
+/** Disposable worker-local bytes; this is deliberately not database configuration. */
+export function derivedCacheConfig(): Readonly<{ root: string; quotaBytes: number }> {
+  const root = z
+    .string()
+    .min(1)
+    .safeParse(process.env.GUTTER_DERIVED_CACHE_ROOT ?? '/cache/derived');
+  const quota = z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(50_000_000_000)
+    .safeParse(process.env.GUTTER_DERIVED_CACHE_QUOTA_BYTES ?? '10737418240');
+  if (!root.success || !root.data.startsWith('/'))
+    throw new Error('GUTTER_DERIVED_CACHE_ROOT must be an absolute path');
+  if (!quota.success) throw new Error('GUTTER_DERIVED_CACHE_QUOTA_BYTES must be 1..50000000000');
+  return { root: root.data, quotaBytes: quota.data };
+}
+
 export const schemaVersion = '0006_catalog_domain';
 
 /** Reconciliation is deliberately durable DB state, not a pg-boss cron schedule. */

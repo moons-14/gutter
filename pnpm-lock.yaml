@@ -105,6 +105,9 @@ importers:
       '@gutter/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@gutter/derived-cache':
+        specifier: workspace:*
+        version: link:../../packages/derived-cache
       '@gutter/discovery-scanner':
         specifier: workspace:*
         version: file:packages/discovery-scanner

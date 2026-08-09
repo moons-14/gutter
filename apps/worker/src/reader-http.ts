@@ -4,6 +4,8 @@ import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { openReaderStream, ReaderStreamError, ReaderStreamLimiter } from '@gutter/reader-stream';
+import { DerivedCache, DerivedCacheError } from '@gutter/derived-cache';
+import { recordCacheStatus } from './cache-status.js';
 
 export type AuthorizedPage = Readonly<{
   rootId: string;
@@ -20,11 +22,14 @@ export type AuthorizedPage = Readonly<{
   };
   sourceSize: number;
   sourceMtimeMs: number;
+  manifestSha256?: string;
+  validationGeneration?: number;
 }>;
 export type ReaderHttpDependencies = Readonly<{
   roots: ReadonlyMap<string, { canonicalPath: string }>;
   authorize: (releaseId: string, ordinal: number) => Promise<AuthorizedPage | null>;
   limiter?: ReaderStreamLimiter;
+  cache?: DerivedCache;
   shutdownSignal?: AbortSignal;
 }>;
 
@@ -51,6 +56,8 @@ function range(value: string | undefined, size: number): { start: number; end: n
 }
 function errorStatus(error: unknown): number {
   if (error instanceof ReaderStreamError)
+    return error.code === 'queue_full' ? 503 : error.code === 'cancelled' ? 499 : 409;
+  if (error instanceof DerivedCacheError)
     return error.code === 'queue_full' ? 503 : error.code === 'cancelled' ? 499 : 409;
   if (['EACCES', 'EIO', 'ENOENT', 'ESTALE'].includes((error as NodeJS.ErrnoException).code ?? ''))
     return 409;
@@ -114,6 +121,7 @@ export function createReaderHttpServer(deps: ReaderHttpDependencies): Server {
     const signal = deps.shutdownSignal
       ? AbortSignal.any([abort.signal, deps.shutdownSignal])
       : abort.signal;
+    let releaseCache: (() => void) | undefined;
     try {
       const sourcePath = join(root.canonicalPath, authorized.relativePath);
       const sourceStat = await lstat(sourcePath, { bigint: true });
@@ -122,25 +130,28 @@ export function createReaderHttpServer(deps: ReaderHttpDependencies): Server {
         Number(sourceStat.mtimeNs / 1_000_000n) === Math.trunc(authorized.sourceMtimeMs) &&
         (authorized.kind === 'directory' ? sourceStat.isDirectory() : sourceStat.isFile());
       if (!sourceMatches) return send(response, 409);
+      const readerSource = {
+        root: root.canonicalPath,
+        relativePath: authorized.relativePath,
+        kind: authorized.kind,
+        observed: {
+          dev: sourceStat.dev,
+          ino: sourceStat.ino,
+          size: sourceStat.size,
+          mtimeNs: sourceStat.mtimeNs,
+        },
+      } as const;
+      const readerPage = {
+        locator: authorized.locator,
+        observed: {
+          ...authorized.observed,
+          mtimeNs: authorized.observed.mtimeNs ? BigInt(authorized.observed.mtimeNs) : undefined,
+        },
+      };
+      // This stream is pinned before cache work and remains untouched as the fail-open response.
       const opened = await openReaderStream({
-        source: {
-          root: root.canonicalPath,
-          relativePath: authorized.relativePath,
-          kind: authorized.kind,
-          observed: {
-            dev: sourceStat.dev,
-            ino: sourceStat.ino,
-            size: sourceStat.size,
-            mtimeNs: sourceStat.mtimeNs,
-          },
-        },
-        page: {
-          locator: authorized.locator,
-          observed: {
-            ...authorized.observed,
-            mtimeNs: authorized.observed.mtimeNs ? BigInt(authorized.observed.mtimeNs) : undefined,
-          },
-        },
+        source: readerSource,
+        page: readerPage,
         signal,
         limiter: deps.limiter,
       });
@@ -153,6 +164,51 @@ export function createReaderHttpServer(deps: ReaderHttpDependencies): Server {
         });
         return response.end();
       }
+      let body = opened.stream;
+      if (deps.cache) {
+        try {
+          const entry = await deps.cache.lease(
+            {
+              source: {
+                root: root.canonicalPath,
+                item: authorized.relativePath,
+                observation: {
+                  dev: sourceStat.dev.toString(),
+                  ino: sourceStat.ino.toString(),
+                  size: sourceStat.size.toString(),
+                  mtimeNs: sourceStat.mtimeNs.toString(),
+                },
+              },
+              manifestGeneration: authorized.manifestSha256 ?? sourceStat.ino.toString(),
+              validationGeneration: authorized.validationGeneration ?? authorized.sourceMtimeMs,
+              locator: authorized.locator,
+              pageObservation: authorized.observed,
+              mimeType: opened.mediaType as 'image/gif' | 'image/jpeg' | 'image/png' | 'image/webp',
+              implementationVersion: 'worker-reader-cache-1',
+            },
+            async () => {
+              const cacheSource = await openReaderStream({
+                source: readerSource,
+                page: readerPage,
+                signal,
+              });
+              return cacheSource.stream;
+            },
+            signal,
+          );
+          releaseCache = entry.release;
+          // The cache has completely materialized its independently opened source. The primary
+          // stream was retained only for fail-open and must release its permit on every success.
+          opened.stream.destroy();
+          body = Readable.from(entry.body);
+          await recordCacheStatus(deps.cache.root, entry.hit ? 'hit' : 'miss').catch(
+            () => undefined,
+          );
+        } catch (error) {
+          await recordCacheStatus(deps.cache.root, 'failure').catch(() => undefined);
+          // Cache state is disposable. The independently pinned stream has not been consumed.
+        }
+      }
       const requested = request.headers.range;
       if (authorized.kind === 'cbz' && requested) {
         // Entries are decompressed streams: deliberately no byte-range contract for CBZ pages.
@@ -161,7 +217,8 @@ export function createReaderHttpServer(deps: ReaderHttpDependencies): Server {
       const selected =
         authorized.kind === 'directory' && requested ? range(requested, opened.size) : undefined;
       if (authorized.kind === 'directory' && requested && !selected) {
-        opened.stream.destroy();
+        body.destroy();
+        releaseCache?.();
         response.writeHead(416, {
           'Content-Range': `bytes */${opened.size}`,
           ETag: etag,
@@ -183,15 +240,18 @@ export function createReaderHttpServer(deps: ReaderHttpDependencies): Server {
       } else headers['Content-Length'] = opened.size;
       response.writeHead(selected ? 206 : 200, headers);
       if (request.method === 'HEAD') {
-        opened.stream.destroy();
+        body.destroy();
+        releaseCache?.();
         return response.end();
       }
       if (selected) {
-        await pipeline(Readable.from(selectedDirectoryBytes(opened.stream, selected)), response, {
+        await pipeline(Readable.from(selectedDirectoryBytes(body, selected)), response, {
           signal,
         });
-      } else await pipeline(opened.stream, response, { signal });
+      } else await pipeline(body, response, { signal });
+      releaseCache?.();
     } catch (error) {
+      releaseCache?.();
       if (!response.headersSent) send(response, errorStatus(error));
       else response.destroy();
     }

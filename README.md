@@ -1,7 +1,8 @@
 # gutter
 
-MIT-licensed, self-hosted comic-library foundation. M1 records immutable configured roots and a
-read-only, rebuildable source inventory; authentication and reader features are not implemented.
+MIT-licensed, self-hosted comic-library foundation. M3 keeps library sources read-only while the
+internal worker streams authorized pages and maintains a disposable derived-byte cache; authentication
+and a reader UI are not implemented.
 
 ## Linux quickstart
 
@@ -72,6 +73,26 @@ and never make deletion decisions from NAS events.
 On older Linux kernels, recursive read-only bind mounts may leave submounts writable; use a
 Docker/Linux version that enforces recursive read-only mounts or ensure the host mount layout has
 no writable submounts.
+
+## Derived reader cache
+
+The worker opens and pins the currently authorized source page before consulting its cache. Cache
+bytes are therefore never authorization or source truth: a missing, deleted, or corrupt entry is
+regenerated from the source, and no library file is changed. `cache-data` is mounted only into the
+single Compose worker service. In this deployment, cache coalescing and leases are worker-process
+local; multiple worker replicas sharing a cache volume are unsupported until durable coordination is
+introduced.
+
+The worker defaults to `/cache/derived` and a 10 GiB quota. Set
+`GUTTER_DERIVED_CACHE_ROOT` (absolute worker path) and
+`GUTTER_DERIVED_CACHE_QUOTA_BYTES` (1 through 50,000,000,000) to change them. The following
+operator commands expose filesystem-authoritative current bytes and quota plus advisory, rebuildable
+hit/miss/eviction/failure/last-GC counters; counters reset if the disposable cache is removed:
+
+```sh
+docker compose exec worker node --import tsx src/cache.ts status
+docker compose exec worker node --import tsx src/cache.ts gc
+```
 
 Do not mount remote storage in API containers. Restore PostgreSQL only with an operator-managed
 `pg_dump`/`pg_restore` workflow while the application is stopped. Put Caddy/Nginx or Tailscale in
