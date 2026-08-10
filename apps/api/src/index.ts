@@ -1,4 +1,6 @@
 import { serve } from '@hono/node-server';
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { OpenAPIHono } from '@hono/zod-openapi';
 import {
   catalogEntitiesRoute,
@@ -17,12 +19,26 @@ import {
   catalogSeriesDetail,
   canAccessLibrary,
   changeLibraryAccess,
+  addUserBookmark,
+  createUserCollection,
+  deleteUserBookmark,
+  deleteUserCollection,
+  exportUserState,
+  getUserProgress,
+  getUserResume,
+  isReaderPathVisible,
+  authorizeUserStateResource,
+  authorizeUserCollection,
   libraryAccessScope,
   listCatalogEntities,
   listCatalogLibraries,
   listCatalogSeries,
+  permanentlyDeleteUser,
   pool,
+  putUserProgress,
   readerRootForRequestPath,
+  setUserCollectionMembership,
+  setUserTargetState,
   type LibraryAccessScope,
 } from '@gutter/db';
 import { readerCapabilitySecret } from '@gutter/config';
@@ -43,229 +59,611 @@ const reconciliationRequests = new Gauge({
   labelNames: ['trigger', 'state'],
   registers: [metrics],
 });
-const app = new OpenAPIHono();
-const readerCapabilityKey = await readerCapabilitySecret();
+export type ApiDeps = Readonly<{
+  authenticatedUser?: typeof authenticatedUser;
+  trustedMutationOrigin?: typeof trustedMutationOrigin;
+  authHandler?: typeof authHandler;
+  authorizeUserStateResource?: typeof authorizeUserStateResource;
+  authorizeUserCollection?: typeof authorizeUserCollection;
+  getUserProgress?: typeof getUserProgress;
+  getUserResume?: typeof getUserResume;
+  isReaderPathVisible?: typeof isReaderPathVisible;
+  putUserProgress?: typeof putUserProgress;
+  setUserTargetState?: typeof setUserTargetState;
+  addUserBookmark?: typeof addUserBookmark;
+  deleteUserBookmark?: typeof deleteUserBookmark;
+  createUserCollection?: typeof createUserCollection;
+  deleteUserCollection?: typeof deleteUserCollection;
+  setUserCollectionMembership?: typeof setUserCollectionMembership;
+  exportUserState?: typeof exportUserState;
+  permanentlyDeleteUser?: typeof permanentlyDeleteUser;
+  changeLibraryAccess?: typeof changeLibraryAccess;
+  readerCapabilityKey?: string;
+}>;
+export const productionDeps: Required<ApiDeps> = {
+  authenticatedUser,
+  trustedMutationOrigin,
+  authHandler,
+  authorizeUserStateResource,
+  getUserProgress,
+  getUserResume,
+  isReaderPathVisible,
+  putUserProgress,
+  setUserTargetState,
+  authorizeUserCollection,
+  addUserBookmark,
+  deleteUserBookmark,
+  createUserCollection,
+  deleteUserCollection,
+  setUserCollectionMembership,
+  exportUserState,
+  permanentlyDeleteUser,
+  changeLibraryAccess,
+  readerCapabilityKey: '',
+};
+/** Build a fresh application. Importing this module has no schema/serve side effects. */
+export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
+  const resolved = { ...productionDeps, ...deps };
+  const {
+    authenticatedUser,
+    trustedMutationOrigin,
+    authHandler,
+    authorizeUserStateResource,
+    getUserProgress,
+    getUserResume,
+    isReaderPathVisible,
+    putUserProgress,
+    setUserTargetState,
+    authorizeUserCollection,
+    addUserBookmark,
+    deleteUserBookmark,
+    createUserCollection,
+    deleteUserCollection,
+    setUserCollectionMembership,
+    exportUserState,
+    permanentlyDeleteUser,
+    changeLibraryAccess,
+  } = resolved;
+  const app = new OpenAPIHono();
+  const readerKey = resolved.readerCapabilityKey || null;
 
-app.use('*', async (c, next) => {
-  const requestId = c.req.header('x-request-id') ?? crypto.randomUUID();
-  c.header('x-request-id', requestId);
-  const started = performance.now();
-  await next();
-  log.info(
-    {
-      requestId,
-      method: c.req.method,
-      path: c.req.path,
-      status: c.res.status,
-      durationMs: performance.now() - started,
-    },
-    'request',
-  );
-});
-app.openapi(healthRoute, (c) => c.json({ status: 'ok' }, 200));
-app.post('/api/auth/bootstrap', async (c) => {
-  const client = await pool.connect();
-  try {
-    // This session lock fences CLI recovery from an in-flight bootstrap request.
-    await client.query("select pg_advisory_lock(hashtext('gutter_auth_bootstrap'))");
-    const claim = await client.query(
-      'update gutter_auth_bootstrap set claimed_at=now() where id=true and claimed_at is null returning id',
+  app.use('*', async (c, next) => {
+    const requestId = c.req.header('x-request-id') ?? crypto.randomUUID();
+    c.header('x-request-id', requestId);
+    const started = performance.now();
+    await next();
+    log.info(
+      {
+        requestId,
+        method: c.req.method,
+        path: c.req.path,
+        status: c.res.status,
+        durationMs: performance.now() - started,
+      },
+      'request',
     );
-    if (claim.rowCount !== 1) return c.json({ error: 'bootstrap_unavailable' }, 403);
-    const body = await c.req.json().catch(() => null);
-    if (body === null) {
-      await client.query('update gutter_auth_bootstrap set claimed_at=null where id=true');
-      return c.json({ error: 'invalid_bootstrap_request' }, 400);
-    }
-    const headers = new Headers(c.req.raw.headers);
-    headers.set('content-type', 'application/json');
-    headers.set('x-gutter-bootstrap', '1');
-    const request = new Request(new URL('/api/auth/sign-up/email', c.req.url), {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-    });
-    const response = await authHandler(request);
-    if (!response.ok)
-      await client.query('update gutter_auth_bootstrap set claimed_at=null where id=true');
-    return response;
-  } finally {
-    await client
-      .query("select pg_advisory_unlock(hashtext('gutter_auth_bootstrap'))")
-      .catch(() => undefined);
-    client.release();
-  }
-});
-app.all('/api/auth/sign-up/email', (c) => c.json({ error: 'public_signup_disabled' }, 403));
-app.all('/api/auth/*', (c) => authHandler(c.req.raw));
-app.all('/api/reader/*', async (c) => {
-  if (!['GET', 'HEAD'].includes(c.req.method)) return c.body(null, 404);
-  const user = await authenticatedUser(c.req.raw);
-  if (!user) return c.json({ error: 'not_found' }, 404);
-  const scope = await libraryAccessScope(user.id);
-  const pathname = new URL(c.req.url).pathname;
-  const rootId = await readerRootForRequestPath(pathname);
-  if (!rootId || !canAccessLibrary(scope, rootId)) return c.json({ error: 'not_found' }, 404);
-  const headers = new Headers();
-  for (const name of ['range', 'if-none-match', 'if-modified-since']) {
-    const value = c.req.header(name);
-    if (value) headers.set(name, value);
-  }
-  headers.set(
-    'x-gutter-reader-capability',
-    signReaderCapability(readerCapabilityKey, {
-      userId: user.id,
-      rootId,
-      path: pathname,
-      aclRevision: scope.revision,
-    }),
-  );
-  const upstream = await fetch(`http://worker:3001${pathname}`, {
-    method: c.req.method,
-    headers,
-    signal: c.req.raw.signal,
   });
-  const responseHeaders = new Headers();
-  for (const name of [
-    'accept-ranges',
-    'content-length',
-    'content-range',
-    'content-type',
-    'etag',
-    'last-modified',
-  ]) {
-    const value = upstream.headers.get(name);
-    if (value) responseHeaders.set(name, value);
-  }
-  responseHeaders.set('cache-control', 'no-store');
-  return new Response(upstream.body, { status: upstream.status, headers: responseHeaders });
-});
-const requestAccess = new WeakMap<Request, LibraryAccessScope>();
-app.use('/catalog/*', async (c, next) => {
-  const user = await authenticatedUser(c.req.raw);
-  if (!user) return c.json({ error: 'authentication_required' }, 401);
-  requestAccess.set(c.req.raw, await libraryAccessScope(user.id));
-  await next();
-});
-for (const [method, action] of [
-  ['put', 'grant'],
-  ['delete', 'revoke'],
-] as const)
-  app[method]('/admin/library-access/:userId/:rootId', async (c) => {
+  app.openapi(healthRoute, (c) => c.json({ status: 'ok' }, 200));
+  app.post('/api/auth/bootstrap', async (c) => {
+    const client = await pool.connect();
+    try {
+      // This session lock fences CLI recovery from an in-flight bootstrap request.
+      await client.query("select pg_advisory_lock(hashtext('gutter_auth_bootstrap'))");
+      const claim = await client.query(
+        'update gutter_auth_bootstrap set claimed_at=now() where id=true and claimed_at is null returning id',
+      );
+      if (claim.rowCount !== 1) return c.json({ error: 'bootstrap_unavailable' }, 403);
+      const body = await c.req.json().catch(() => null);
+      if (body === null) {
+        await client.query('update gutter_auth_bootstrap set claimed_at=null where id=true');
+        return c.json({ error: 'invalid_bootstrap_request' }, 400);
+      }
+      const headers = new Headers(c.req.raw.headers);
+      headers.set('content-type', 'application/json');
+      headers.set('x-gutter-bootstrap', '1');
+      const request = new Request(new URL('/api/auth/sign-up/email', c.req.url), {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+      });
+      const response = await authHandler(request);
+      if (!response.ok)
+        await client.query('update gutter_auth_bootstrap set claimed_at=null where id=true');
+      return response;
+    } finally {
+      await client
+        .query("select pg_advisory_unlock(hashtext('gutter_auth_bootstrap'))")
+        .catch(() => undefined);
+      client.release();
+    }
+  });
+  app.all('/api/auth/sign-up/email', (c) => c.json({ error: 'public_signup_disabled' }, 403));
+  app.all('/api/auth/*', (c) => authHandler(c.req.raw));
+  app.all('/api/reader/*', async (c) => {
+    if (!['GET', 'HEAD'].includes(c.req.method)) return c.body(null, 404);
+    const user = await authenticatedUser(c.req.raw);
+    if (!user) return c.json({ error: 'not_found' }, 404);
+    const scope = await libraryAccessScope(user.id);
+    const pathname = new URL(c.req.url).pathname;
+    const rootId = await readerRootForRequestPath(pathname);
+    if (
+      !rootId ||
+      !canAccessLibrary(scope, rootId) ||
+      !(await isReaderPathVisible(user.id, pathname))
+    )
+      return c.json({ error: 'not_found' }, 404);
+    const headers = new Headers();
+    for (const name of ['range', 'if-none-match', 'if-modified-since']) {
+      const value = c.req.header(name);
+      if (value) headers.set(name, value);
+    }
+    headers.set(
+      'x-gutter-reader-capability',
+      signReaderCapability(readerKey ?? (await readerCapabilitySecret()), {
+        userId: user.id,
+        rootId,
+        path: pathname,
+        aclRevision: scope.revision,
+      }),
+    );
+    const upstream = await fetch(`http://worker:3001${pathname}`, {
+      method: c.req.method,
+      headers,
+      signal: c.req.raw.signal,
+    });
+    const responseHeaders = new Headers();
+    for (const name of [
+      'accept-ranges',
+      'content-length',
+      'content-range',
+      'content-type',
+      'etag',
+      'last-modified',
+    ]) {
+      const value = upstream.headers.get(name);
+      if (value) responseHeaders.set(name, value);
+    }
+    responseHeaders.set('cache-control', 'no-store');
+    return new Response(upstream.body, { status: upstream.status, headers: responseHeaders });
+  });
+  const userStateUser = async (request: Request) => authenticatedUser(request);
+  const userStateBody = async (c: any): Promise<Record<string, unknown> | null> => {
+    const body = await c.req.json().catch(() => null);
+    return body && typeof body === 'object' && !Array.isArray(body) ? body : null;
+  };
+  const hasOnlyKeys = (body: Record<string, unknown> | null, allowed: readonly string[]): boolean =>
+    body === null || Object.keys(body).every((key) => allowed.includes(key));
+  const userStateError = (c: any, error: unknown) => {
+    const message = error instanceof Error ? error.message : '';
+    if (message.startsWith('invalid_')) return c.json({ error: message }, 400);
+    if (message === 'user_not_found') return c.json({ error: 'not_found' }, 404);
+    throw error;
+  };
+  const targetKinds = new Set(['check', 'series', 'publication', 'source']);
+  const validTargetKind = (
+    value: unknown,
+  ): value is 'check' | 'series' | 'publication' | 'source' =>
+    typeof value === 'string' && targetKinds.has(value);
+  app.use('/api/user-state/*', async (c, next) => {
+    if (!['GET', 'HEAD'].includes(c.req.method) && !trustedMutationOrigin(c.req.raw))
+      return c.json({ error: 'invalid_origin' }, 403);
+    if (!(await userStateUser(c.req.raw))) return c.json({ error: 'authentication_required' }, 401);
+    await next();
+  });
+  app.get('/api/user-state/export', async (c) => {
+    const user = (await userStateUser(c.req.raw))!;
+    return c.json(await exportUserState(user.id), 200);
+  });
+  app.get('/api/user-state/resume', async (c) => {
+    const user = (await userStateUser(c.req.raw))!;
+    const raw = c.req.query('limit');
+    const limit = raw === undefined ? 30 : Number(raw);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100)
+      return c.json({ error: 'invalid_resume_limit' }, 400);
+    return c.json({ items: await getUserResume(user.id, limit) }, 200);
+  });
+  app.get('/api/user-state/progress', async (c) => {
+    const user = (await userStateUser(c.req.raw))!;
+    const rootId = c.req.query('rootId');
+    const sourceKey = c.req.query('sourceKey');
+    if (!rootId || !sourceKey) return c.json({ error: 'invalid_user_progress_request' }, 400);
+    if (!(await authorizeUserStateResource(user.id, rootId, 'progress', sourceKey)))
+      return c.json({ error: 'not_found' }, 404);
+    try {
+      return c.json({ progress: await getUserProgress(user.id, rootId, sourceKey) }, 200);
+    } catch (error) {
+      return userStateError(c, error);
+    }
+  });
+  app.put('/api/user-state/progress', async (c) => {
+    const user = (await userStateUser(c.req.raw))!;
+    const body = await userStateBody(c);
+    if (
+      !body ||
+      !hasOnlyKeys(body, ['rootId', 'sourceKey', 'expectedRevision', 'pageOrdinal', 'completed']) ||
+      typeof body.rootId !== 'string' ||
+      typeof body.sourceKey !== 'string' ||
+      typeof body.expectedRevision !== 'number' ||
+      typeof body.pageOrdinal !== 'number' ||
+      typeof body.completed !== 'boolean'
+    )
+      return c.json({ error: 'invalid_user_progress_request' }, 400);
+    if (!(await authorizeUserStateResource(user.id, body.rootId, 'progress', body.sourceKey)))
+      return c.json({ error: 'not_found' }, 404);
+    try {
+      const result = await putUserProgress(
+        user.id,
+        body.rootId,
+        body.sourceKey,
+        body.expectedRevision,
+        {
+          pageOrdinal: body.pageOrdinal,
+          completed: body.completed,
+        },
+      );
+      return result.ok
+        ? c.json({ progress: result.current }, 200)
+        : c.json({ error: 'progress_conflict', progress: result.current }, 409);
+    } catch (error) {
+      return userStateError(c, error);
+    }
+  });
+  app.put('/api/user-state/target', async (c) => {
+    const user = (await userStateUser(c.req.raw))!;
+    const body = await userStateBody(c);
+    if (
+      !body ||
+      !hasOnlyKeys(body, [
+        'rootId',
+        'targetKind',
+        'targetKey',
+        'favorite',
+        'hidden',
+        'rating',
+        'note',
+      ]) ||
+      typeof body.rootId !== 'string' ||
+      !validTargetKind(body.targetKind) ||
+      typeof body.targetKey !== 'string'
+    )
+      return c.json({ error: 'invalid_user_target_request' }, 400);
+    for (const key of ['favorite', 'hidden'] as const)
+      if (key in body && typeof body[key] !== 'boolean')
+        return c.json({ error: 'invalid_user_target_state' }, 400);
+    if ('rating' in body && body.rating !== null && typeof body.rating !== 'number')
+      return c.json({ error: 'invalid_user_target_state' }, 400);
+    if ('note' in body && body.note !== null && typeof body.note !== 'string')
+      return c.json({ error: 'invalid_user_target_state' }, 400);
+    try {
+      const { rootId, targetKind, targetKey, ...value } = body;
+      if (
+        !(await authorizeUserStateResource(
+          user.id,
+          rootId as string,
+          targetKind as any,
+          targetKey as string,
+        ))
+      )
+        return c.json({ error: 'not_found' }, 404);
+      return c.json(
+        {
+          changed: await setUserTargetState(
+            user.id,
+            rootId,
+            targetKind as any,
+            targetKey,
+            value as any,
+          ),
+        },
+        200,
+      );
+    } catch (error) {
+      return userStateError(c, error);
+    }
+  });
+  app.post('/api/user-state/bookmarks', async (c) => {
+    const user = (await userStateUser(c.req.raw))!;
+    const body = await userStateBody(c);
+    if (
+      !body ||
+      !hasOnlyKeys(body, ['rootId', 'sourceKey', 'pageOrdinal', 'label']) ||
+      typeof body.rootId !== 'string' ||
+      typeof body.sourceKey !== 'string' ||
+      typeof body.pageOrdinal !== 'number' ||
+      ('label' in body && body.label !== null && typeof body.label !== 'string')
+    )
+      return c.json({ error: 'invalid_bookmark_request' }, 400);
+    if (!(await authorizeUserStateResource(user.id, body.rootId, 'progress', body.sourceKey)))
+      return c.json({ error: 'not_found' }, 404);
+    try {
+      return c.json(
+        {
+          changed: await addUserBookmark(
+            user.id,
+            body.rootId,
+            body.sourceKey,
+            body.pageOrdinal,
+            typeof body.label === 'string' ? body.label : null,
+          ),
+        },
+        200,
+      );
+    } catch (error) {
+      return userStateError(c, error);
+    }
+  });
+  app.delete('/api/user-state/bookmarks', async (c) => {
+    const user = (await userStateUser(c.req.raw))!;
+    const rootId = c.req.query('rootId'),
+      sourceKey = c.req.query('sourceKey'),
+      ordinal = Number(c.req.query('pageOrdinal'));
+    if (!rootId || !sourceKey || !Number.isInteger(ordinal))
+      return c.json({ error: 'invalid_bookmark_request' }, 400);
+    if (!(await authorizeUserStateResource(user.id, rootId, 'progress', sourceKey)))
+      return c.json({ error: 'not_found' }, 404);
+    try {
+      return c.json(
+        { changed: await deleteUserBookmark(user.id, rootId, sourceKey, ordinal) },
+        200,
+      );
+    } catch (error) {
+      return userStateError(c, error);
+    }
+  });
+  app.post('/api/user-state/collections', async (c) => {
+    const user = (await userStateUser(c.req.raw))!,
+      body = await userStateBody(c);
+    if (!body || !hasOnlyKeys(body, ['name']) || typeof body.name !== 'string')
+      return c.json({ error: 'invalid_collection_name' }, 400);
+    try {
+      return c.json({ collection: await createUserCollection(user.id, body.name) }, 201);
+    } catch (error) {
+      return userStateError(c, error);
+    }
+  });
+  app.delete('/api/user-state/collections/:id', async (c) => {
+    const user = (await userStateUser(c.req.raw))!,
+      id = Number(c.req.param('id'));
+    const body = await userStateBody(c);
+    if (!hasOnlyKeys(body, [])) return c.json({ error: 'invalid_collection_request' }, 400);
+    if (!Number.isSafeInteger(id) || id < 1) return c.json({ error: 'invalid_collection_id' }, 400);
+    if (!(await authorizeUserCollection(user.id, id))) return c.json({ error: 'not_found' }, 404);
+    return c.json({ changed: await deleteUserCollection(user.id, id) }, 200);
+  });
+  app.put('/api/user-state/collections/:id/members', async (c) => {
+    const user = (await userStateUser(c.req.raw))!,
+      id = Number(c.req.param('id')),
+      body = await userStateBody(c);
+    if (
+      !Number.isSafeInteger(id) ||
+      id < 1 ||
+      !body ||
+      !hasOnlyKeys(body, ['rootId', 'targetKind', 'targetKey', 'member']) ||
+      typeof body.rootId !== 'string' ||
+      !validTargetKind(body.targetKind) ||
+      typeof body.targetKey !== 'string' ||
+      typeof body.member !== 'boolean'
+    )
+      return c.json({ error: 'invalid_collection_member_request' }, 400);
+    if (!(await authorizeUserCollection(user.id, id))) return c.json({ error: 'not_found' }, 404);
+    if (!(await authorizeUserStateResource(user.id, body.rootId, body.targetKind, body.targetKey)))
+      return c.json({ error: 'not_found' }, 404);
+    try {
+      return c.json(
+        {
+          changed: await setUserCollectionMembership(
+            user.id,
+            id,
+            body.rootId,
+            body.targetKind,
+            body.targetKey,
+            body.member,
+          ),
+        },
+        200,
+      );
+    } catch (error) {
+      return userStateError(c, error);
+    }
+  });
+  app.delete('/api/user-state/collections/:id/members', async (c) => {
+    const user = (await userStateUser(c.req.raw))!,
+      id = Number(c.req.param('id')),
+      body = await userStateBody(c);
+    if (
+      !Number.isSafeInteger(id) ||
+      id < 1 ||
+      !body ||
+      !hasOnlyKeys(body, ['rootId', 'targetKind', 'targetKey']) ||
+      typeof body.rootId !== 'string' ||
+      !validTargetKind(body.targetKind) ||
+      typeof body.targetKey !== 'string'
+    )
+      return c.json({ error: 'invalid_collection_member_request' }, 400);
+    if (!(await authorizeUserCollection(user.id, id))) return c.json({ error: 'not_found' }, 404);
+    if (!(await authorizeUserStateResource(user.id, body.rootId, body.targetKind, body.targetKey)))
+      return c.json({ error: 'not_found' }, 404);
+    try {
+      return c.json(
+        {
+          changed: await setUserCollectionMembership(
+            user.id,
+            id,
+            body.rootId,
+            body.targetKind,
+            body.targetKey,
+            false,
+          ),
+        },
+        200,
+      );
+    } catch (error) {
+      return userStateError(c, error);
+    }
+  });
+  const requestAccess = new WeakMap<Request, LibraryAccessScope>();
+  app.use('/catalog/*', async (c, next) => {
+    const user = await authenticatedUser(c.req.raw);
+    if (!user) return c.json({ error: 'authentication_required' }, 401);
+    requestAccess.set(c.req.raw, await libraryAccessScope(user.id));
+    await next();
+  });
+  for (const [method, action] of [
+    ['put', 'grant'],
+    ['delete', 'revoke'],
+  ] as const)
+    app[method]('/admin/library-access/:userId/:rootId', async (c) => {
+      if (!trustedMutationOrigin(c.req.raw)) return c.json({ error: 'invalid_origin' }, 403);
+      const actor = await authenticatedUser(c.req.raw);
+      if (!actor) return c.json({ error: 'authentication_required' }, 401);
+      if (actor.role !== 'admin') return c.json({ error: 'not_found' }, 404);
+      try {
+        const revision = await changeLibraryAccess(
+          actor.id,
+          c.req.param('userId'),
+          c.req.param('rootId'),
+          action,
+          c.req.header('x-request-id') ?? crypto.randomUUID(),
+        );
+        return c.json({ revision }, 200);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === '23503')
+          return c.json({ error: 'not_found' }, 404);
+        throw error;
+      }
+    });
+  app.delete('/admin/users/:id/user-state', async (c) => {
     if (!trustedMutationOrigin(c.req.raw)) return c.json({ error: 'invalid_origin' }, 403);
     const actor = await authenticatedUser(c.req.raw);
     if (!actor) return c.json({ error: 'authentication_required' }, 401);
-    if (actor.role !== 'admin') return c.json({ error: 'not_found' }, 404);
+    const body = await userStateBody(c);
+    if (!hasOnlyKeys(body, [])) return c.json({ error: 'invalid_request' }, 400);
     try {
-      const revision = await changeLibraryAccess(
-        actor.id,
-        c.req.param('userId'),
-        c.req.param('rootId'),
-        action,
-        c.req.header('x-request-id') ?? crypto.randomUUID(),
+      return c.json(
+        {
+          deleted: await permanentlyDeleteUser(
+            actor.id,
+            c.req.param('id'),
+            c.req.header('x-request-id') ?? crypto.randomUUID(),
+          ),
+        },
+        200,
       );
-      return c.json({ revision }, 200);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === '23503')
+      if (error instanceof Error && error.message === 'admin_required')
         return c.json({ error: 'not_found' }, 404);
+      if (error instanceof Error && error.message === 'user_not_found')
+        return c.json({ error: 'not_found' }, 404);
+      if (error instanceof Error && error.message === 'self_deletion_forbidden')
+        return c.json({ error: 'invalid_request' }, 400);
       throw error;
     }
   });
-app.openapi(readinessRoute, async (c) => {
-  try {
-    await assertSchema();
-    return c.json({ status: 'ready' }, 200);
-  } catch (error) {
-    log.warn({ err: error }, 'readiness failed');
-    return c.json({ status: 'not-ready' }, 503);
-  }
-});
-app.openapi(catalogLibrariesRoute, async (c) =>
-  c.json(
-    { items: await listCatalogLibraries(requestAccess.get(c.req.raw)!), nextCursor: null },
-    200,
-  ),
-);
-app.openapi(catalogSeriesRoute, async (c) => {
-  const query = c.req.valid('query');
-  try {
-    const scope = requestAccess.get(c.req.raw)!;
-    const page = await listCatalogSeries(query, scope);
-    return c.json({ ...page, libraries: await listCatalogLibraries(scope) }, 200);
-  } catch (error) {
-    if (error instanceof Error && error.message === 'invalid_catalog_cursor')
-      return c.json({ error: 'invalid_cursor' }, 400);
-    throw error;
-  }
-});
-app.openapi(catalogSeriesDetailRoute, async (c) => {
-  const item = await catalogSeriesDetail(c.req.valid('param').id, requestAccess.get(c.req.raw)!);
-  return item ? c.json(item, 200) : c.json({ error: 'not_found' }, 404);
-});
-app.openapi(catalogPublicationDetailRoute, async (c) => {
-  const item = await catalogPublicationDetail(
-    c.req.valid('param').id,
-    requestAccess.get(c.req.raw)!,
+  app.openapi(readinessRoute, async (c) => {
+    try {
+      await assertSchema();
+      return c.json({ status: 'ready' }, 200);
+    } catch (error) {
+      log.warn({ err: error }, 'readiness failed');
+      return c.json({ status: 'not-ready' }, 503);
+    }
+  });
+  app.openapi(catalogLibrariesRoute, async (c) =>
+    c.json(
+      { items: await listCatalogLibraries(requestAccess.get(c.req.raw)!), nextCursor: null },
+      200,
+    ),
   );
-  return item ? c.json(item, 200) : c.json({ error: 'not_found' }, 404);
-});
-for (const [path, kind] of [
-  ['/catalog/creators/{id}', 'creator'],
-  ['/catalog/groups/{id}', 'group'],
-  ['/catalog/publishers/{id}', 'publisher'],
-] as const)
-  app.openapi(catalogEntityRoute(path), async (c) => {
-    const item = await catalogEntityDetail(
-      kind,
+  app.openapi(catalogSeriesRoute, async (c) => {
+    const query = c.req.valid('query');
+    try {
+      const scope = requestAccess.get(c.req.raw)!;
+      const page = await listCatalogSeries(query, scope);
+      return c.json({ ...page, libraries: await listCatalogLibraries(scope) }, 200);
+    } catch (error) {
+      if (error instanceof Error && error.message === 'invalid_catalog_cursor')
+        return c.json({ error: 'invalid_cursor' }, 400);
+      throw error;
+    }
+  });
+  app.openapi(catalogSeriesDetailRoute, async (c) => {
+    const item = await catalogSeriesDetail(c.req.valid('param').id, requestAccess.get(c.req.raw)!);
+    return item ? c.json(item, 200) : c.json({ error: 'not_found' }, 404);
+  });
+  app.openapi(catalogPublicationDetailRoute, async (c) => {
+    const item = await catalogPublicationDetail(
       c.req.valid('param').id,
       requestAccess.get(c.req.raw)!,
     );
     return item ? c.json(item, 200) : c.json({ error: 'not_found' }, 404);
   });
-for (const [path, kind] of [
-  ['/catalog/creators', 'creator'],
-  ['/catalog/groups', 'group'],
-  ['/catalog/publishers', 'publisher'],
-] as const)
-  app.openapi(catalogEntitiesRoute(path), async (c) =>
-    c.json(
-      {
-        items: await listCatalogEntities(kind, requestAccess.get(c.req.raw)!, c.req.valid('query')),
-      },
-      200,
-    ),
-  );
-app.get('/metrics', async (c) => {
-  const rows = await pool.query<{ trigger: string; state: string; count: string }>(
-    'select trigger,state,count(*) from scan_requests group by trigger,state',
-  );
-  reconciliationRequests.reset();
-  for (const row of rows.rows) {
-    const labels = reconciliationMetricLabels(row.trigger, row.state);
-    if (labels) reconciliationRequests.set(labels, Number(row.count));
-  }
-  return c.text(await metrics.metrics(), 200, { 'content-type': metrics.contentType });
-});
-app.doc('/openapi.json', {
-  openapi: '3.1.0',
-  info: { title: 'gutter internal API', version: '0.0.0' },
-});
+  for (const [path, kind] of [
+    ['/catalog/creators/{id}', 'creator'],
+    ['/catalog/groups/{id}', 'group'],
+    ['/catalog/publishers/{id}', 'publisher'],
+  ] as const)
+    app.openapi(catalogEntityRoute(path), async (c) => {
+      const item = await catalogEntityDetail(
+        kind,
+        c.req.valid('param').id,
+        requestAccess.get(c.req.raw)!,
+      );
+      return item ? c.json(item, 200) : c.json({ error: 'not_found' }, 404);
+    });
+  for (const [path, kind] of [
+    ['/catalog/creators', 'creator'],
+    ['/catalog/groups', 'group'],
+    ['/catalog/publishers', 'publisher'],
+  ] as const)
+    app.openapi(catalogEntitiesRoute(path), async (c) =>
+      c.json(
+        {
+          items: await listCatalogEntities(
+            kind,
+            requestAccess.get(c.req.raw)!,
+            c.req.valid('query'),
+          ),
+        },
+        200,
+      ),
+    );
+  app.get('/metrics', async (c) => {
+    const rows = await pool.query<{ trigger: string; state: string; count: string }>(
+      'select trigger,state,count(*) from scan_requests group by trigger,state',
+    );
+    reconciliationRequests.reset();
+    for (const row of rows.rows) {
+      const labels = reconciliationMetricLabels(row.trigger, row.state);
+      if (labels) reconciliationRequests.set(labels, Number(row.count));
+    }
+    return c.text(await metrics.metrics(), 200, { 'content-type': metrics.contentType });
+  });
+  app.doc('/openapi.json', {
+    openapi: '3.1.0',
+    info: { title: 'gutter internal API', version: '0.0.0' },
+  });
 
-try {
-  await assertSchema();
-} catch (error) {
-  log.fatal({ err: error }, 'API startup schema check failed');
-  await pool.end();
-  process.exit(1);
+  return app;
 }
-const server = serve(
-  { fetch: app.fetch, port: Number(process.env.PORT ?? 3000), hostname: '0.0.0.0' },
-  () => log.info('api started'),
-);
-for (const signal of ['SIGTERM', 'SIGINT'] as const)
-  process.on(signal, () =>
-    server.close(async () => {
-      await pool.end();
-      process.exit(0);
-    }),
+
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  const app = createApp();
+  try {
+    await assertSchema();
+  } catch (error) {
+    log.fatal({ err: error }, 'API startup schema check failed');
+    await pool.end();
+    process.exit(1);
+  }
+  const server = serve(
+    { fetch: app.fetch, port: Number(process.env.PORT ?? 3000), hostname: '0.0.0.0' },
+    () => log.info('api started'),
   );
+  for (const signal of ['SIGTERM', 'SIGINT'] as const)
+    process.on(signal, () =>
+      server.close(async () => {
+        await pool.end();
+        process.exit(0);
+      }),
+    );
+}

@@ -65,6 +65,32 @@ try {
     from generate_series(1,100000) g`,
     [rootId],
   );
+  // The list-state rows must represent real visible projections.  Populate the 100k
+  // performance fixture set-wise so the partial indexes are exercised against active,
+  // unsuppressed source items rather than synthetic count-only rows.
+  await pool.query(
+    `insert into source_items(root_id,relative_path,kind,size_bytes,mtime_ms,page_count,active,manifest_sha256)
+     select $1,'perf-' || g || '.cbz','cbz',1,g,1,true,lpad(to_hex(g),64,'0')
+     from generate_series(1,100000) g`,
+    [rootId],
+  );
+  await pool.query(
+    `insert into catalog_publications(series_id,identity_key,publication_identity_canonical_json,kind,display_name,search_key,sort_key,volume,number_text)
+     select s.id,lpad(to_hex(g),64,'0'),jsonb_build_array(1,'perf-' || g),'volume',
+       'series-' || g,'series-' || g,'series-' || g,1,'1'
+     from generate_series(1,100000) g
+     join catalog_series s on s.library_id=$1 and s.identity_key=lpad(to_hex(g),64,'0')`,
+    [rootId],
+  );
+  await pool.query(
+    `insert into catalog_releases(publication_id,source_item_id,root_id,metadata_completeness)
+     select p.id,i.id,$1,1
+     from generate_series(1,100000) g
+     join catalog_series s on s.library_id=$1 and s.identity_key=lpad(to_hex(g),64,'0')
+     join catalog_publications p on p.series_id=s.id and p.identity_key=lpad(to_hex(g),64,'0')
+     join source_items i on i.root_id=$1 and i.relative_path='perf-' || g || '.cbz' and i.active`,
+    [rootId],
+  );
   await pool.query(
     `insert into catalog_series_list_state(series_id,library_id,display_name,sort_key,search_document,visible_publication_count,source_updated_mtime_ms,discovered_at,metadata_updated_at)
     select id,library_id,display_name,sort_key,search_key,1,id,created_at + (id || ' microseconds')::interval,created_at + (id || ' microseconds')::interval from catalog_series where library_id=$1`,
@@ -73,6 +99,28 @@ try {
   await pool.query(
     `insert into catalog_series(library_id,identity_key,identity_canonical_json,display_name,search_key,sort_key) values
     ($1,repeat('b',64),jsonb_build_array(1,'漫画一'),'漫画一','漫画一','漫画一'),($1,repeat('c',64),jsonb_build_array(1,'漫画二'),'漫画二','漫画二','漫画二'),($1,repeat('d',64),jsonb_build_array(1,'異世界漫画'),'異世界漫画','異世界漫画','異世界漫画')`,
+    [rootId],
+  );
+  // Keep the search fixture semantically visible: list reads must agree with the
+  // expected keyset rows after the hierarchy is hydrated through real releases.
+  await pool.query(
+    `insert into source_items(root_id,relative_path,kind,size_bytes,mtime_ms,page_count,active,manifest_sha256)
+     select $1,'search-' || code || '.cbz','cbz',1,100001 + n,1,true,repeat(code,64)
+     from (values ('b',1),('c',2),('d',3)) as v(code,n)`,
+    [rootId],
+  );
+  await pool.query(
+    `insert into catalog_publications(series_id,identity_key,publication_identity_canonical_json,kind,display_name,search_key,sort_key,volume,number_text)
+     select s.id,repeat(s.identity_key,1),jsonb_build_array(1,s.display_name),'volume',s.display_name,s.search_key,s.sort_key,1,'1'
+     from catalog_series s where s.library_id=$1 and s.identity_key in (repeat('b',64),repeat('c',64),repeat('d',64))`,
+    [rootId],
+  );
+  await pool.query(
+    `insert into catalog_releases(publication_id,source_item_id,root_id,metadata_completeness)
+     select p.id,i.id,$1,1
+     from catalog_publications p
+     join catalog_series s on s.id=p.series_id and s.library_id=$1
+     join source_items i on i.root_id=$1 and i.relative_path='search-' || left(s.identity_key,1) || '.cbz'`,
     [rootId],
   );
   await pool.query(
@@ -383,8 +431,14 @@ try {
   await pool.query('delete from library_roots where id=$1', [emptyRoot]);
 } finally {
   await pool.query('delete from catalog_series_list_state where library_id=$1', [rootId]);
+  await pool.query('delete from catalog_releases where root_id=$1', [rootId]);
+  await pool.query(
+    'delete from catalog_publications where series_id in (select id from catalog_series where library_id=$1)',
+    [rootId],
+  );
   await pool.query('delete from catalog_series where library_id=$1', [rootId]);
   await pool.query('delete from catalog_libraries where id=$1', [rootId]);
+  await pool.query('delete from source_items where root_id=$1', [rootId]);
   await pool.query('delete from library_roots where id=$1', [rootId]);
   await pool.end();
 }

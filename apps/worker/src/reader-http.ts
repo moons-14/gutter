@@ -29,9 +29,12 @@ export type AuthorizedPage = Readonly<{
 export type ReaderHttpDependencies = Readonly<{
   roots: ReadonlyMap<string, { canonicalPath: string }>;
   verifyCapability: (token: string | undefined, path: string) => ReaderCapability | null;
-  authorize: (releaseId: string, ordinal: number) => Promise<AuthorizedPage | null>;
-  describe?: (releaseId: string) => Promise<ReaderReleaseDescriptor | null>;
-  describePublication?: (publicationId: string) => Promise<Readonly<{
+  authorize: (releaseId: string, ordinal: number, userId: string) => Promise<AuthorizedPage | null>;
+  describe?: (releaseId: string, userId: string) => Promise<ReaderReleaseDescriptor | null>;
+  describePublication?: (
+    publicationId: string,
+    userId: string,
+  ) => Promise<Readonly<{
     releaseId: string;
     release: ReaderReleaseDescriptor;
   }> | null>;
@@ -126,7 +129,9 @@ export function createReaderHttpServer(deps: ReaderHttpDependencies): Server {
     if (!pathname || !capability) return send(response, 404);
     const descriptorMatch = pathname && descriptorRoute.exec(pathname);
     if (descriptorMatch && request.method === 'GET' && deps.describe) {
-      const descriptor = await deps.describe(descriptorMatch[1]!).catch(() => null);
+      const descriptor = await deps
+        .describe(descriptorMatch[1]!, capability.userId)
+        .catch(() => null);
       response.writeHead(descriptor ? 200 : 404, {
         'Cache-Control': 'no-store',
         'Content-Type': 'application/json; charset=utf-8',
@@ -135,7 +140,9 @@ export function createReaderHttpServer(deps: ReaderHttpDependencies): Server {
     }
     const publicationMatch = pathname && publicationRoute.exec(pathname);
     if (publicationMatch && request.method === 'GET' && deps.describePublication) {
-      const session = await deps.describePublication(publicationMatch[1]!).catch(() => null);
+      const session = await deps
+        .describePublication(publicationMatch[1]!, capability.userId)
+        .catch(() => null);
       response.writeHead(session ? 200 : 404, {
         'Cache-Control': 'no-store',
         'Content-Type': 'application/json; charset=utf-8',
@@ -145,7 +152,9 @@ export function createReaderHttpServer(deps: ReaderHttpDependencies): Server {
     const match = pathname && route.exec(pathname);
     if (!match || !['GET', 'HEAD'].includes(request.method ?? '')) return send(response, 404);
     const ordinal = Number(match[2]);
-    const authorized = await deps.authorize(match[1]!, ordinal).catch(() => null);
+    const authorized = await deps
+      .authorize(match[1]!, ordinal, capability.userId)
+      .catch(() => null);
     const root = authorized && deps.roots.get(authorized.rootId);
     if (!authorized || !root || authorized.rootId !== capability.rootId) return send(response, 404);
     const etagValue = [match[1], ordinal, authorized.observed.size, authorized.sourceMtimeMs].join(

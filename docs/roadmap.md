@@ -26,5 +26,8 @@ the delivered foundation.
   source-path APIs remain out of scope. Browser coverage includes Chromium desktop and Pixel; WebKit
   iPhone coverage is best effort only and makes no native-app claim.
 - M4: versioned metadata-provider HTTP sidecars and selected public API/PATs.
-- M5: Better Auth passkey/TOTP, no-signup policy, library ACL, multi-user flows.
-- M6: scale benchmark, operations, v1 API stabilization, backup/restore runbooks.
+- M5: [released] Better Auth passkey/TOTP, no-signup policy, library ACL, and multi-user flows;
+  durable per-user PostgreSQL state uses compare-and-set revisions, with ACL-gated resume and
+  hierarchy hide, export, permanent-delete tombstones, and immutable audit rows.
+- M6: scale benchmark, operations, v1 API stabilization, and backup/restore runbooks, including
+  retention-preserving restore of user state, tombstones, and audit history.

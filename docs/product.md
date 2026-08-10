@@ -21,8 +21,11 @@ publications, releases, and creator/group/publisher pages. `ComicInfo.xml` overr
 title/series metadata; exact normalized identity avoids fuzzy merges. Multiple physical releases
 may represent one publication. A durable global preferred release uses root plus publication
 identity and source-item ID; it becomes dormant when its source is hidden and returns if visible
-again. Catalog state may be rebuilt from source inventory and metadata; user-specific reading,
-hiding, and preferences are deliberately not present yet.
+again. Catalog projections remain rebuildable from source inventory and metadata, while per-user
+progress, history, likes, and hide state are durable PostgreSQL records with compare-and-set
+revisions. Resume and visibility are gated by the user's library ACL, including hierarchy hides.
+Export and permanent deletion retain tombstones and immutable audit rows under the retention policy.
+Browser storage is presentation-only; CBZ archives and source files remain immutable.
 
 The product boundary preserves future options while preventing source ownership: roots cannot be
 `/`, overlap, or resolve through symlinks; the API has no library mount; and worker binds are

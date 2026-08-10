@@ -37,12 +37,14 @@ export const pool = new Pool({ connectionString: await databaseUrl() });
 export const db = drizzle(pool);
 
 const canonicalIdentityKey = /^[0-9a-f]{64}$/;
+const publicationTargetKey = /^[0-9a-f]{64}:[0-9a-f]{64}$/;
 export type LibraryAccessScope = Readonly<{
   userId: string;
   isAdmin: boolean;
   rootIds: readonly string[];
   revision: number;
   scopeHash: string;
+  userStateRevision?: number;
 }>;
 
 export async function libraryAccessScope(userId: string): Promise<LibraryAccessScope> {
@@ -69,14 +71,528 @@ export async function libraryAccessScope(userId: string): Promise<LibraryAccessS
           )
         ).rows[0]?.revision ?? 0,
       );
+  const userStateRevision = Number(
+    (
+      await pool.query<{ revision: string }>(
+        'select revision from gutter_user_state_revisions where user_id=$1',
+        [userId],
+      )
+    ).rows[0]?.revision ?? 0,
+  );
   const scopeHash = createHash('sha256')
-    .update(JSON.stringify({ userId, isAdmin, grants, revision }), 'utf8')
+    .update(JSON.stringify({ userId, isAdmin, grants, revision, userStateRevision }), 'utf8')
     .digest('hex');
-  return { userId, isAdmin, rootIds: grants, revision, scopeHash };
+  return { userId, isAdmin, rootIds: grants, revision, scopeHash, userStateRevision };
 }
 
 export function canAccessLibrary(scope: LibraryAccessScope, rootId: string): boolean {
   return scope.isAdmin || scope.rootIds.includes(rootId);
+}
+/** Authorizes a durable state key against the current ACL and rebuildable catalog/source view. */
+export async function authorizeUserStateResource(
+  userId: string,
+  rootId: string,
+  kind: UserTargetKind | 'progress',
+  key: string,
+): Promise<boolean> {
+  const scope = await libraryAccessScope(userId);
+  if (!canAccessLibrary(scope, rootId)) return false;
+  if (kind === 'progress' || kind === 'check' || kind === 'source')
+    return Boolean(
+      (
+        await pool.query(
+          'select 1 from visible_source_items where root_id=$1 and relative_path=$2 limit 1',
+          [rootId, normalizeUserSourceKey(key)],
+        )
+      ).rowCount,
+    );
+  if (kind === 'series')
+    return Boolean(
+      (
+        await pool.query(
+          'select 1 from catalog_series s where s.library_id=$1 and s.identity_key=$2 and exists (select 1 from catalog_publications p join catalog_releases r on r.publication_id=p.id join visible_source_items i on i.id=r.source_item_id where p.series_id=s.id)',
+          [rootId, key],
+        )
+      ).rowCount,
+    );
+  const split = key.split(':');
+  if (split.length !== 2) return false;
+  return Boolean(
+    (
+      await pool.query(
+        'select 1 from catalog_publications p join catalog_series s on s.id=p.series_id where s.library_id=$1 and s.identity_key=$2 and p.identity_key=$3 and exists (select 1 from catalog_releases r join visible_source_items i on i.id=r.source_item_id where r.publication_id=p.id)',
+        [rootId, split[0], split[1]],
+      )
+    ).rowCount,
+  );
+}
+
+/** Resolve collection ownership before any membership mutation (404-safe). */
+export async function authorizeUserCollection(
+  userId: string,
+  collectionId: number,
+): Promise<boolean> {
+  if (!Number.isSafeInteger(collectionId) || collectionId < 1) return false;
+  return Boolean(
+    (
+      await pool.query('select 1 from user_collections where id=$1 and user_id=$2', [
+        collectionId,
+        userId,
+      ])
+    ).rowCount,
+  );
+}
+
+export type UserProgress = Readonly<{
+  userId: string;
+  rootId: string;
+  sourceKey: string;
+  pageOrdinal: number;
+  completed: boolean;
+  revision: number;
+  firstReadAt: Date;
+  lastReadAt: Date;
+  openCount: number;
+  updatedAt: Date;
+}>;
+export type UserTargetKind = 'check' | 'series' | 'publication' | 'source';
+type ProgressRow = {
+  user_id: string;
+  root_id: string;
+  source_key: string;
+  page_ordinal: number;
+  completed: boolean;
+  revision: string;
+  first_read_at: Date;
+  last_read_at: Date;
+  open_count: string;
+  updated_at: Date;
+};
+const progressFromRow = (row: ProgressRow): UserProgress => ({
+  userId: row.user_id,
+  rootId: row.root_id,
+  sourceKey: row.source_key,
+  pageOrdinal: row.page_ordinal,
+  completed: row.completed,
+  revision: Number(row.revision),
+  firstReadAt: row.first_read_at,
+  lastReadAt: row.last_read_at,
+  openCount: Number(row.open_count),
+  updatedAt: row.updated_at,
+});
+
+export function normalizeUserSourceKey(value: string): string {
+  if (typeof value !== 'string' || !value || value.length > 4096 || value.includes('\0'))
+    throw new Error('invalid_user_source_key');
+  const normalized = value.normalize('NFC').replaceAll('\\', '/');
+  if (
+    normalized.startsWith('/') ||
+    normalized.split('/').some((part) => !part || part === '.' || part === '..')
+  )
+    throw new Error('invalid_user_source_key');
+  return normalized;
+}
+export function normalizeCollectionName(value: string): { name: string; nameKey: string } {
+  if (typeof value !== 'string') throw new Error('invalid_collection_name');
+  const name = value.normalize('NFKC').trim().replace(/\s+/gu, ' ');
+  if (!name || name.length > 128) throw new Error('invalid_collection_name');
+  return { name, nameKey: name.toLocaleLowerCase('und') };
+}
+function validateOrdinal(value: number): void {
+  if (!Number.isInteger(value) || value < 0 || value > 1_000_000)
+    throw new Error('invalid_page_ordinal');
+}
+function validateTarget(kind: UserTargetKind, key: string): string {
+  if (!['check', 'series', 'publication', 'source'].includes(kind))
+    throw new Error('invalid_user_target');
+  if (kind === 'series') {
+    if (!canonicalIdentityKey.test(key)) throw new Error('invalid_user_target');
+    return key;
+  }
+  if (kind === 'publication') {
+    if (!publicationTargetKey.test(key)) throw new Error('invalid_user_target');
+    return key;
+  }
+  return normalizeUserSourceKey(key);
+}
+async function bumpUserStateRevision(
+  client: { query: typeof pool.query },
+  userId: string,
+): Promise<number> {
+  const result = await client.query<{ revision: string }>(
+    `insert into gutter_user_state_revisions(user_id,revision) values($1,1)
+    on conflict(user_id) do update set revision=gutter_user_state_revisions.revision+1,updated_at=now() returning revision`,
+    [userId],
+  );
+  return Number(result.rows[0].revision);
+}
+export async function userStateScope(
+  userId: string,
+): Promise<{ revision: number; scopeHash: string }> {
+  const result = await pool.query<{ revision: string }>(
+    'select revision from gutter_user_state_revisions where user_id=$1',
+    [userId],
+  );
+  const revision = Number(result.rows[0]?.revision ?? 0);
+  return {
+    revision,
+    scopeHash: createHash('sha256').update(`${userId}\0${revision}`).digest('hex'),
+  };
+}
+export async function getUserProgress(
+  userId: string,
+  rootId: string,
+  sourceKey: string,
+): Promise<UserProgress | null> {
+  const result = await pool.query<ProgressRow>(
+    'select * from user_progress where user_id=$1 and root_id=$2 and source_key=$3',
+    [userId, rootId, normalizeUserSourceKey(sourceKey)],
+  );
+  return result.rows[0] ? progressFromRow(result.rows[0]) : null;
+}
+
+/** Returns authenticated resume entries without exposing source paths or inventory metadata. */
+export async function getUserResume(
+  userId: string,
+  limit = 30,
+): Promise<Record<string, unknown>[]> {
+  const bounded = Math.min(Math.max(Math.trunc(limit), 1), 100);
+  return (
+    await pool.query(
+      `select r.id::text as "releaseId",up.page_ordinal as "pageOrdinal",up.completed,up.revision,
+      up.last_read_at as "lastReadAt"
+     from user_progress up join catalog_releases r on r.root_id=up.root_id
+     join visible_source_items i on i.id=r.source_item_id and i.relative_path=up.source_key
+     join catalog_publications p on p.id=r.publication_id join catalog_series s on s.id=p.series_id
+     where up.user_id=$1 and i.active and i.quarantine_reason is null
+       and exists (select 1 from library_roots lr where lr.id=i.root_id and lr.active)
+       and gutter_user_can_read_release($1,r.id)
+       and not exists (select 1 from user_target_state h where h.user_id=$1 and h.root_id=r.root_id and h.hidden and ((h.target_kind='series' and h.target_key=s.identity_key) or (h.target_kind='publication' and h.target_key=s.identity_key || ':' || p.identity_key) or (h.target_kind in ('source','check') and h.target_key=i.relative_path)))
+     order by up.last_read_at desc limit $2`,
+      [userId, bounded],
+    )
+  ).rows;
+}
+export async function putUserProgress(
+  userId: string,
+  rootId: string,
+  sourceKey: string,
+  expectedRevision: number,
+  value: { pageOrdinal: number; completed: boolean },
+): Promise<{ ok: true; current: UserProgress } | { ok: false; current: UserProgress | null }> {
+  const key = normalizeUserSourceKey(sourceKey);
+  validateOrdinal(value.pageOrdinal);
+  if (!Number.isInteger(expectedRevision) || expectedRevision < 0)
+    throw new Error('invalid_expected_revision');
+  const client = await pool.connect();
+  try {
+    await client.query('begin');
+    const current = await client.query<ProgressRow>(
+      'select * from user_progress where user_id=$1 and root_id=$2 and source_key=$3 for update',
+      [userId, rootId, key],
+    );
+    const row = current.rows[0];
+    if ((row ? Number(row.revision) : 0) !== expectedRevision) {
+      await client.query('commit');
+      return { ok: false, current: row ? progressFromRow(row) : null };
+    }
+    const changed = row
+      ? await client.query<ProgressRow>(
+          'update user_progress set page_ordinal=$4,completed=$5,revision=revision+1,last_read_at=now(),open_count=open_count+1,updated_at=now() where user_id=$1 and root_id=$2 and source_key=$3 returning *',
+          [userId, rootId, key, value.pageOrdinal, value.completed],
+        )
+      : await client.query<ProgressRow>(
+          'insert into user_progress(user_id,root_id,source_key,page_ordinal,completed,revision) values($1,$2,$3,$4,$5,1) returning *',
+          [userId, rootId, key, value.pageOrdinal, value.completed],
+        );
+    await bumpUserStateRevision(client, userId);
+    await client.query('commit');
+    return { ok: true, current: progressFromRow(changed.rows[0]) };
+  } catch (error) {
+    await client.query('rollback');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+export async function setUserTargetState(
+  userId: string,
+  rootId: string,
+  targetKind: UserTargetKind,
+  targetKey: string,
+  value: { favorite?: boolean; rating?: number | null; note?: string | null; hidden?: boolean },
+): Promise<boolean> {
+  const key = validateTarget(targetKind, targetKey);
+  const client = await pool.connect();
+  try {
+    await client.query('begin');
+    const current = await client.query<{
+      favorite: boolean;
+      rating: number | null;
+      note: string | null;
+      hidden: boolean;
+    }>(
+      'select favorite,rating,note,hidden from user_target_state where user_id=$1 and root_id=$2 and target_kind=$3 and target_key=$4 for update',
+      [userId, rootId, targetKind, key],
+    );
+    const existing = current.rows[0];
+    const favorite = Object.hasOwn(value, 'favorite')
+      ? value.favorite!
+      : (existing?.favorite ?? false);
+    const rating = Object.hasOwn(value, 'rating') ? value.rating! : (existing?.rating ?? null);
+    const note = Object.hasOwn(value, 'note') ? value.note! : (existing?.note ?? null);
+    const hidden = Object.hasOwn(value, 'hidden') ? value.hidden! : (existing?.hidden ?? false);
+    if (
+      (rating !== null && (!Number.isInteger(rating) || rating < 1 || rating > 5)) ||
+      (note !== null && note.length > 10000)
+    )
+      throw new Error('invalid_user_target_state');
+    const changed =
+      !favorite && rating === null && note === null && !hidden
+        ? await client.query(
+            'delete from user_target_state where user_id=$1 and root_id=$2 and target_kind=$3 and target_key=$4 returning user_id',
+            [userId, rootId, targetKind, key],
+          )
+        : await client.query(
+            `insert into user_target_state(user_id,root_id,target_kind,target_key,favorite,rating,note,hidden) values($1,$2,$3,$4,$5,$6,$7,$8) on conflict(user_id,root_id,target_kind,target_key) do update set favorite=excluded.favorite,rating=excluded.rating,note=excluded.note,hidden=excluded.hidden,updated_at=now() where (user_target_state.favorite,user_target_state.rating,user_target_state.note,user_target_state.hidden) is distinct from (excluded.favorite,excluded.rating,excluded.note,excluded.hidden) returning user_id`,
+            [userId, rootId, targetKind, key, favorite, rating, note, hidden],
+          );
+    if (changed.rowCount) await bumpUserStateRevision(client, userId);
+    await client.query('commit');
+    return Boolean(changed.rowCount);
+  } catch (error) {
+    await client.query('rollback');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+export async function addUserBookmark(
+  userId: string,
+  rootId: string,
+  sourceKey: string,
+  pageOrdinal: number,
+  label: string | null = null,
+): Promise<boolean> {
+  const key = normalizeUserSourceKey(sourceKey);
+  validateOrdinal(pageOrdinal);
+  if (label !== null && label.length > 256) throw new Error('invalid_bookmark_label');
+  const client = await pool.connect();
+  try {
+    await client.query('begin');
+    const changed = await client.query(
+      'insert into user_bookmarks(user_id,root_id,source_key,page_ordinal,label) values($1,$2,$3,$4,$5) on conflict(user_id,root_id,source_key,page_ordinal) do nothing returning id',
+      [userId, rootId, key, pageOrdinal, label],
+    );
+    if (changed.rowCount) await bumpUserStateRevision(client, userId);
+    await client.query('commit');
+    return Boolean(changed.rowCount);
+  } catch (error) {
+    await client.query('rollback');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+export async function deleteUserBookmark(
+  userId: string,
+  rootId: string,
+  sourceKey: string,
+  pageOrdinal: number,
+): Promise<boolean> {
+  validateOrdinal(pageOrdinal);
+  const client = await pool.connect();
+  try {
+    await client.query('begin');
+    const changed = await client.query(
+      'delete from user_bookmarks where user_id=$1 and root_id=$2 and source_key=$3 and page_ordinal=$4 returning id',
+      [userId, rootId, normalizeUserSourceKey(sourceKey), pageOrdinal],
+    );
+    if (changed.rowCount) await bumpUserStateRevision(client, userId);
+    await client.query('commit');
+    return Boolean(changed.rowCount);
+  } catch (error) {
+    await client.query('rollback');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+export async function createUserCollection(
+  userId: string,
+  name: string,
+): Promise<{ id: number; name: string; nameKey: string } | null> {
+  const normalized = normalizeCollectionName(name);
+  const client = await pool.connect();
+  try {
+    await client.query('begin');
+    const created = await client.query<{ id: string }>(
+      'insert into user_collections(user_id,name,name_key) values($1,$2,$3) on conflict(user_id,name_key) do nothing returning id',
+      [userId, normalized.name, normalized.nameKey],
+    );
+    if (created.rowCount) await bumpUserStateRevision(client, userId);
+    await client.query('commit');
+    return created.rows[0] ? { id: Number(created.rows[0].id), ...normalized } : null;
+  } catch (error) {
+    await client.query('rollback');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+export async function deleteUserCollection(userId: string, collectionId: number): Promise<boolean> {
+  const client = await pool.connect();
+  try {
+    await client.query('begin');
+    const changed = await client.query(
+      'delete from user_collections where id=$1 and user_id=$2 returning id',
+      [collectionId, userId],
+    );
+    if (changed.rowCount) await bumpUserStateRevision(client, userId);
+    await client.query('commit');
+    return Boolean(changed.rowCount);
+  } catch (error) {
+    await client.query('rollback');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+export async function setUserCollectionMembership(
+  userId: string,
+  collectionId: number,
+  rootId: string,
+  targetKind: UserTargetKind,
+  targetKey: string,
+  member: boolean,
+): Promise<boolean> {
+  const key = validateTarget(targetKind, targetKey);
+  const client = await pool.connect();
+  try {
+    await client.query('begin');
+    const changed = member
+      ? await client.query(
+          `insert into user_collection_members(collection_id,user_id,root_id,target_kind,target_key) select $1,$2,$3,$4,$5 where exists(select 1 from user_collections where id=$1 and user_id=$2) on conflict do nothing returning collection_id`,
+          [collectionId, userId, rootId, targetKind, key],
+        )
+      : await client.query(
+          'delete from user_collection_members where collection_id=$1 and user_id=$2 and root_id=$3 and target_kind=$4 and target_key=$5 returning collection_id',
+          [collectionId, userId, rootId, targetKind, key],
+        );
+    if (changed.rowCount) await bumpUserStateRevision(client, userId);
+    await client.query('commit');
+    return Boolean(changed.rowCount);
+  } catch (error) {
+    await client.query('rollback');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+export async function exportUserState(userId: string): Promise<{
+  schemaVersion: 1;
+  exportedAt: Date;
+  progress: unknown[];
+  targetState: unknown[];
+  bookmarks: unknown[];
+  collections: unknown[];
+}> {
+  const client = await pool.connect();
+  try {
+    await client.query('begin transaction isolation level repeatable read read only');
+    const [progress, targetState, bookmarks, collections] = await Promise.all([
+      client.query(
+        'select root_id as "rootId",source_key as "sourceKey",page_ordinal as "pageOrdinal",completed,revision,first_read_at as "firstReadAt",last_read_at as "lastReadAt",open_count as "openCount",updated_at as "updatedAt" from user_progress where user_id=$1 order by root_id,source_key',
+        [userId],
+      ),
+      client.query(
+        'select root_id as "rootId",target_kind as "targetKind",target_key as "targetKey",favorite,rating,note,hidden,updated_at as "updatedAt" from user_target_state where user_id=$1 order by root_id,target_kind,target_key',
+        [userId],
+      ),
+      client.query(
+        'select root_id as "rootId",source_key as "sourceKey",page_ordinal as "pageOrdinal",label,created_at as "createdAt",updated_at as "updatedAt" from user_bookmarks where user_id=$1 order by id',
+        [userId],
+      ),
+      client.query(
+        "select c.id,c.name,c.created_at as \"createdAt\",c.updated_at as \"updatedAt\",coalesce((select json_agg(json_build_object('rootId',m.root_id,'targetKind',m.target_kind,'targetKey',m.target_key,'createdAt',m.created_at) order by m.root_id,m.target_kind,m.target_key) from user_collection_members m where m.collection_id=c.id),'[]'::json) as members from user_collections c where c.user_id=$1 order by c.id",
+        [userId],
+      ),
+    ]);
+    await client.query('commit');
+    return {
+      schemaVersion: 1,
+      exportedAt: new Date(),
+      progress: progress.rows,
+      targetState: targetState.rows,
+      bookmarks: bookmarks.rows,
+      collections: collections.rows,
+    };
+  } catch (error) {
+    await client.query('rollback');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+export async function permanentlyDeleteUser(
+  actorUserId: string,
+  subjectUserId: string,
+  requestId: string,
+): Promise<Record<string, number>> {
+  if (actorUserId === subjectUserId) throw new Error('self_deletion_forbidden');
+  if (!requestId || requestId.length > 128) throw new Error('invalid_request_id');
+  const client = await pool.connect();
+  try {
+    await client.query('begin');
+    const actor = await client.query<{ role: string | null }>(
+      'select role from "user" where id=$1 for update',
+      [actorUserId],
+    );
+    if (actor.rows[0]?.role !== 'admin') throw new Error('admin_required');
+    const subject = await client.query<{ email: string }>(
+      'select email from "user" where id=$1 for update',
+      [subjectUserId],
+    );
+    if (!subject.rows[0]) throw new Error('user_not_found');
+    const deletions = [
+      ['user_progress', 'user_progress', 'user_id'],
+      ['user_target_state', 'user_target_state', 'user_id'],
+      ['user_bookmarks', 'user_bookmarks', 'user_id'],
+      ['user_collections', 'user_collections', 'user_id'],
+      ['user_collection_members', 'user_collection_members', 'user_id'],
+      ['"session"', 'session', '"userId"'],
+      ['account', 'account', '"userId"'],
+      ['"twoFactor"', 'twoFactor', '"userId"'],
+      ['passkey', 'passkey', '"userId"'],
+      ['library_access_grants', 'library_access_grants', 'user_id'],
+      ['gutter_user_state_revisions', 'gutter_user_state_revisions', 'user_id'],
+    ] as const;
+    const counts: Record<string, number> = {};
+    for (const [table, countKey, column] of deletions) {
+      const result = await client.query(`delete from ${table} where ${column}=$1`, [subjectUserId]);
+      counts[countKey] = result.rowCount ?? 0;
+    }
+    const verification = await client.query(
+      `with linked as (select identifier from "verification" where value=$1) delete from "verification" v where v.identifier=$2 or v.value=$1 or exists (select 1 from linked where v.identifier='2fa-attempts-' || linked.identifier)`,
+      [subjectUserId, subject.rows[0].email],
+    );
+    counts.verification = verification.rowCount ?? 0;
+    await client.query(
+      'update "user" set email=$2,name=\'Deleted user\',image=null,role=null,banned=true,"banReason"=\'permanent_deletion\',"banExpires"=null,"twoFactorEnabled"=false,"updatedAt"=now() where id=$1',
+      [subjectUserId, `deleted-${randomUUID()}@invalid`],
+    );
+    await client.query(
+      'insert into gutter_user_state_audit(actor_user_id,subject_user_id,action,request_id) values($1,$2,$3,$4)',
+      [actorUserId, subjectUserId, 'permanent_delete', requestId],
+    );
+    await client.query('commit');
+    return counts;
+  } catch (error) {
+    await client.query('rollback');
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 export async function changeLibraryAccess(
@@ -87,52 +603,11 @@ export async function changeLibraryAccess(
   requestId: string,
 ): Promise<number> {
   if (!requestId || requestId.length > 128) throw new Error('invalid_request_id');
-  const client = await pool.connect();
-  try {
-    await client.query('begin');
-    const actor = await client.query<{ role: string | null }>(
-      'select role from "user" where id=$1 for update',
-      [actorUserId],
-    );
-    if (actor.rows[0]?.role !== 'admin') throw new Error('admin_required');
-    const changed =
-      action === 'grant'
-        ? await client.query(
-            `insert into library_access_grants(user_id,root_id,granted_by_user_id)
-             values($1,$2,$3) on conflict do nothing returning user_id`,
-            [subjectUserId, rootId, actorUserId],
-          )
-        : await client.query(
-            'delete from library_access_grants where user_id=$1 and root_id=$2 returning user_id',
-            [subjectUserId, rootId],
-          );
-    if (changed.rowCount === 0) {
-      const current = await client.query<{ revision: string }>(
-        'select revision from gutter_acl_revisions where user_id=$1',
-        [subjectUserId],
-      );
-      await client.query('commit');
-      return Number(current.rows[0]?.revision ?? 0);
-    }
-    const revision = await client.query<{ revision: string }>(
-      `insert into gutter_acl_revisions(user_id,revision) values($1,1)
-       on conflict(user_id) do update set revision=gutter_acl_revisions.revision+1,updated_at=now()
-       returning revision`,
-      [subjectUserId],
-    );
-    await client.query(
-      `insert into gutter_acl_audit(actor_user_id,subject_user_id,root_id,action,request_id)
-       values($1,$2,$3,$4,$5)`,
-      [actorUserId, subjectUserId, rootId, action, requestId],
-    );
-    await client.query('commit');
-    return Number(revision.rows[0]!.revision);
-  } catch (error) {
-    await client.query('rollback');
-    throw error;
-  } finally {
-    client.release();
-  }
+  const result = await pool.query<{ revision: string }>(
+    'select gutter_change_library_access($1,$2,$3,$4,$5)::text as revision',
+    [actorUserId, subjectUserId, rootId, action, requestId],
+  );
+  return Number(result.rows[0]?.revision ?? 0);
 }
 export async function metadataStatus(rootId: string, canonicalIdentity: string) {
   if (!canonicalIdentityKey.test(canonicalIdentity)) throw new Error('invalid_canonical_identity');
@@ -698,33 +1173,40 @@ export function catalogSeriesListQuery(
     : // Keep unused prepared-statement parameters typed on the first page; PostgreSQL otherwise
       // cannot infer $7/$8 before a cursor is supplied.
       '($7::text is null and $8::text is null)';
+  const visibleJoins = `join catalog_releases r on r.publication_id=p.id
+       join visible_source_items vi on vi.id=r.source_item_id
+       join catalog_series vs on vs.id=p.series_id`;
+  const visiblePredicate = `not exists (select 1 from global_source_suppressions gs where gs.source_item_id=vi.id)
+         and not exists (select 1 from user_target_state vh where vh.user_id=$12 and vh.root_id=vs.library_id and vh.hidden and
+           ((vh.target_kind='series' and vh.target_key=vs.identity_key) or
+            (vh.target_kind='publication' and vh.target_key=vs.identity_key || ':' || p.identity_key) or
+            (vh.target_kind in ('source','check') and vh.target_key=vi.relative_path)))`;
   return {
     text: `with selected as (
        select ls.series_id,${key} as cursor_key
        from catalog_series_list_state ls join library_roots root on root.id=ls.library_id and root.active
-       where ls.visible_publication_count > 0
+       where ls.visible_publication_count>0
+         and exists (select 1 from catalog_publications p ${visibleJoins} where p.series_id=ls.series_id and ${visiblePredicate} limit 1 offset 0)
          and ($1::text is null or ls.library_id=$1)
-         and ($2::text is null or exists(
-           select 1 from catalog_publications p join catalog_releases r on r.publication_id=p.id
-           join visible_source_items i on i.id=r.source_item_id where p.series_id=ls.series_id and p.kind=$2))
+         and ($2::text is null or exists(select 1 from catalog_publications p ${visibleJoins} where p.series_id=ls.series_id and p.kind=$2 and ${visiblePredicate} limit 1 offset 0))
          and ($3::text is null or ls.search_document collate "C" like '%' || $3 || '%')
          and ($4::text is null or exists(
-           select 1 from catalog_publications p join catalog_releases r on r.publication_id=p.id
-           join visible_source_items i on i.id=r.source_item_id join catalog_credits c on c.release_id=r.id
-           join catalog_entities e on e.id=c.entity_id where p.series_id=ls.series_id and e.kind='creator' and e.search_key=$4))
+           select 1 from catalog_publications p ${visibleJoins}
+           join catalog_credits c on c.release_id=r.id
+           join catalog_entities e on e.id=c.entity_id where p.series_id=ls.series_id and e.kind='creator' and e.search_key=$4 and ${visiblePredicate} limit 1 offset 0))
          and ($5::text is null or exists(
-           select 1 from catalog_publications p join catalog_releases r on r.publication_id=p.id
-           join visible_source_items i on i.id=r.source_item_id join catalog_credits c on c.release_id=r.id
-           join catalog_entities e on e.id=c.entity_id where p.series_id=ls.series_id and e.kind='group' and e.search_key=$5))
+           select 1 from catalog_publications p ${visibleJoins}
+           join catalog_credits c on c.release_id=r.id join catalog_entities e on e.id=c.entity_id
+           where p.series_id=ls.series_id and e.kind='group' and e.search_key=$5 and ${visiblePredicate} limit 1 offset 0))
          and ($6::text is null or exists(
-           select 1 from catalog_publications p join catalog_releases r on r.publication_id=p.id
-           join visible_source_items i on i.id=r.source_item_id join catalog_credits c on c.release_id=r.id
-           join catalog_entities e on e.id=c.entity_id where p.series_id=ls.series_id and e.kind='publisher' and e.search_key=$6))
+           select 1 from catalog_publications p ${visibleJoins}
+           join catalog_credits c on c.release_id=r.id join catalog_entities e on e.id=c.entity_id
+           where p.series_id=ls.series_id and e.kind='publisher' and e.search_key=$6 and ${visiblePredicate} limit 1 offset 0))
          and ($10::boolean or ls.library_id=any($11::text[]))
          and ${cursorPredicate}
        order by ${key} ${order},ls.series_id ${order} limit $9
      )
-     select s.id,s.display_name as "displayName",ls.library_id as "libraryId",ls.visible_publication_count::int as "publicationCount",
+     select s.id,s.display_name as "displayName",ls.library_id as "libraryId",(select count(distinct p.id)::int from catalog_publications p ${visibleJoins} where p.series_id=s.id and ${visiblePredicate}) as "publicationCount",
        ${sort === 'discovered' || sort === 'metadata_updated' ? 'to_char(selected.cursor_key at time zone \'UTC\',\'YYYY-MM-DD"T"HH24:MI:SS.US"Z"\')' : 'selected.cursor_key::text'} as cursor_key
      from selected join catalog_series_list_state ls on ls.series_id=selected.series_id
        join catalog_series s on s.id=selected.series_id
@@ -741,6 +1223,7 @@ export function catalogSeriesListQuery(
       filters.limit + 1,
       scope.isAdmin,
       [...scope.rootIds],
+      scope.userId,
     ],
     filters,
     cursor,
@@ -783,7 +1266,8 @@ export async function listCatalogLibraries(
     await pool.query(
       `select l.id,l.display_name as "displayName",r.state,r.reason_code as "reasonCode",r.checked_at as "checkedAt"
        from catalog_libraries l join library_roots r on r.id=l.id
-       where r.active and ($1::boolean or l.id=any($2::text[])) order by l.id collate "C"`,
+       where r.active and ($1::boolean or l.id=any($2::text[]))
+       order by l.id collate "C"`,
       [scope.isAdmin, [...scope.rootIds]],
     )
   ).rows;
@@ -793,17 +1277,37 @@ export async function catalogSeriesDetail(
   scope: LibraryAccessScope,
 ): Promise<Record<string, unknown> | null> {
   const series = await pool.query(
-    `select s.id,s.display_name as "displayName",s.library_id as "libraryId" from catalog_series s
+    `with visible as (
+      select distinct p.id as publication_id,p.series_id,r.id as release_id,i.id as source_item_id
+      from catalog_publications p join catalog_releases r on r.publication_id=p.id
+      join visible_source_items i on i.id=r.source_item_id join catalog_series vs on vs.id=p.series_id
+      where not exists (select 1 from global_source_suppressions gs where gs.source_item_id=i.id)
+        and not exists (select 1 from user_target_state h where h.user_id=$4 and h.root_id=vs.library_id and h.hidden and
+          ((h.target_kind='series' and h.target_key=vs.identity_key) or
+           (h.target_kind='publication' and h.target_key=vs.identity_key || ':' || p.identity_key) or
+           (h.target_kind in ('source','check') and h.target_key=i.relative_path)))
+    )
+    select s.id,s.display_name as "displayName",s.library_id as "libraryId" from catalog_series s
     where s.id=$1 and ($2::boolean or s.library_id=any($3::text[]))
-    and exists (select 1 from catalog_publications p join catalog_releases r on r.publication_id=p.id join visible_source_items i on i.id=r.source_item_id where p.series_id=s.id)`,
-    [id, scope.isAdmin, [...scope.rootIds]],
+    and exists (select 1 from visible v where v.series_id=s.id)`,
+    [id, scope.isAdmin, [...scope.rootIds], scope.userId],
   );
   if (!series.rows[0]) return null;
   const publications = await pool.query(
-    `select p.id,p.display_name as "displayName",p.kind,p.volume,p.number_text as "number",
-    count(r.id)::int as "releaseCount" from catalog_publications p join catalog_releases r on r.publication_id=p.id
-    join visible_source_items i on i.id=r.source_item_id where p.series_id=$1 group by p.id order by p.sort_key collate "C",p.id`,
-    [id],
+    `with visible as (
+      select distinct p.id as publication_id,p.series_id,r.id as release_id,i.id as source_item_id
+      from catalog_publications p join catalog_releases r on r.publication_id=p.id
+      join visible_source_items i on i.id=r.source_item_id join catalog_series s on s.id=p.series_id
+      where not exists (select 1 from global_source_suppressions gs where gs.source_item_id=i.id)
+        and not exists (select 1 from user_target_state h where h.user_id=$2 and h.root_id=s.library_id and h.hidden and
+          ((h.target_kind='series' and h.target_key=s.identity_key) or
+           (h.target_kind='publication' and h.target_key=s.identity_key || ':' || p.identity_key) or
+           (h.target_kind in ('source','check') and h.target_key=i.relative_path)))
+    )
+    select p.id,p.display_name as "displayName",p.kind,p.volume,p.number_text as "number",
+    count(distinct v.release_id)::int as "releaseCount" from visible v join catalog_publications p on p.id=v.publication_id
+    where p.series_id=$1 group by p.id order by p.sort_key collate "C",p.id`,
+    [id, scope.userId],
   );
   return { ...series.rows[0], publications: publications.rows };
 }
@@ -815,26 +1319,32 @@ export async function catalogPublicationDetail(
     `select p.id,p.display_name as "displayName",p.kind,p.volume,p.number_text as "number",s.id as "seriesId",s.display_name as "seriesName"
     from catalog_publications p join catalog_series s on s.id=p.series_id where p.id=$1
     and ($2::boolean or s.library_id=any($3::text[]))
-    and exists (select 1 from catalog_releases r join visible_source_items i on i.id=r.source_item_id where r.publication_id=p.id)`,
-    [id, scope.isAdmin, [...scope.rootIds]],
+    and exists (select 1 from catalog_releases r join visible_source_items i on i.id=r.source_item_id where r.publication_id=p.id
+      and not exists (select 1 from global_source_suppressions gs where gs.source_item_id=i.id)
+      and not exists (select 1 from user_target_state h where h.user_id=$4 and h.root_id=s.library_id and h.hidden and ((h.target_kind='series' and h.target_key=s.identity_key) or (h.target_kind='publication' and h.target_key=s.identity_key || ':' || p.identity_key) or (h.target_kind in ('source','check') and h.target_key=i.relative_path))))`,
+    [id, scope.isAdmin, [...scope.rootIds], scope.userId],
   );
   if (!publication.rows[0]) return null;
   const releases = await pool.query(
     `select r.id,i.id as "sourceItemId",i.relative_path as "relativePath",i.mtime_ms as "mtimeMs",i.page_count as "pageCount",
     coalesce(o.preferred_source_item_id=i.id,false) as "isPreferred"
-    from catalog_releases r join visible_source_items i on i.id=r.source_item_id join catalog_publications p on p.id=r.publication_id
+    from catalog_releases r join visible_source_items i on i.id=r.source_item_id join catalog_publications p on p.id=r.publication_id join catalog_series s on s.id=p.series_id
     left join catalog_preferred_release_overrides o on o.root_id=r.root_id and o.publication_identity_key=p.identity_key and o.preferred_source_item_id=i.id
-    where r.publication_id=$1 order by coalesce(o.preferred_source_item_id=i.id,false) desc,r.metadata_completeness desc,
+    where r.publication_id=$1 and not exists (select 1 from global_source_suppressions gs where gs.source_item_id=i.id)
+      and not exists (select 1 from user_target_state h where h.user_id=$2 and h.root_id=r.root_id and h.hidden and ((h.target_kind='series' and h.target_key=s.identity_key) or (h.target_kind='publication' and h.target_key=s.identity_key || ':' || p.identity_key) or (h.target_kind in ('source','check') and h.target_key=i.relative_path))) order by coalesce(o.preferred_source_item_id=i.id,false) desc,r.metadata_completeness desc,
     (select count(*) from reader_eligible_source_pages ep where ep.source_item_id=i.id) desc,i.mtime_ms desc,i.relative_path collate "C" asc,r.id asc`,
-    [id],
+    [id, scope.userId],
   );
   const selected = releases.rows.find((release) => release.isPreferred) ?? releases.rows[0] ?? null;
   const credits = await pool.query(
     `select e.id,e.kind,e.display_name as "displayName",c.role
     from catalog_credits c join catalog_releases r on r.id=c.release_id join catalog_entities e on e.id=c.entity_id
+    join catalog_publications p on p.id=r.publication_id join catalog_series s on s.id=p.series_id
     join visible_source_items i on i.id=r.source_item_id where r.publication_id=$1
+      and not exists (select 1 from global_source_suppressions gs where gs.source_item_id=i.id)
+      and not exists (select 1 from user_target_state h where h.user_id=$2 and h.root_id=r.root_id and h.hidden and ((h.target_kind='series' and h.target_key=s.identity_key) or (h.target_kind='publication' and h.target_key=s.identity_key || ':' || p.identity_key) or (h.target_kind in ('source','check') and h.target_key=i.relative_path)))
     group by e.id,e.kind,e.display_name,c.role order by e.kind,e.display_name collate "C",c.role`,
-    [id],
+    [id, scope.userId],
   );
   return {
     ...publication.rows[0],
@@ -852,8 +1362,11 @@ export async function catalogEntityDetail(
     `select e.id,e.kind,e.display_name as "displayName" from catalog_entities e where e.id=$1 and e.kind=$2
     and exists (select 1 from catalog_credits c join catalog_releases r on r.id=c.release_id
     join visible_source_items i on i.id=r.source_item_id where c.entity_id=e.id
-    and ($3::boolean or r.root_id=any($4::text[])))`,
-    [id, kind, scope.isAdmin, [...scope.rootIds]],
+    and ($3::boolean or r.root_id=any($4::text[]))
+    and not exists (select 1 from global_source_suppressions gs where gs.source_item_id=i.id)
+    and not exists (select 1 from user_target_state h join catalog_publications hp on hp.id=r.publication_id join catalog_series hs on hs.id=hp.series_id
+      where h.user_id=$5 and h.root_id=r.root_id and h.hidden and ((h.target_kind='series' and h.target_key=hs.identity_key) or (h.target_kind='publication' and h.target_key=hs.identity_key || ':' || hp.identity_key) or (h.target_kind in ('source','check') and h.target_key=i.relative_path))))`,
+    [id, kind, scope.isAdmin, [...scope.rootIds], scope.userId],
   );
   if (!entity.rows[0]) return null;
   const publications = await pool.query(
@@ -861,8 +1374,10 @@ export async function catalogEntityDetail(
     from catalog_credits c join catalog_releases r on r.id=c.release_id join catalog_publications p on p.id=r.publication_id
     join catalog_series s on s.id=p.series_id join visible_source_items i on i.id=r.source_item_id
     where c.entity_id=$1 and ($2::boolean or r.root_id=any($3::text[]))
+      and not exists (select 1 from global_source_suppressions gs where gs.source_item_id=i.id)
+      and not exists (select 1 from user_target_state h where h.user_id=$4 and h.root_id=r.root_id and h.hidden and ((h.target_kind='series' and h.target_key=s.identity_key) or (h.target_kind='publication' and h.target_key=s.identity_key || ':' || p.identity_key) or (h.target_kind in ('source','check') and h.target_key=i.relative_path)))
     order by p.display_name,p.id`,
-    [id, scope.isAdmin, [...scope.rootIds]],
+    [id, scope.isAdmin, [...scope.rootIds], scope.userId],
   );
   return { ...entity.rows[0], publications: publications.rows };
 }
@@ -877,11 +1392,13 @@ export async function listCatalogEntities(
     await pool.query(
       `select e.id,e.kind,e.display_name as "displayName",count(distinct p.id)::int as "publicationCount"
      from catalog_entities e join catalog_credits c on c.entity_id=e.id join catalog_releases r on r.id=c.release_id
-     join catalog_publications p on p.id=r.publication_id join visible_source_items i on i.id=r.source_item_id
+     join catalog_publications p on p.id=r.publication_id join catalog_series s on s.id=p.series_id join visible_source_items i on i.id=r.source_item_id
      where e.kind=$1 and ($2::text is null or e.search_key like '%' || $2 || '%')
      and ($3::boolean or r.root_id=any($4::text[]))
-     group by e.id order by e.display_name collate "C",e.id limit $5`,
-      [kind, query, scope.isAdmin, [...scope.rootIds], limit],
+     and not exists (select 1 from global_source_suppressions gs where gs.source_item_id=i.id)
+     and not exists (select 1 from user_target_state h where h.user_id=$5 and h.root_id=r.root_id and h.hidden and ((h.target_kind='series' and h.target_key=s.identity_key) or (h.target_kind='publication' and h.target_key=s.identity_key || ':' || p.identity_key) or (h.target_kind in ('source','check') and h.target_key=i.relative_path)))
+     group by e.id order by e.display_name collate "C",e.id limit $6`,
+      [kind, query, scope.isAdmin, [...scope.rootIds], scope.userId, limit],
     )
   ).rows;
 }
@@ -1769,8 +2286,26 @@ export async function readerRootForRequestPath(pathname: string): Promise<string
   return result.rows[0]?.library_id ?? null;
 }
 
+/** User hide predicate for API-mediated reader requests; returns false without leaking identity. */
+export async function isReaderPathVisible(userId: string, pathname: string): Promise<boolean> {
+  const release = /^\/api\/reader\/releases\/([1-9][0-9]*)(?:\/pages\/[0-9]+)?$/.exec(pathname);
+  const publication = /^\/api\/reader\/publications\/([1-9][0-9]*)$/.exec(pathname);
+  if (!release && !publication) return false;
+  const result = await pool.query(
+    `select 1 from catalog_releases r join catalog_publications p on p.id=r.publication_id
+      join catalog_series s on s.id=p.series_id join visible_source_items i on i.id=r.source_item_id
+     where ${release ? 'r.id=$2' : 'p.id=$2'} and i.active and i.quarantine_reason is null
+       and gutter_user_can_read_release($1,r.id)
+       and not exists (select 1 from user_target_state h where h.user_id=$1 and h.root_id=r.root_id and h.hidden and ((h.target_kind='series' and h.target_key=s.identity_key) or (h.target_kind='publication' and h.target_key=s.identity_key || ':' || p.identity_key) or (h.target_kind in ('source','check') and h.target_key=i.relative_path)))
+     limit 1`,
+    [userId, (release ?? publication)![1]],
+  );
+  return Boolean(result.rowCount);
+}
+
 export async function getReaderReleaseDescriptor(
   releaseId: string,
+  userId: string,
 ): Promise<ReaderReleaseDescriptor | null> {
   if (!/^[1-9][0-9]*$/.test(releaseId)) return null;
   const result = await pool.query<{
@@ -1801,7 +2336,7 @@ export async function getReaderReleaseDescriptor(
             join page_validation_results next_result on next_result.source_item_id=next_item.id
               and next_result.locator=next_page.locator and next_result.manifest_sha256=next_item.manifest_sha256
               and next_result.generation=next_item.validation_generation and next_result.state='valid'
-            where next_release.publication_id=next_publication.id and next_item.active
+        where next_release.publication_id=next_publication.id and gutter_user_can_read_release($2,next_release.id) and next_item.active
               and next_item.quarantine_reason is null
               and exists (select 1 from library_roots next_root where next_root.id=next_item.root_id and next_root.active)
           )
@@ -1816,10 +2351,10 @@ export async function getReaderReleaseDescriptor(
      join source_pages sp on sp.source_item_id=i.id
      join page_validation_results result on result.source_item_id=i.id and result.locator=sp.locator
        and result.manifest_sha256=i.manifest_sha256 and result.generation=i.validation_generation and result.state='valid'
-     where r.id=$1 and i.active and i.quarantine_reason is null
+     where r.id=$1 and gutter_user_can_read_release($2,r.id) and i.active and i.quarantine_reason is null
        and exists (select 1 from library_roots root where root.id=i.root_id and root.active)
      group by i.manifest_sha256,i.validation_generation,i.root_id,i.relative_path,p.series_id,p.sort_key,p.id`,
-    [releaseId],
+    [releaseId, userId],
   );
   const row = result.rows[0];
   return row
@@ -1836,6 +2371,7 @@ export async function getReaderReleaseDescriptor(
 /** Resolve a publication to its current reader-ready release without exposing source metadata. */
 export async function getReaderPublicationSession(
   publicationId: string,
+  userId: string,
 ): Promise<Readonly<{ releaseId: string; release: ReaderReleaseDescriptor }> | null> {
   if (!/^[1-9][0-9]*$/.test(publicationId)) return null;
   const result = await pool.query<{ id: string }>(
@@ -1850,23 +2386,24 @@ export async function getReaderPublicationSession(
        and result.manifest_sha256=i.manifest_sha256 and result.generation=i.validation_generation and result.state='valid'
      left join catalog_preferred_release_overrides o on o.root_id=r.root_id
        and o.publication_identity_key=p.identity_key and o.preferred_source_item_id=i.id
-     where p.id=$1 and i.active and i.quarantine_reason is null
+     where p.id=$1 and gutter_user_can_read_release($2,r.id) and i.active and i.quarantine_reason is null
        and exists (select 1 from library_roots root where root.id=i.root_id and root.active)
      group by r.id,o.preferred_source_item_id,i.id,r.metadata_completeness,i.mtime_ms,i.relative_path
      order by coalesce(o.preferred_source_item_id=i.id,false) desc,r.metadata_completeness desc,
        count(sp.ordinal) desc,i.mtime_ms desc,i.relative_path collate "C" asc,r.id asc
      limit 1`,
-    [publicationId],
+    [publicationId, userId],
   );
   const releaseId = result.rows[0]?.id;
   if (!releaseId) return null;
-  const release = await getReaderReleaseDescriptor(releaseId);
+  const release = await getReaderReleaseDescriptor(releaseId, userId);
   return release ? { releaseId, release } : null;
 }
 
 export async function getAuthorizedReaderPage(
   releaseId: string,
   ordinal: number,
+  userId: string,
 ): Promise<ReaderPageAuthorization | null> {
   if (!/^[1-9][0-9]*$/.test(releaseId) || !Number.isSafeInteger(ordinal) || ordinal < 0)
     return null;
@@ -1890,14 +2427,14 @@ export async function getAuthorizedReaderPage(
        join page_validation_results vr on vr.source_item_id=i.id and vr.locator=p.locator
          and vr.manifest_sha256=i.manifest_sha256 and vr.generation=i.validation_generation
          and vr.state='valid'
-      where r.id=$1 and i.active and i.quarantine_reason is null
+      where r.id=$1 and gutter_user_can_read_release($3,r.id) and i.active and i.quarantine_reason is null
         and exists (select 1 from library_roots lr where lr.id=i.root_id and lr.active)
         and exists (
           select 1 from page_validation_runs run
            where run.source_item_id=i.id and run.manifest_sha256=i.manifest_sha256
              and run.generation=i.validation_generation and run.state='completed'
         )`,
-    [releaseId, ordinal],
+    [releaseId, ordinal, userId],
   );
   const row = result.rows[0];
   return row

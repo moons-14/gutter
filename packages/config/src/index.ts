@@ -117,7 +117,7 @@ export function derivedCacheConfig(): Readonly<{ root: string; quotaBytes: numbe
   return { root: root.data, quotaBytes: quota.data };
 }
 
-export const schemaVersion = '0009_access_control';
+export const schemaVersion = '0010_user_state';
 
 /** Local sidecars only; the worker never accepts a provider endpoint from a job payload. */
 export type MetadataSidecar = Readonly<{
