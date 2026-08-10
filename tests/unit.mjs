@@ -564,7 +564,7 @@ async function withEnvironment(values, run) {
 }
 
 test('M5 documents the access-control schema version', () => {
-  assert.equal(schemaVersion, '0009_access_control');
+  assert.equal(schemaVersion, '0010_user_state');
 });
 
 test('catalog UI exposes entity discovery and publication credit links', async () => {

@@ -27,7 +27,13 @@ worker-only streaming CRC/full-first-frame image validation. M2 may use disabled
 hints that discard event paths and only enqueue full-root reconciliation. The M3 #20 validation reader
 keeps descriptors and page bytes worker-owned and network-only; its bounded route-local page window
 uses no persistent byte store while presentation and revision-aware progress remain browser-local.
-There is no auth, mutable
-registration API/UI, external provider, or source writes.
-User-specific hiding is deferred until authentication and will use a separate table. Run the
+Better Auth is released with a no-signup operator flow. Library access is deny-by-default and
+catalog/reader resume is gated by the authenticated user's root ACL. Per-user progress, history,
+likes, and hide state are durable PostgreSQL records keyed by stable source/root identities and
+updated with compare-and-set revisions. Hierarchy hide, export, and permanent-delete operations
+retain immutable audit rows and deletion tombstones according to the documented retention policy;
+restores preserve those records. Browser storage is limited to presentation preferences and
+revision-aware progress hints, never authorization or durable personal state. CBZ archives and
+source files remain immutable and are never edited, moved, deleted, renamed, repacked, or uploaded.
+Run the
 focused PostgreSQL oracle with `docker compose --profile integration run --rm --build integration`.

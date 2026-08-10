@@ -100,8 +100,13 @@ docker compose exec worker node --import tsx src/cache.ts gc
 ```
 
 Do not mount remote storage in API containers. Restore PostgreSQL only with an operator-managed
-`pg_dump`/`pg_restore` workflow while the application is stopped. Put Caddy/Nginx or Tailscale in
-front of port 8080 for remote access. TLS, auth, and external metadata providers are later milestones.
+`pg_dump`/`pg_restore` workflow while the application is stopped; retain the Better Auth secret and
+audit/tombstone history with the backup. Put Caddy/Nginx or Tailscale in front of port 8080 for
+remote access. Better Auth is released with a no-signup operator flow and deny-by-default,
+per-user root ACLs. Per-user progress, history, likes, and hide state are durable PostgreSQL state
+written with compare-and-set revisions; resume and catalog visibility are ACL-gated. Export and
+permanent-delete flows retain tombstones and immutable audit rows under the documented retention
+policy.
 Reader bytes are fetched with `cache: no-store` and held only in a route-owned three-resource / 32 MiB
 Blob window. They are never written to CacheStorage, IndexedDB, or persistent reader storage; only
 small browser-local presentation and revision-aware progress preferences are retained. Run focused

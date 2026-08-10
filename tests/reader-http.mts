@@ -77,11 +77,11 @@ test('internal reader HTTP route authorizes opaque release ordinal and has finit
   const data = Buffer.from('0123456789');
   await writeFile(join(root, '001.jpg'), data);
   const sourceStat = await lstat(root, { bigint: true });
-  const calls: Array<[string, number]> = [];
+  const calls: Array<[string, number, string]> = [];
   const server = createReaderHttpServer({
     roots: new Map([['library', { canonicalPath: root }]]),
-    authorize: async (release, ordinal) => {
-      calls.push([release, ordinal]);
+    authorize: async (release, ordinal, userId) => {
+      calls.push([release, ordinal, userId]);
       return release === '42' && ordinal === 0
         ? {
             rootId: 'library',
@@ -128,7 +128,7 @@ test('internal reader HTTP route authorizes opaque release ordinal and has finit
       416,
     );
     assert.equal((await fetch(`${base}/api/reader/releases/42/pages/1`)).status, 404);
-    assert.deepEqual(calls.at(-1), ['42', 1]);
+    assert.deepEqual(calls.at(-1), ['42', 1, 'test-user']);
     await writeFile(join(root, '001.jpg'), Buffer.from('source changed after validation'));
     const staleConditional = await fetch(`${base}/api/reader/releases/42/pages/0`, {
       headers: { 'If-None-Match': etag! },
@@ -142,11 +142,13 @@ test('internal reader HTTP route authorizes opaque release ordinal and has finit
 });
 
 test('reader descriptor exposes only ready opaque navigation authority', async () => {
+  const descriptorUsers: string[] = [];
   const server = createReaderHttpServer({
     roots: new Map(),
     authorize: async () => null,
-    describe: async (releaseId) =>
-      releaseId === '42'
+    describe: async (releaseId, userId) => {
+      descriptorUsers.push(userId);
+      return releaseId === '42'
         ? {
             progressKey: 'source:opaque-stable-key',
             revision: 'a'.repeat(64) + ':7',
@@ -154,7 +156,8 @@ test('reader descriptor exposes only ready opaque navigation authority', async (
             validPageCount: 3,
             nextPublicationId: null,
           }
-        : null,
+        : null;
+    },
   });
   const base = await listening(server);
   try {
@@ -170,6 +173,7 @@ test('reader descriptor exposes only ready opaque navigation authority', async (
         nextPublicationId: null,
       },
     });
+    assert.deepEqual(descriptorUsers, ['test-user']);
     assert.equal((await fetch(`${base}/api/reader/releases/43`)).status, 404);
   } finally {
     await new Promise<void>((resolve, reject) =>
@@ -179,11 +183,13 @@ test('reader descriptor exposes only ready opaque navigation authority', async (
 });
 
 test('publication reader session returns only the selected opaque release descriptor', async () => {
+  const publicationUsers: string[] = [];
   const server = createReaderHttpServer({
     roots: new Map(),
     authorize: async () => null,
-    describePublication: async (publicationId) =>
-      publicationId === '42'
+    describePublication: async (publicationId, userId) => {
+      publicationUsers.push(userId);
+      return publicationId === '42'
         ? {
             releaseId: '9',
             release: {
@@ -194,7 +200,8 @@ test('publication reader session returns only the selected opaque release descri
               nextPublicationId: null,
             },
           }
-        : null,
+        : null;
+    },
   });
   const base = await listening(server);
   try {
@@ -213,7 +220,61 @@ test('publication reader session returns only the selected opaque release descri
         },
       },
     });
+    assert.deepEqual(publicationUsers, ['test-user']);
     assert.equal((await fetch(`${base}/api/reader/publications/9`)).status, 404);
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+  }
+});
+
+test('reader capability denial is uniform for descriptor, publication session, and page', async () => {
+  let descriptorCalls = 0;
+  let publicationCalls = 0;
+  let pageCalls = 0;
+  const server = createInternalReaderHttpServer({
+    roots: new Map(),
+    verifyCapability: (token, path) =>
+      token === 'valid'
+        ? {
+            v: 1,
+            aud: 'gutter-worker',
+            userId: 'user-hidden',
+            rootId: 'hidden-root',
+            path,
+            aclRevision: 4,
+            expiresAt: Math.floor(Date.now() / 1000) + 10,
+            nonce: 'b'.repeat(22),
+          }
+        : null,
+    describe: async () => (descriptorCalls++, null),
+    describePublication: async () => (publicationCalls++, null),
+    authorize: async () => (pageCalls++, null),
+  });
+  const base = await listening(server);
+  try {
+    const paths = [
+      '/api/reader/releases/42',
+      '/api/reader/publications/42',
+      '/api/reader/releases/42/pages/0',
+    ];
+    for (const path of paths) {
+      assert.equal(
+        (await fetch(`${base}${path}`, { headers: { 'x-gutter-reader-capability': 'valid' } }))
+          .status,
+        404,
+      );
+      assert.equal((await fetch(`${base}${path}`)).status, 404);
+      assert.equal(
+        (await fetch(`${base}${path}`, { headers: { 'x-gutter-reader-capability': 'forged' } }))
+          .status,
+        404,
+      );
+    }
+    assert.equal(descriptorCalls, 1);
+    assert.equal(publicationCalls, 1);
+    assert.equal(pageCalls, 1);
   } finally {
     await new Promise<void>((resolve, reject) =>
       server.close((error) => (error ? reject(error) : resolve())),

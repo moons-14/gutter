@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import {
   claimValidationIntents,
+  changeLibraryAccess,
   completeScanRun,
   completeValidationIntent,
   getReaderReleaseDescriptor,
@@ -23,6 +24,8 @@ if (
   throw new Error('page-validation integration requires the sentinel integration database');
 
 const rootId = `page-validation-${randomUUID()}`;
+const adminUserId = `page-validation-admin-${randomUUID()}`;
+const readerUserId = `page-validation-reader-${randomUUID()}`;
 const generation = 'b'.repeat(64);
 const summary: ScanSummary = {
   discovered: 1,
@@ -48,6 +51,17 @@ const item: ScanItem = {
 
 try {
   await migrateSchema();
+  await pool.query(
+    `insert into "user"(id,name,email,"createdAt","updatedAt",role,banned)
+     values($1,$1,$2,now(),now(), 'admin', false),
+           ($3,$3,$4,now(),now(), 'user', false)`,
+    [
+      adminUserId,
+      `${adminUserId}@example.invalid`,
+      readerUserId,
+      `${readerUserId}@example.invalid`,
+    ],
+  );
   await reconcileLibraryRoots(
     [
       {
@@ -60,6 +74,16 @@ try {
       },
     ],
     generation,
+  );
+  assert.equal(
+    await changeLibraryAccess(
+      adminUserId,
+      readerUserId,
+      rootId,
+      'grant',
+      `page-validation-grant-${randomUUID()}`,
+    ),
+    1,
   );
   const firstRun = await startScanRun(rootId, generation);
   assert.deepEqual(await persistScanItems(firstRun, rootId, [item]), { updated: 1, unchanged: 0 });
@@ -259,7 +283,7 @@ try {
       [rootId],
     )
   ).rows[0]!;
-  assert.deepEqual(await getReaderReleaseDescriptor(release.id), {
+  assert.deepEqual(await getReaderReleaseDescriptor(release.id, readerUserId), {
     progressKey: readerProgressKey(release.root_id, release.relative_path),
     revision: `${release.manifest_sha256}:3`,
     validOrdinals: [0],

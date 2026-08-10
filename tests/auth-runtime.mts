@@ -156,7 +156,33 @@ test('auth bootstrap, origin, proxy rate limit, revocation, disable, and logout'
        from generate_series(1,2) value returning id`,
       [rootId],
     );
-    for (const [index, row] of inserted.rows.entries())
+    for (const [index, row] of inserted.rows.entries()) {
+      const source = await database.query<{ id: string }>(
+        `insert into source_items(
+           root_id,relative_path,kind,size_bytes,mtime_ms,page_count,active,manifest_sha256)
+         values($1,$2,'cbz',1024,$3,1,true,$4)
+         returning id`,
+        [rootId, `runtime-${index + 1}.cbz`, index + 1, 'a'.repeat(64)],
+      );
+      const publication = await database.query<{ id: string }>(
+        `insert into catalog_publications(
+           series_id,identity_key,publication_identity_canonical_json,kind,
+           display_name,search_key,sort_key,volume,number_text)
+         values($1,$2,$3,'volume',$4,$5,$5,1,'1')
+         returning id`,
+        [
+          row.id,
+          (index + 1).toString(16).padStart(64, '0'),
+          JSON.stringify(['runtime-publication', index + 1]),
+          `Runtime publication ${index + 1}`,
+          `runtime publication ${index + 1}`,
+        ],
+      );
+      await database.query(
+        `insert into catalog_releases(publication_id,source_item_id,root_id,metadata_completeness)
+         values($1,$2,$3,100)`,
+        [publication.rows[0]!.id, source.rows[0]!.id, rootId],
+      );
       await database.query(
         `insert into catalog_series_list_state(
           series_id,library_id,display_name,sort_key,search_document,visible_publication_count,
@@ -164,6 +190,7 @@ test('auth bootstrap, origin, proxy rate limit, revocation, disable, and logout'
          values($1,$2,$3,$3,$3,1,$4,now(),now())`,
         [row.id, rootId, `Runtime series ${index + 1}`, index + 1],
       );
+    }
     const ordinary = new CookieJar();
     await expectStatus(
       'ordinary user login accepted',

@@ -48,7 +48,11 @@ for trusted local/LAN deployment, not Internet exposure. M2 watcher hints are op
 default-off, and never deletion truth. The M3 #20 validation reader keeps descriptors and page bytes
 worker-owned and network-only. Its route-local scheduler uses `cache: no-store`, owns/revokes a
 maximum three Blob URLs within 32 MiB, and persists only presentation and revision-aware progress.
-There is no auth, mutable root API, or external provider. Page
+Better Auth is released with a no-signup operator flow; library ACLs gate catalog and reader resume
+by root. Per-user state is durable PostgreSQL data, updated with compare-and-set revisions, while
+browser storage remains presentation-only. Hierarchy hide, export, and permanent delete retain
+tombstones and immutable audit rows under the retention policy, including across backup restore.
+There is no mutable root API or external provider. Page
 validation is a worker-only, read-only follow-up: it
 checks ZIP CRCs and fully decodes a first frame with sharp. Each page has a 128 MiB cap, an item has a
 2 GiB aggregate cap, and decoder input is capped at 100M pixels. Same-size/same-mtime replacement is
