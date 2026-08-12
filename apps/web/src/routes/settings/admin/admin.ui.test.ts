@@ -6,13 +6,18 @@ import { session } from '$lib/session';
 afterEach(() => {
   cleanup();
   session.set({ loading: true, user: null });
+  vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 
 test('selects a directory user and grants/revokes access without a typed user id', async () => {
+  vi.stubGlobal(
+    'confirm',
+    vi.fn(() => true),
+  );
   const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
     const url = String(input);
-    if (url.startsWith('/api/admin/users'))
+    if (url.startsWith('/api/admin/users?'))
       return new Response(
         JSON.stringify({
           items: [
@@ -51,22 +56,61 @@ test('selects a directory user and grants/revokes access without a typed user id
   expect(screen.queryByLabelText(/ユーザーID|内部ID/)).toBeNull();
 });
 
-test('renders empty and error states and sends bounded search/pagination requests', async () => {
+test('loads a non-empty directory page and appends its cursor continuation', async () => {
   const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
     const url = String(input);
     if (url === '/api/catalog/libraries') return new Response(JSON.stringify({ items: [] }));
     if (url.includes('cursor=next'))
-      return new Response(JSON.stringify({ items: [], nextCursor: null }));
-    return new Response(JSON.stringify({ items: [], nextCursor: 'next' }));
+      return new Response(
+        JSON.stringify({
+          items: [
+            {
+              id: 'second',
+              name: 'Second',
+              email: 'second@example.invalid',
+              role: 'user',
+              banned: false,
+            },
+          ],
+          nextCursor: null,
+        }),
+      );
+    return new Response(
+      JSON.stringify({
+        items: [
+          {
+            id: 'first',
+            name: 'First',
+            email: 'first@example.invalid',
+            role: 'user',
+            banned: false,
+          },
+        ],
+        nextCursor: 'next',
+      }),
+    );
   });
   session.set({ loading: false, user: { id: 'admin', role: 'admin' } });
   render(AdminSettings);
-  expect(await screen.findByText('ユーザーが見つかりません。')).toBeTruthy();
-  await fireEvent.input(screen.getByLabelText('ユーザー検索'), { target: { value: 'Reader' } });
-  await fireEvent.submit(screen.getByRole('button', { name: '検索' }).closest('form')!);
-  await waitFor(() =>
-    expect(fetcher.mock.calls.some(([url]) => String(url).includes('q=Reader'))).toBe(true),
+  await screen.findByText('First');
+  await fireEvent.click(screen.getByRole('button', { name: 'さらに読み込む' }));
+  await screen.findByText('Second');
+  expect(fetcher.mock.calls.some(([url]) => String(url).includes('cursor=next'))).toBe(true);
+});
+
+test('shows a directory error on a 500 response without showing an empty state', async () => {
+  const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const url = String(input);
+    if (url === '/api/catalog/libraries') return new Response(JSON.stringify({ items: [] }));
+    return new Response('{}', { status: 500 });
+  });
+  session.set({ loading: false, user: { id: 'admin', role: 'admin' } });
+  render(AdminSettings);
+  expect((await screen.findByRole('alert')).textContent).toContain(
+    'ユーザー一覧を読み込めませんでした',
   );
+  expect(screen.queryByText('ユーザーが見つかりません。')).toBeNull();
+  expect(fetcher).toHaveBeenCalled();
 });
 
 test('direct route gates anonymous and non-admin sessions without network requests', async () => {
@@ -193,4 +237,127 @@ test('switching admin identity clears A state and ignores A responses while load
   await waitFor(() => expect(screen.queryByText('Admin A private')).toBeNull());
   expect(screen.queryByText('Admin A stale')).toBeNull();
   expect(screen.getByText('Admin B only')).toBeTruthy();
+});
+
+test('permanent delete requires exact name, sends empty JSON, and keeps state on failure', async () => {
+  const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const url = String(input);
+    if (url.includes('/user-state')) return new Response('{}', { status: 500 });
+    if (url.startsWith('/api/admin/users?') && init?.method !== 'DELETE')
+      return new Response(
+        JSON.stringify({
+          items: [
+            {
+              id: 'opaque-user',
+              name: 'Reader',
+              email: 'reader@example.invalid',
+              role: 'user',
+              banned: false,
+            },
+          ],
+          nextCursor: null,
+        }),
+      );
+    if (url === '/api/catalog/libraries') return new Response(JSON.stringify({ items: [] }));
+    return new Response('{}');
+  });
+  vi.stubGlobal(
+    'prompt',
+    vi.fn(() => 'Reader'),
+  );
+  session.set({ loading: false, user: { id: 'admin', name: 'Admin', role: 'admin' } });
+  render(AdminSettings);
+  await fireEvent.click(await screen.findByRole('button', { name: /Reader/ }));
+  await fireEvent.click(screen.getByRole('button', { name: 'ユーザーを完全削除' }));
+  expect(
+    fetcher.mock.calls.some(
+      ([url, init]) =>
+        String(url).endsWith('/api/admin/users/opaque-user/user-state') &&
+        (init as RequestInit).method === 'DELETE' &&
+        (init as RequestInit).body === '{}' &&
+        (init as RequestInit).headers &&
+        (init as RequestInit).headers instanceof Object,
+    ),
+  ).toBe(true);
+  expect((await screen.findByRole('alert')).textContent).toContain('完全削除できませんでした');
+  expect(screen.getByRole('heading', { name: 'Reader のライブラリアクセス' })).toBeTruthy();
+});
+
+test('permanent delete clears selection only after a 200 response', async () => {
+  let resolveDelete!: (response: Response) => void;
+  let directoryCalls = 0;
+  const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const url = String(input);
+    if (url.includes('/user-state'))
+      return new Promise<Response>((resolve) => {
+        resolveDelete = resolve;
+      });
+    if (url.startsWith('/api/admin/users?')) {
+      directoryCalls++;
+      return new Response(
+        JSON.stringify({
+          items: [
+            {
+              id: 'opaque-user',
+              name: 'Reader',
+              email: 'reader@example.invalid',
+              role: 'user',
+              banned: false,
+            },
+          ],
+          nextCursor: null,
+        }),
+      );
+    }
+    if (url === '/api/catalog/libraries') return new Response(JSON.stringify({ items: [] }));
+    return new Response('{}');
+  });
+  vi.stubGlobal(
+    'prompt',
+    vi.fn(() => 'Reader'),
+  );
+  session.set({ loading: false, user: { id: 'admin', name: 'Admin', role: 'admin' } });
+  render(AdminSettings);
+  await fireEvent.click(await screen.findByRole('button', { name: /Reader/ }));
+  await fireEvent.click(screen.getByRole('button', { name: 'ユーザーを完全削除' }));
+  const call = fetcher.mock.calls.find(([url]) => String(url).includes('/user-state'))!;
+  expect((call[1] as RequestInit).method).toBe('DELETE');
+  expect((call[1] as RequestInit).body).toBe('{}');
+  expect((call[1] as RequestInit).headers).toEqual({ 'content-type': 'application/json' });
+  expect(screen.queryByText('ユーザーを完全削除しました。')).toBeNull();
+  expect(screen.getByText('Reader')).toBeTruthy();
+  resolveDelete(new Response('{}', { status: 200 }));
+  await screen.findByText('ユーザーを完全削除しました。');
+  expect(screen.queryByText('Reader')).toBeNull();
+  await waitFor(() => expect(directoryCalls).toBeGreaterThan(1));
+});
+
+test('blocks permanent self-delete before prompt or request', async () => {
+  const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(
+    async () =>
+      new Response(
+        JSON.stringify({
+          items: [
+            {
+              id: 'admin',
+              name: 'Admin',
+              email: 'admin@example.invalid',
+              role: 'admin',
+              banned: false,
+            },
+          ],
+          nextCursor: null,
+        }),
+      ),
+  );
+  const prompt = vi.fn();
+  vi.stubGlobal('prompt', prompt);
+  session.set({ loading: false, user: { id: 'admin', name: 'Admin', role: 'admin' } });
+  render(AdminSettings);
+  await fireEvent.click(await screen.findByRole('button', { name: /Admin/ }));
+  const deleteButton = screen.getByRole('button', { name: 'ユーザーを完全削除' });
+  await fireEvent.click(deleteButton);
+  expect(prompt).not.toHaveBeenCalled();
+  expect(fetcher.mock.calls.some(([url]) => String(url).includes('/user-state'))).toBe(false);
+  expect((await screen.findByRole('alert')).textContent).toContain('自分自身は削除できません');
 });

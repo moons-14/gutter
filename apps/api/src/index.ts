@@ -11,6 +11,7 @@ import {
   catalogSeriesRoute,
   healthRoute,
   adminUsersRoute,
+  adminUserStateDeleteRoute,
   readinessRoute,
   userStateBookmarkDeleteRoute,
   userStateBookmarkPostRoute,
@@ -217,7 +218,7 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
   });
   app.openapi(healthRoute, (c) => c.json({ status: 'ok' }, 200));
   app.post('/api/auth/bootstrap', async (c) => {
-    if (!trustedMutationOrigin(c.req.raw)) return c.json({ error: 'invalid_origin' }, 403);
+    if (!trustedMutationOrigin(c.req.raw)) return c.json({ error: 'invalid_origin' as const }, 403);
     const client = await pool.connect();
     try {
       // This session lock fences CLI recovery from an in-flight bootstrap request.
@@ -727,30 +728,34 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
         throw error;
       }
     });
-  app.delete('/admin/users/:id/user-state', async (c) => {
-    if (!trustedMutationOrigin(c.req.raw)) return c.json({ error: 'invalid_origin' }, 403);
+  app.openapi(adminUserStateDeleteRoute, async (c) => {
+    if (!trustedMutationOrigin(c.req.raw)) return c.json({ error: 'invalid_origin' as const }, 403);
     const actor = await authenticatedUser(c.req.raw);
-    if (!actor) return c.json({ error: 'authentication_required' }, 401);
+    if (!actor) return c.json({ error: 'authentication_required' as const }, 401);
+    if (actor.role !== 'admin') return c.json({ error: 'not_found' as const }, 404);
     const body = await userStateBody(c);
-    if (!hasOnlyKeys(body, [])) return c.json({ error: 'invalid_request' }, 400);
+    if (!body || !hasOnlyKeys(body, [])) return c.json({ error: 'invalid_request' as const }, 400);
+    const suppliedRequestId = c.req.header('x-request-id');
+    if (suppliedRequestId && !/^[A-Za-z0-9._:-]{1,128}$/.test(suppliedRequestId))
+      return c.json({ error: 'invalid_request' as const }, 400);
     try {
       return c.json(
         {
           deleted: await permanentlyDeleteUser(
             actor.id,
             c.req.param('id'),
-            c.req.header('x-request-id') ?? crypto.randomUUID(),
+            suppliedRequestId ?? crypto.randomUUID(),
           ),
         },
         200,
       );
     } catch (error) {
       if (error instanceof Error && error.message === 'admin_required')
-        return c.json({ error: 'not_found' }, 404);
+        return c.json({ error: 'not_found' as const }, 404);
       if (error instanceof Error && error.message === 'user_not_found')
-        return c.json({ error: 'not_found' }, 404);
+        return c.json({ error: 'not_found' as const }, 404);
       if (error instanceof Error && error.message === 'self_deletion_forbidden')
-        return c.json({ error: 'invalid_request' }, 400);
+        return c.json({ error: 'invalid_request' as const }, 400);
       throw error;
     }
   });

@@ -164,6 +164,88 @@ test('admin directory structured read event is bounded and contains no query or 
   assert.doesNotMatch(JSON.stringify(event), /Reader|reader@example|secret|cursor|q=/);
 });
 
+test('permanent user-state deletion uses the exact empty body and admin-only route', async () => {
+  const calls: unknown[] = [];
+  const app = makeApp({
+    authenticatedUser: async (request) =>
+      request.headers.get('authorization') === 'Bearer admin-a' ? admin : user,
+    permanentlyDeleteUser: async (...args) => {
+      calls.push(args);
+      return { session: 1 };
+    },
+  });
+  const denied = await app.fetch(
+    new Request('http://api/admin/users/user-a/user-state', {
+      method: 'DELETE',
+      headers: { authorization: 'Bearer user-a', origin, 'content-type': 'application/json' },
+      body: '{}',
+    }),
+  );
+  assert.equal(denied.status, 404);
+  const response = await app.fetch(
+    new Request('http://api/admin/users/subject-a/user-state', {
+      method: 'DELETE',
+      headers: {
+        authorization: 'Bearer admin-a',
+        origin,
+        'content-type': 'application/json',
+        'x-request-id': 'delete-request-1',
+      },
+      body: '{}',
+    }),
+  );
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { deleted: { session: 1 } });
+  assert.equal(calls.length, 1);
+  assert.equal((calls[0] as unknown[])[0], 'admin-a');
+  assert.equal((calls[0] as unknown[])[1], 'subject-a');
+  assert.equal((calls[0] as unknown[])[2], 'delete-request-1');
+  const generated = await app.fetch(
+    new Request('http://api/admin/users/subject-b/user-state', {
+      method: 'DELETE',
+      headers: { authorization: 'Bearer admin-a', origin, 'content-type': 'application/json' },
+      body: '{}',
+    }),
+  );
+  assert.equal(generated.status, 200);
+  assert.match(String((calls[1] as unknown[])[2]), /^[0-9a-f-]{36}$/);
+  const invalidId = await app.fetch(
+    new Request('http://api/admin/users/subject-a/user-state', {
+      method: 'DELETE',
+      headers: {
+        authorization: 'Bearer admin-a',
+        origin,
+        'content-type': 'application/json',
+        'x-request-id': 'bad id',
+      },
+      body: '{}',
+    }),
+  );
+  assert.equal(invalidId.status, 400);
+  for (const body of ['{"extra":true}', 'null', '[]', 'not-json']) {
+    const invalidBody = await app.fetch(
+      new Request('http://api/admin/users/subject-a/user-state', {
+        method: 'DELETE',
+        headers: { authorization: 'Bearer admin-a', origin, 'content-type': 'application/json' },
+        body,
+      }),
+    );
+    assert.equal(invalidBody.status, 400, body);
+  }
+  const invalidOrigin = await app.fetch(
+    new Request('http://api/admin/users/subject-a/user-state', {
+      method: 'DELETE',
+      headers: {
+        authorization: 'Bearer admin-a',
+        origin: 'http://foreign.invalid',
+        'content-type': 'application/json',
+      },
+      body: '{}',
+    }),
+  );
+  assert.equal(invalidOrigin.status, 403);
+});
+
 test('admin user directory preserves deterministic pages and rejects cursor/filter mutations', async () => {
   const calls: unknown[] = [];
   const app = makeApp({

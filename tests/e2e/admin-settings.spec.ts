@@ -40,6 +40,7 @@ test('Chrome admin settings selects a user and grants then revokes library acces
       body: JSON.stringify({ revision: 1 }),
     });
   });
+  page.on('dialog', (dialog) => dialog.accept());
   await page.goto('/settings/admin');
   await page.getByRole('button', { name: /Reader/ }).click();
   await page.getByRole('combobox').selectOption('root-a');
