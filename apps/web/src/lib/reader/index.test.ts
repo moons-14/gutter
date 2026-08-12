@@ -20,6 +20,7 @@ import {
 } from './index';
 
 const descriptor: ReaderDescriptor = {
+  rootId: 'root-1',
   progressKey: 'opaque-source-key',
   revision: 'revision:2',
   validOrdinals: [2, 4, 8, 10],

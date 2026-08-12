@@ -2,8 +2,10 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/sv
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Reader from './releases/[id]/+page.svelte';
 import { clearNextHandoff } from '$lib/reader';
+import { session } from '$lib/session';
 
 const release = {
+  rootId: 'root-1',
   progressKey: 'opaque-key',
   revision: 'sha:1',
   validOrdinals: [1, 3, 5],
@@ -16,6 +18,7 @@ afterEach(() => {
   clearNextHandoff();
   vi.unstubAllGlobals();
   localStorage.clear();
+  session.set({ loading: true, user: null });
 });
 
 beforeEach(() => {
@@ -118,6 +121,177 @@ describe('reader interaction UI', () => {
     await fireEvent.error(screen.getByRole('img', { name: 'ページ 2' }));
     expect(screen.getByRole('alert').textContent).toContain('表示できません');
     expect(screen.getByRole('button', { name: '前のページ' })).toBeTruthy();
+  });
+
+  it('loads authenticated remote progress once and preserves it as the resume choice', async () => {
+    session.set({ loading: false, user: { id: 'user-1' } });
+    const fetcher = vi.fn(async (input: string) =>
+      input.includes('/user-state/progress?')
+        ? {
+            ok: true,
+            status: 200,
+            json: async () => ({ progress: { revision: 4, pageOrdinal: 3 } }),
+          }
+        : input.includes('/pages/')
+          ? { ok: true, status: 200, blob: async () => new Blob(['page']) }
+          : { ok: true, status: 200, json: async () => ({ release }) },
+    );
+    vi.stubGlobal('fetch', fetcher);
+    render(Reader, { data: { id: '7' } });
+    await waitFor(() => expect(screen.getByRole('button', { name: '続きから読む' })).toBeTruthy());
+    expect(
+      fetcher.mock.calls.filter(([url]) => String(url).includes('/user-state/progress?')),
+    ).toHaveLength(1);
+  });
+
+  it('does not call remote user state while anonymous', async () => {
+    session.set({ loading: false, user: null });
+    const fetcher = readerFetch();
+    vi.stubGlobal('fetch', fetcher);
+    render(Reader, { data: { id: '7' } });
+    await waitFor(() => expect(screen.getByRole('button', { name: '次のページ' })).toBeTruthy());
+    expect(fetcher.mock.calls.some(([url]) => String(url).includes('/user-state/'))).toBe(false);
+  });
+
+  it('sends debounced CAS progress and bookmark requests with server-confirmed status', async () => {
+    session.set({ loading: false, user: { id: 'user-1' } });
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string, init?: RequestInit) => {
+        calls.push({ url: input, init });
+        if (input.includes('/user-state/progress?'))
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({ progress: { revision: 2, pageOrdinal: 1 } }),
+          };
+        if (input === '/api/user-state/progress')
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({ progress: { revision: 3, pageOrdinal: 5 } }),
+          };
+        if (input === '/api/user-state/bookmarks')
+          return { ok: true, status: 200, json: async () => ({ changed: true }) };
+        return input.includes('/pages/')
+          ? { ok: true, status: 200, blob: async () => new Blob(['page']) }
+          : { ok: true, status: 200, json: async () => ({ release }) };
+      }),
+    );
+    render(Reader, { data: { id: '7' } });
+    await waitFor(() => expect(screen.getByRole('button', { name: '次のページ' })).toBeTruthy());
+    await fireEvent.click(screen.getByRole('button', { name: '次のページ' }));
+    await fireEvent.click(screen.getByRole('button', { name: '次のページ' }));
+    await waitFor(() =>
+      expect(calls.some(({ url }) => url === '/api/user-state/progress')).toBe(true),
+    );
+    const progress = calls.find(({ url }) => url === '/api/user-state/progress')!;
+    expect(JSON.parse(String(progress.init?.body))).toMatchObject({
+      expectedRevision: 2,
+      pageOrdinal: 5,
+      completed: true,
+    });
+    await fireEvent.click(screen.getByRole('button', { name: 'しおりを保存' }));
+    await waitFor(() => expect(screen.getByText('しおりを保存しました。')).toBeTruthy());
+    const bookmark = calls.find(({ url }) => url === '/api/user-state/bookmarks')!;
+    expect(JSON.parse(String(bookmark.init?.body))).toEqual({
+      rootId: 'root-1',
+      progressKey: 'opaque-key',
+      pageOrdinal: 5,
+      label: null,
+    });
+  });
+
+  it('aborts a pending remote GET when the reader unmounts', async () => {
+    session.set({ loading: false, user: { id: 'user-1' } });
+    let remoteSignal: AbortSignal | undefined;
+    const fetcher = vi.fn(async (input: string, init?: RequestInit) => {
+      if (input.includes('/user-state/progress?')) {
+        remoteSignal = init?.signal as AbortSignal;
+        return await new Promise<never>(() => {});
+      }
+      return input.includes('/pages/')
+        ? { ok: true, status: 200, blob: async () => new Blob(['page']) }
+        : { ok: true, status: 200, json: async () => ({ release }) };
+    });
+    vi.stubGlobal('fetch', fetcher);
+    const view = render(Reader, { data: { id: '7' } });
+    await waitFor(() => expect(remoteSignal).toBeTruthy());
+    view.unmount();
+    expect(remoteSignal?.aborted).toBe(true);
+  });
+
+  it('adopts a valid 409 conflict and uses its revision on the next PUT', async () => {
+    session.set({ loading: false, user: { id: 'user-1' } });
+    const progressBodies: Record<string, unknown>[] = [];
+    const fetcher = vi.fn(async (input: string, init?: RequestInit) => {
+      if (input.includes('/user-state/progress?'))
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ progress: { revision: 1, pageOrdinal: 3 } }),
+        };
+      if (input === '/api/user-state/progress') {
+        progressBodies.push(JSON.parse(String(init?.body)));
+        if (progressBodies.length === 1)
+          return {
+            ok: false,
+            status: 409,
+            json: async () => ({
+              error: 'progress_conflict',
+              progress: { revision: 9, pageOrdinal: 5 },
+            }),
+          };
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ progress: { revision: 10, pageOrdinal: 5 } }),
+        };
+      }
+      return input.includes('/pages/')
+        ? { ok: true, status: 200, blob: async () => new Blob(['page']) }
+        : { ok: true, status: 200, json: async () => ({ release }) };
+    });
+    vi.stubGlobal('fetch', fetcher);
+    render(Reader, { data: { id: '7' } });
+    await waitFor(() => expect(screen.getByRole('button', { name: '次のページ' })).toBeTruthy());
+    await waitFor(() => expect(screen.getByRole('button', { name: '続きから読む' })).toBeTruthy());
+    await fireEvent.click(screen.getByRole('button', { name: '最初から読む' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    await fireEvent.click(screen.getByRole('button', { name: '次のページ' }));
+    await waitFor(() => expect(screen.getByText('2 / 3')).toBeTruthy());
+    await waitFor(() => expect(progressBodies).toHaveLength(1));
+    await waitFor(() => expect(screen.getByRole('button', { name: '続きから読む' })).toBeTruthy());
+    await fireEvent.click(screen.getByRole('button', { name: '続きから読む' }));
+    await waitFor(() => expect(screen.getByText('3 / 3')).toBeTruthy());
+    await waitFor(() => expect(progressBodies).toHaveLength(2));
+    expect(progressBodies[1]).toMatchObject({ expectedRevision: 9, pageOrdinal: 5 });
+  });
+
+  it('does not show bookmark success when the server reports changed:false', async () => {
+    session.set({ loading: false, user: { id: 'user-1' } });
+    const fetcher = vi.fn(async (input: string) => {
+      if (input.includes('/user-state/progress?'))
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ progress: { revision: 1, pageOrdinal: 1 } }),
+        };
+      if (input === '/api/user-state/bookmarks')
+        return { ok: true, status: 200, json: async () => ({ changed: false }) };
+      return input.includes('/pages/')
+        ? { ok: true, status: 200, blob: async () => new Blob(['page']) }
+        : { ok: true, status: 200, json: async () => ({ release }) };
+    });
+    vi.stubGlobal('fetch', fetcher);
+    render(Reader, { data: { id: '7' } });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'しおりを保存' })).toBeTruthy());
+    await fireEvent.click(screen.getByRole('button', { name: 'しおりを保存' }));
+    await waitFor(() =>
+      expect(fetcher.mock.calls.some(([url]) => url === '/api/user-state/bookmarks')).toBe(true),
+    );
+    expect(screen.queryByText('しおりを保存しました。')).toBeNull();
   });
 
   it('does not create an observer for paged or spread navigation', async () => {

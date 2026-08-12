@@ -1,5 +1,7 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
+  import { get } from 'svelte/store';
+  import { currentDestination, loginHref, session } from '$lib/session';
   import {
     canMove, defaultPresentation, gestureStep, loadPresentation, loadProgress, move,
     foregroundResourceKeys, pagePosition, PageResourceScheduler, retainedResourceKeys, savePresentation,
@@ -30,9 +32,31 @@
   let reader: HTMLElement;
   let fullscreen = false;
   let fullscreenError = '';
+  let remoteLoaded = false;
+  let remoteRevision = 0;
+  let lastRemoteOrdinal: number | null = null;
+  let remoteStatus = '';
+  let remoteError = '';
+  let bookmarkStatus = '';
+  let bookmarkError = '';
+  let progressTimer: ReturnType<typeof setTimeout> | null = null;
+  let remoteLoadGeneration = -1;
+  let remoteAbortController: AbortController | null = null;
+  let remotePutAbortController: AbortController | null = null;
+  let descriptorGeneration = 0;
   const visibility = new Map<number, number>();
 
   async function loadDescriptor(refresh = false) {
+    const generation = ++descriptorGeneration;
+    remoteAbortController?.abort();
+    remoteAbortController = null;
+    remotePutAbortController?.abort();
+    remotePutAbortController = null;
+    remoteLoadGeneration = -1;
+    if (progressTimer) {
+      clearTimeout(progressTimer);
+      progressTimer = null;
+    }
     try {
       error = '';
       nextSession = null;
@@ -61,6 +85,10 @@
       }
       pendingResume = saved;
       showResume = saved !== null && saved !== state.ordinal;
+      remoteLoaded = false;
+      remoteStatus = '';
+      remoteError = '';
+      void loadRemoteProgress(generation);
     } catch {
       error = 'このリリースは現在読めません。';
     } finally {
@@ -71,8 +99,105 @@
   onMount(() => { void loadDescriptor(); });
   onDestroy(() => {
     scheduler?.clear();
+    remoteAbortController?.abort();
+    remotePutAbortController?.abort();
     if (tapTimer) clearTimeout(tapTimer);
+    if (progressTimer) clearTimeout(progressTimer);
   });
+
+  async function loadRemoteProgress(generation = descriptorGeneration) {
+    const currentSession = get(session);
+    if (generation !== descriptorGeneration || !state || currentSession.loading || !currentSession.user || remoteLoaded || remoteLoadGeneration === generation) return;
+    remoteLoadGeneration = generation;
+    const descriptor = state.descriptor;
+    const controller = new AbortController();
+    remoteAbortController = controller;
+    try {
+      const response = await fetch(`/api/user-state/progress?rootId=${encodeURIComponent(descriptor.rootId)}&progressKey=${encodeURIComponent(descriptor.progressKey)}`, { signal: controller.signal });
+      if (generation !== descriptorGeneration || state?.descriptor !== descriptor) return;
+      if (response.status === 401) {
+        remoteError = 'ログインすると読書位置を同期できます。';
+        return;
+      }
+      if (!response.ok) throw new Error('remote_progress_unavailable');
+      const body = await response.json() as { progress?: { revision?: unknown; pageOrdinal?: unknown } | null };
+      const progress = body.progress;
+      const revision = progress && typeof progress.revision === 'number' && Number.isInteger(progress.revision) && progress.revision >= 0 ? progress.revision : 0;
+      remoteRevision = revision;
+      const ordinal = progress?.pageOrdinal;
+      if (typeof ordinal === 'number' && Number.isInteger(ordinal) && descriptor.validOrdinals.includes(ordinal)) {
+        pendingResume = ordinal;
+        showResume = ordinal !== state.ordinal;
+        state = { ...state, persistProgress: true };
+      }
+      lastRemoteOrdinal = state.ordinal;
+      remoteLoaded = true;
+    } catch {
+      if (generation === descriptorGeneration && !controller.signal.aborted) remoteError = '読書位置を同期できませんでした。';
+    } finally {
+      if (remoteAbortController === controller) remoteAbortController = null;
+    }
+  }
+
+  async function putRemoteProgress(ordinal: number) {
+    const currentSession = get(session);
+    if (!remoteLoaded || !currentSession.user || !state || !state.descriptor.validOrdinals.includes(ordinal)) return;
+    const generation = descriptorGeneration;
+    const descriptor = state.descriptor;
+    const controller = new AbortController();
+    remotePutAbortController?.abort();
+    remotePutAbortController = controller;
+    try {
+      const response = await fetch('/api/user-state/progress', {
+        method: 'PUT', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ rootId: descriptor.rootId, progressKey: descriptor.progressKey, expectedRevision: remoteRevision, pageOrdinal: ordinal, completed: ordinal === descriptor.validOrdinals.at(-1) }),
+        signal: controller.signal,
+      });
+      if (generation !== descriptorGeneration || state?.descriptor !== descriptor) return;
+      const body = await response.json().catch(() => ({})) as { progress?: { revision?: unknown; pageOrdinal?: unknown } | null };
+      if (response.status === 200 && body.progress && typeof body.progress.revision === 'number') {
+        remoteRevision = body.progress.revision;
+        lastRemoteOrdinal = ordinal;
+        remoteError = '';
+      } else if (response.status === 409 && body.progress) {
+        const progress = body.progress;
+        if (typeof progress.revision === 'number') remoteRevision = progress.revision;
+        if (typeof progress.pageOrdinal === 'number' && descriptor.validOrdinals.includes(progress.pageOrdinal)) {
+          pendingResume = progress.pageOrdinal;
+          showResume = progress.pageOrdinal !== state.ordinal;
+        }
+        remoteStatus = 'サーバー側の読書位置を採用しました。';
+        lastRemoteOrdinal = state.ordinal;
+      } else if (response.status === 401) remoteError = 'ログインすると読書位置を同期できます。';
+      else remoteError = '読書位置を同期できませんでした。';
+    } catch {
+      if (generation === descriptorGeneration && !controller.signal.aborted) remoteError = '読書位置を同期できませんでした。';
+    } finally {
+      if (remotePutAbortController === controller) remotePutAbortController = null;
+    }
+  }
+
+  async function addBookmark() {
+    if (!state || !get(session).user) return;
+    bookmarkStatus = ''; bookmarkError = '';
+    try {
+      const response = await fetch('/api/user-state/bookmarks', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ rootId: state.descriptor.rootId, progressKey: state.descriptor.progressKey, pageOrdinal: state.ordinal, label: null }),
+      });
+      const body = await response.json().catch(() => ({})) as { changed?: unknown };
+      if (response.status === 200 && body.changed === true) bookmarkStatus = 'しおりを保存しました。';
+      else if (response.status === 401) bookmarkError = 'ログインするとしおりを保存できます。';
+      else bookmarkError = 'しおりを保存できませんでした。';
+    } catch { bookmarkError = 'しおりを保存できませんでした。'; }
+  }
+
+  $: if (!$session.loading && $session.user && state && !remoteLoaded) void loadRemoteProgress();
+  $: if (remoteLoaded && state && $session.user && lastRemoteOrdinal !== state.ordinal) {
+    lastRemoteOrdinal = state.ordinal;
+    if (progressTimer) clearTimeout(progressTimer);
+    progressTimer = setTimeout(() => void putRemoteProgress(state!.ordinal), 250);
+  }
 
   function transferNext(key: string) {
     if (!scheduler || nextTransferred || !state?.descriptor.nextPublicationId || !nextSession) return;
@@ -275,6 +400,11 @@
       <button aria-label="拡大" onclick={() => updatePresentation({ zoom: Math.min(3, state!.presentation.zoom + .25) })}>拡大</button>
       <button aria-label="拡大をリセット" onclick={() => updatePresentation({ zoom: 1 })}>リセット</button>
       <button aria-label="全画面表示" aria-pressed={fullscreen} onclick={toggleFullscreen}>全画面</button>
+      {#if $session.user}<button aria-label="しおりを保存" onclick={() => void addBookmark()}>しおり</button>{:else if !$session.loading}<a href={loginHref(currentDestination())}>ログインして同期</a>{/if}
+      {#if bookmarkStatus}<span role="status" aria-live="polite">{bookmarkStatus}</span>{/if}
+      {#if bookmarkError}<span role="alert">{bookmarkError}</span>{/if}
+      {#if remoteStatus}<span role="status" aria-live="polite">{remoteStatus}</span>{/if}
+      {#if remoteError}<span role="status" aria-live="polite">{remoteError}</span>{/if}
       {#if fullscreenError}<span role="alert">{fullscreenError}<button onclick={toggleFullscreen}>再試行</button></span>{/if}
     </nav>
     {#if !canMove(state, 1)}

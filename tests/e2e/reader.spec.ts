@@ -1,6 +1,7 @@
 import { expect, test, type Page } from '@playwright/test';
 
 const release = {
+  rootId: 'root-playwright',
   progressKey: 'source:playwright',
   revision: 'revision:1',
   validOrdinals: [1, 3, 5],
@@ -58,4 +59,92 @@ test('reader reports a page failure honestly while offline', async ({ page }) =>
   await stubReader(page, true);
   await page.goto('/reader/publications/7');
   await expect(page.getByRole('alert')).toContainText('表示できません');
+});
+
+test('signed-in reader resumes, persists progress, and bookmarks the current page', async ({
+  page,
+}) => {
+  await page.route('**/api/auth/get-session', (route) =>
+    route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        user: { id: 'user-playwright', name: 'Reader', email: 'reader@example.test' },
+        session: { id: 'session-playwright', userId: 'user-playwright' },
+      }),
+    }),
+  );
+  await stubReader(page);
+
+  const progressPutBodies: Record<string, unknown>[] = [];
+  await page.route('**/api/user-state/progress**', async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (request.method() === 'GET') {
+      expect(url.searchParams.get('rootId')).toBe('root-playwright');
+      expect(url.searchParams.get('progressKey')).toBe('source:playwright');
+      return route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify({
+          progress: {
+            rootId: 'root-playwright',
+            progressKey: 'source:playwright',
+            pageOrdinal: 3,
+            completed: false,
+            revision: 4,
+          },
+        }),
+      });
+    }
+    expect(request.method()).toBe('PUT');
+    const body = request.postDataJSON() as Record<string, unknown>;
+    progressPutBodies.push(body);
+    return route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        progress: {
+          rootId: 'root-playwright',
+          progressKey: 'source:playwright',
+          pageOrdinal: body.pageOrdinal,
+          completed: body.completed,
+          revision: 5,
+        },
+      }),
+    });
+  });
+
+  let bookmarkBody: Record<string, unknown> | null = null;
+  await page.route('**/api/user-state/bookmarks', async (route) => {
+    expect(route.request().method()).toBe('POST');
+    bookmarkBody = route.request().postDataJSON() as Record<string, unknown>;
+    return route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ changed: true }),
+    });
+  });
+
+  await page.goto('/reader/publications/7');
+  await expect(page.getByRole('button', { name: '続きから読む' })).toBeVisible();
+  await expect(page.getByText('1 / 3')).toBeVisible();
+  await page.getByRole('button', { name: '続きから読む' }).click();
+  await expect(page.getByText('2 / 3')).toBeVisible();
+  await page.getByRole('button', { name: '次のページ' }).click();
+  await expect(page.getByText('3 / 3')).toBeVisible();
+  await expect
+    .poll(() => progressPutBodies)
+    .toContainEqual({
+      rootId: 'root-playwright',
+      progressKey: 'source:playwright',
+      expectedRevision: 4,
+      pageOrdinal: 5,
+      completed: true,
+    });
+
+  await page.getByRole('button', { name: 'しおりを保存' }).click();
+  await expect(page.getByRole('status')).toContainText('保存');
+  expect(bookmarkBody).toEqual({
+    rootId: 'root-playwright',
+    progressKey: 'source:playwright',
+    pageOrdinal: 5,
+    label: null,
+  });
 });

@@ -11,6 +11,19 @@ import {
   catalogSeriesRoute,
   healthRoute,
   readinessRoute,
+  userStateBookmarkDeleteRoute,
+  userStateBookmarkPostRoute,
+  userStateBookmarksRoute,
+  userStateCollectionDeleteRoute,
+  userStateCollectionMemberDeleteRoute,
+  userStateCollectionMemberPutRoute,
+  userStateCollectionMembersRoute,
+  userStateCollectionPostRoute,
+  userStateCollectionsRoute,
+  userStateProgressGetRoute,
+  userStateProgressPutRoute,
+  userStateTargetPutRoute,
+  userStateTargetsRoute,
 } from '@gutter/api-contract';
 import {
   assertSchema,
@@ -26,6 +39,12 @@ import {
   exportUserState,
   getUserProgress,
   getUserResume,
+  resolveUserProgressKey,
+  readerProgressKey,
+  listUserCollections,
+  listUserCollectionMembers,
+  listUserBookmarks,
+  listUserTargetState,
   isReaderPathVisible,
   authorizeUserStateResource,
   authorizeUserCollection,
@@ -67,6 +86,11 @@ export type ApiDeps = Readonly<{
   authorizeUserCollection?: typeof authorizeUserCollection;
   getUserProgress?: typeof getUserProgress;
   getUserResume?: typeof getUserResume;
+  resolveUserProgressKey?: typeof resolveUserProgressKey;
+  listUserCollections?: typeof listUserCollections;
+  listUserCollectionMembers?: typeof listUserCollectionMembers;
+  listUserBookmarks?: typeof listUserBookmarks;
+  listUserTargetState?: typeof listUserTargetState;
   isReaderPathVisible?: typeof isReaderPathVisible;
   putUserProgress?: typeof putUserProgress;
   setUserTargetState?: typeof setUserTargetState;
@@ -87,6 +111,11 @@ export const productionDeps: Required<ApiDeps> = {
   authorizeUserStateResource,
   getUserProgress,
   getUserResume,
+  resolveUserProgressKey,
+  listUserCollections,
+  listUserCollectionMembers,
+  listUserBookmarks,
+  listUserTargetState,
   isReaderPathVisible,
   putUserProgress,
   setUserTargetState,
@@ -111,6 +140,11 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
     authorizeUserStateResource,
     getUserProgress,
     getUserResume,
+    resolveUserProgressKey,
+    listUserCollections,
+    listUserCollectionMembers,
+    listUserBookmarks,
+    listUserTargetState,
     isReaderPathVisible,
     putUserProgress,
     setUserTargetState,
@@ -236,6 +270,7 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
     body === null || Object.keys(body).every((key) => allowed.includes(key));
   const userStateError = (c: any, error: unknown) => {
     const message = error instanceof Error ? error.message : '';
+    if (message === 'invalid_pagination_cursor') return c.json({ error: 'invalid_cursor' }, 400);
     if (message.startsWith('invalid_')) return c.json({ error: message }, 400);
     if (message === 'user_not_found') return c.json({ error: 'not_found' }, 404);
     throw error;
@@ -245,17 +280,41 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
     value: unknown,
   ): value is 'check' | 'series' | 'publication' | 'source' =>
     typeof value === 'string' && targetKinds.has(value);
-  app.use('/api/user-state/*', async (c, next) => {
+  const publicProgress = (progress: any) => {
+    if (!progress) return null;
+    const { sourceKey, userId: _userId, ...safe } = progress;
+    return {
+      ...safe,
+      progressKey:
+        sourceKey && progress.rootId ? readerProgressKey(progress.rootId, sourceKey) : undefined,
+    };
+  };
+  const publicUserStatePage = (page: {
+    items: readonly Record<string, unknown>[];
+    nextCursor: string | null;
+  }) => ({
+    items: page.items.map((item) => {
+      const {
+        sourceKey: _sourceKey,
+        relativePath: _relativePath,
+        sourceItemId: _sourceItemId,
+        ...safe
+      } = item;
+      return safe;
+    }),
+    nextCursor: page.nextCursor,
+  });
+  app.use('/user-state/*', async (c, next) => {
     if (!['GET', 'HEAD'].includes(c.req.method) && !trustedMutationOrigin(c.req.raw))
       return c.json({ error: 'invalid_origin' }, 403);
     if (!(await userStateUser(c.req.raw))) return c.json({ error: 'authentication_required' }, 401);
     await next();
   });
-  app.get('/api/user-state/export', async (c) => {
+  app.get('/user-state/export', async (c) => {
     const user = (await userStateUser(c.req.raw))!;
     return c.json(await exportUserState(user.id), 200);
   });
-  app.get('/api/user-state/resume', async (c) => {
+  app.get('/user-state/resume', async (c) => {
     const user = (await userStateUser(c.req.raw))!;
     const raw = c.req.query('limit');
     const limit = raw === undefined ? 30 : Number(raw);
@@ -263,53 +322,122 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
       return c.json({ error: 'invalid_resume_limit' }, 400);
     return c.json({ items: await getUserResume(user.id, limit) }, 200);
   });
-  app.get('/api/user-state/progress', async (c) => {
-    const user = (await userStateUser(c.req.raw))!;
-    const rootId = c.req.query('rootId');
-    const sourceKey = c.req.query('sourceKey');
-    if (!rootId || !sourceKey) return c.json({ error: 'invalid_user_progress_request' }, 400);
-    if (!(await authorizeUserStateResource(user.id, rootId, 'progress', sourceKey)))
-      return c.json({ error: 'not_found' }, 404);
+  const readPage = (c: any) => {
+    const limit = Number(c.req.query('limit') ?? 30);
+    const cursor = c.req.query('cursor');
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100)
+      return { error: 'invalid_pagination' as const };
+    return { limit, cursor };
+  };
+  app.openapi(userStateCollectionsRoute, async (c) => {
+    const user = (await userStateUser(c.req.raw))!,
+      page = readPage(c);
+    if ('error' in page) return c.json(page, 400);
     try {
-      return c.json({ progress: await getUserProgress(user.id, rootId, sourceKey) }, 200);
+      return c.json(
+        publicUserStatePage(await listUserCollections(user.id, page.limit, page.cursor)),
+        200,
+      );
     } catch (error) {
       return userStateError(c, error);
     }
   });
-  app.put('/api/user-state/progress', async (c) => {
+  app.openapi(userStateCollectionMembersRoute, async (c) => {
+    const user = (await userStateUser(c.req.raw))!,
+      id = Number(c.req.param('id')),
+      page = readPage(c);
+    if (!Number.isSafeInteger(id) || id < 1 || 'error' in page)
+      return c.json({ error: 'invalid_pagination' }, 400);
+    try {
+      const result = await listUserCollectionMembers(user.id, id, page.limit, page.cursor);
+      return result
+        ? c.json(publicUserStatePage(result), 200)
+        : c.json({ error: 'not_found' }, 404);
+    } catch (error) {
+      return userStateError(c, error);
+    }
+  });
+  app.openapi(userStateBookmarksRoute, async (c) => {
+    const user = (await userStateUser(c.req.raw))!,
+      page = readPage(c);
+    if ('error' in page) return c.json(page, 400);
+    try {
+      return c.json(
+        publicUserStatePage(await listUserBookmarks(user.id, page.limit, page.cursor)),
+        200,
+      );
+    } catch (error) {
+      return userStateError(c, error);
+    }
+  });
+  app.openapi(userStateTargetsRoute, async (c) => {
+    const user = (await userStateUser(c.req.raw))!,
+      page = readPage(c);
+    if ('error' in page) return c.json(page, 400);
+    try {
+      return c.json(
+        publicUserStatePage(await listUserTargetState(user.id, page.limit, page.cursor)),
+        200,
+      );
+    } catch (error) {
+      return userStateError(c, error);
+    }
+  });
+  app.openapi(userStateProgressGetRoute, async (c) => {
+    const user = (await userStateUser(c.req.raw))!;
+    const rootId = c.req.query('rootId');
+    const progressKey = c.req.query('progressKey');
+    if (!rootId || !progressKey) return c.json({ error: 'invalid_user_progress_request' }, 400);
+    const sourceKey = await resolveUserProgressKey(user.id, rootId, progressKey);
+    if (!sourceKey || !(await authorizeUserStateResource(user.id, rootId, 'progress', sourceKey)))
+      return c.json({ error: 'not_found' }, 404);
+    try {
+      return c.json(
+        { progress: publicProgress(await getUserProgress(user.id, rootId, sourceKey)) },
+        200,
+      );
+    } catch (error) {
+      return userStateError(c, error);
+    }
+  });
+  app.openapi(userStateProgressPutRoute, async (c) => {
     const user = (await userStateUser(c.req.raw))!;
     const body = await userStateBody(c);
     if (
       !body ||
-      !hasOnlyKeys(body, ['rootId', 'sourceKey', 'expectedRevision', 'pageOrdinal', 'completed']) ||
+      !hasOnlyKeys(body, [
+        'rootId',
+        'progressKey',
+        'expectedRevision',
+        'pageOrdinal',
+        'completed',
+      ]) ||
       typeof body.rootId !== 'string' ||
-      typeof body.sourceKey !== 'string' ||
+      typeof body.progressKey !== 'string' ||
       typeof body.expectedRevision !== 'number' ||
       typeof body.pageOrdinal !== 'number' ||
       typeof body.completed !== 'boolean'
     )
       return c.json({ error: 'invalid_user_progress_request' }, 400);
-    if (!(await authorizeUserStateResource(user.id, body.rootId, 'progress', body.sourceKey)))
+    const sourceKey = await resolveUserProgressKey(user.id, body.rootId, body.progressKey);
+    if (
+      !sourceKey ||
+      !(await authorizeUserStateResource(user.id, body.rootId, 'progress', sourceKey))
+    )
       return c.json({ error: 'not_found' }, 404);
     try {
-      const result = await putUserProgress(
-        user.id,
-        body.rootId,
-        body.sourceKey,
-        body.expectedRevision,
-        {
-          pageOrdinal: body.pageOrdinal,
-          completed: body.completed,
-        },
-      );
+      const result = await putUserProgress(user.id, body.rootId, sourceKey, body.expectedRevision, {
+        pageOrdinal: body.pageOrdinal,
+        completed: body.completed,
+      });
       return result.ok
-        ? c.json({ progress: result.current }, 200)
-        : c.json({ error: 'progress_conflict', progress: result.current }, 409);
+        ? c.json({ progress: publicProgress(result.current) }, 200)
+        : c.json({ error: 'progress_conflict', progress: publicProgress(result.current) }, 409);
     } catch (error) {
       return userStateError(c, error);
     }
   });
-  app.put('/api/user-state/target', async (c) => {
+  app.openapi(userStateTargetPutRoute, async (c) => {
     const user = (await userStateUser(c.req.raw))!;
     const body = await userStateBody(c);
     if (
@@ -337,12 +465,21 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
       return c.json({ error: 'invalid_user_target_state' }, 400);
     try {
       const { rootId, targetKind, targetKey, ...value } = body;
+      const includeHidden = value.hidden === false;
+      const resolvedTargetKey =
+        targetKind === 'source' || targetKind === 'check'
+          ? await resolveUserProgressKey(user.id, rootId as string, targetKey as string, {
+              includeHidden,
+            })
+          : (targetKey as string);
       if (
+        !resolvedTargetKey ||
         !(await authorizeUserStateResource(
           user.id,
           rootId as string,
           targetKind as any,
-          targetKey as string,
+          resolvedTargetKey,
+          { includeHidden },
         ))
       )
         return c.json({ error: 'not_found' }, 404);
@@ -352,7 +489,7 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
             user.id,
             rootId,
             targetKind as any,
-            targetKey,
+            resolvedTargetKey,
             value as any,
           ),
         },
@@ -362,19 +499,23 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
       return userStateError(c, error);
     }
   });
-  app.post('/api/user-state/bookmarks', async (c) => {
+  app.openapi(userStateBookmarkPostRoute, async (c) => {
     const user = (await userStateUser(c.req.raw))!;
     const body = await userStateBody(c);
     if (
       !body ||
-      !hasOnlyKeys(body, ['rootId', 'sourceKey', 'pageOrdinal', 'label']) ||
+      !hasOnlyKeys(body, ['rootId', 'progressKey', 'pageOrdinal', 'label']) ||
       typeof body.rootId !== 'string' ||
-      typeof body.sourceKey !== 'string' ||
+      typeof body.progressKey !== 'string' ||
       typeof body.pageOrdinal !== 'number' ||
       ('label' in body && body.label !== null && typeof body.label !== 'string')
     )
       return c.json({ error: 'invalid_bookmark_request' }, 400);
-    if (!(await authorizeUserStateResource(user.id, body.rootId, 'progress', body.sourceKey)))
+    const sourceKey = await resolveUserProgressKey(user.id, body.rootId, body.progressKey);
+    if (
+      !sourceKey ||
+      !(await authorizeUserStateResource(user.id, body.rootId, 'progress', sourceKey))
+    )
       return c.json({ error: 'not_found' }, 404);
     try {
       return c.json(
@@ -382,7 +523,7 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
           changed: await addUserBookmark(
             user.id,
             body.rootId,
-            body.sourceKey,
+            sourceKey,
             body.pageOrdinal,
             typeof body.label === 'string' ? body.label : null,
           ),
@@ -393,14 +534,15 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
       return userStateError(c, error);
     }
   });
-  app.delete('/api/user-state/bookmarks', async (c) => {
+  app.openapi(userStateBookmarkDeleteRoute, async (c) => {
     const user = (await userStateUser(c.req.raw))!;
     const rootId = c.req.query('rootId'),
-      sourceKey = c.req.query('sourceKey'),
+      progressKey = c.req.query('progressKey'),
       ordinal = Number(c.req.query('pageOrdinal'));
-    if (!rootId || !sourceKey || !Number.isInteger(ordinal))
+    if (!rootId || !progressKey || !Number.isInteger(ordinal))
       return c.json({ error: 'invalid_bookmark_request' }, 400);
-    if (!(await authorizeUserStateResource(user.id, rootId, 'progress', sourceKey)))
+    const sourceKey = await resolveUserProgressKey(user.id, rootId, progressKey);
+    if (!sourceKey || !(await authorizeUserStateResource(user.id, rootId, 'progress', sourceKey)))
       return c.json({ error: 'not_found' }, 404);
     try {
       return c.json(
@@ -411,7 +553,7 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
       return userStateError(c, error);
     }
   });
-  app.post('/api/user-state/collections', async (c) => {
+  app.openapi(userStateCollectionPostRoute, async (c) => {
     const user = (await userStateUser(c.req.raw))!,
       body = await userStateBody(c);
     if (!body || !hasOnlyKeys(body, ['name']) || typeof body.name !== 'string')
@@ -422,7 +564,7 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
       return userStateError(c, error);
     }
   });
-  app.delete('/api/user-state/collections/:id', async (c) => {
+  app.openapi(userStateCollectionDeleteRoute, async (c) => {
     const user = (await userStateUser(c.req.raw))!,
       id = Number(c.req.param('id'));
     const body = await userStateBody(c);
@@ -431,7 +573,7 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
     if (!(await authorizeUserCollection(user.id, id))) return c.json({ error: 'not_found' }, 404);
     return c.json({ changed: await deleteUserCollection(user.id, id) }, 200);
   });
-  app.put('/api/user-state/collections/:id/members', async (c) => {
+  app.openapi(userStateCollectionMemberPutRoute, async (c) => {
     const user = (await userStateUser(c.req.raw))!,
       id = Number(c.req.param('id')),
       body = await userStateBody(c);
@@ -447,7 +589,14 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
     )
       return c.json({ error: 'invalid_collection_member_request' }, 400);
     if (!(await authorizeUserCollection(user.id, id))) return c.json({ error: 'not_found' }, 404);
-    if (!(await authorizeUserStateResource(user.id, body.rootId, body.targetKind, body.targetKey)))
+    const resolvedTargetKey =
+      body.targetKind === 'source' || body.targetKind === 'check'
+        ? await resolveUserProgressKey(user.id, body.rootId, body.targetKey)
+        : body.targetKey;
+    if (
+      !resolvedTargetKey ||
+      !(await authorizeUserStateResource(user.id, body.rootId, body.targetKind, resolvedTargetKey))
+    )
       return c.json({ error: 'not_found' }, 404);
     try {
       return c.json(
@@ -457,7 +606,7 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
             id,
             body.rootId,
             body.targetKind,
-            body.targetKey,
+            resolvedTargetKey,
             body.member,
           ),
         },
@@ -467,7 +616,7 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
       return userStateError(c, error);
     }
   });
-  app.delete('/api/user-state/collections/:id/members', async (c) => {
+  app.openapi(userStateCollectionMemberDeleteRoute, async (c) => {
     const user = (await userStateUser(c.req.raw))!,
       id = Number(c.req.param('id')),
       body = await userStateBody(c);
@@ -482,7 +631,14 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
     )
       return c.json({ error: 'invalid_collection_member_request' }, 400);
     if (!(await authorizeUserCollection(user.id, id))) return c.json({ error: 'not_found' }, 404);
-    if (!(await authorizeUserStateResource(user.id, body.rootId, body.targetKind, body.targetKey)))
+    const resolvedTargetKey =
+      body.targetKind === 'source' || body.targetKind === 'check'
+        ? await resolveUserProgressKey(user.id, body.rootId, body.targetKey)
+        : body.targetKey;
+    if (
+      !resolvedTargetKey ||
+      !(await authorizeUserStateResource(user.id, body.rootId, body.targetKind, resolvedTargetKey))
+    )
       return c.json({ error: 'not_found' }, 404);
     try {
       return c.json(
@@ -492,7 +648,7 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
             id,
             body.rootId,
             body.targetKind,
-            body.targetKey,
+            resolvedTargetKey,
             false,
           ),
         },
