@@ -100,6 +100,16 @@ test('auth bootstrap, origin, proxy rate limit, revocation, disable, and logout'
       403,
     );
     await expectStatus(
+      'foreign-origin bootstrap denied',
+      post(
+        new CookieJar(),
+        '/api/auth/bootstrap',
+        { name: 'blocked', email, password },
+        'http://foreign.invalid',
+      ),
+      403,
+    );
+    await expectStatus(
       'first bootstrap accepted',
       post(jar, '/api/auth/bootstrap', { name: 'admin', email, password }),
       200,
