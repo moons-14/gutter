@@ -38,6 +38,7 @@
       <a href="/creators">作家</a>
       <a href="/groups">グループ</a>
       <a href="/publishers">出版社</a>
+      {#if $session.user?.role === 'admin'}<a href="/settings/admin">管理者設定</a>{/if}
     </nav>
     <div class="session-actions">
       {#if $session.loading}

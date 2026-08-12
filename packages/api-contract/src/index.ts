@@ -15,6 +15,55 @@ export const readinessRoute = createRoute({
 });
 export const schemaVersionResponse = z.object({ schemaVersion: z.string() });
 
+export const adminUsersCursor = z.string().min(1).max(1024);
+export const adminUsersQuery = z
+  .object({
+    q: z.string().max(256).optional(),
+    limit: z.coerce.number().int().min(1).max(100).default(30),
+    cursor: adminUsersCursor.optional(),
+  })
+  .strict();
+export const adminUser = z
+  .object({
+    id: z.string().min(1),
+    name: z.string(),
+    email: z.string(),
+    role: z.string().nullable(),
+    banned: z.boolean(),
+  })
+  .strict();
+export const adminUsersResponse = z
+  .object({ items: z.array(adminUser), nextCursor: adminUsersCursor.nullable() })
+  .strict();
+export const adminUsersErrorResponse = z
+  .object({
+    error: z.enum(['authentication_required', 'invalid_request', 'invalid_cursor', 'not_found']),
+  })
+  .strict();
+export const adminUsersRoute = createRoute({
+  method: 'get',
+  path: '/admin/users',
+  request: { query: adminUsersQuery },
+  responses: {
+    200: {
+      description: 'admin-only user directory',
+      content: { 'application/json': { schema: adminUsersResponse } },
+    },
+    400: {
+      description: 'invalid request',
+      content: { 'application/json': { schema: adminUsersErrorResponse } },
+    },
+    401: {
+      description: 'authentication required',
+      content: { 'application/json': { schema: adminUsersErrorResponse } },
+    },
+    404: {
+      description: 'not found',
+      content: { 'application/json': { schema: adminUsersErrorResponse } },
+    },
+  },
+});
+
 const decimalId = z.string().regex(/^[1-9][0-9]*$/);
 
 /** Opaque, server-issued user-state identities and pagination contracts. */

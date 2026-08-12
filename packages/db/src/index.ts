@@ -1,9 +1,9 @@
-import { databaseUrl, schemaVersion } from '@gutter/config';
+import { authConfig, databaseUrl, schemaVersion } from '@gutter/config';
 import type { LibraryRootSnapshot } from '@gutter/library-roots';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
 import { fileURLToPath } from 'node:url';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import {
   canonicalIdentity,
   cursorFilterHash,
@@ -46,6 +46,110 @@ export type LibraryAccessScope = Readonly<{
   scopeHash: string;
   userStateRevision?: number;
 }>;
+
+export type AdminUser = Readonly<{
+  id: string;
+  name: string;
+  email: string;
+  role: string | null;
+  banned: boolean;
+}>;
+
+type AdminUsersCursor = Readonly<{
+  endpoint: 'admin-users';
+  createdAt: string;
+  id: string;
+  filter: string;
+}>;
+const adminUsersCursorFilter = (q: string) => createHash('sha256').update(q, 'utf8').digest('hex');
+let adminUsersCursorKey: Promise<Buffer> | undefined;
+const getAdminUsersCursorKey = () => {
+  adminUsersCursorKey ??= authConfig().then(({ secret }) =>
+    createHash('sha256').update(secret, 'utf8').digest(),
+  );
+  return adminUsersCursorKey;
+};
+const encodeAdminUsersCursor = async (cursor: AdminUsersCursor): Promise<string> => {
+  const payload = Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url');
+  const mac = createHmac('sha256', await getAdminUsersCursorKey())
+    .update(payload, 'ascii')
+    .digest('base64url');
+  return `${payload}.${mac}`;
+};
+const decodeAdminUsersCursor = async (value: string, q: string): Promise<AdminUsersCursor> => {
+  try {
+    const [payload, encodedMac] = value.split('.');
+    if (
+      !payload ||
+      !encodedMac ||
+      !/^[A-Za-z0-9_-]+$/.test(payload) ||
+      !/^[A-Za-z0-9_-]+$/.test(encodedMac)
+    )
+      throw new Error('invalid_cursor');
+    const expectedMac = createHmac('sha256', await getAdminUsersCursorKey())
+      .update(payload, 'ascii')
+      .digest();
+    const receivedMac = Buffer.from(encodedMac, 'base64url');
+    if (receivedMac.length !== expectedMac.length || !timingSafeEqual(receivedMac, expectedMac))
+      throw new Error('invalid_cursor');
+    const decoded = JSON.parse(
+      Buffer.from(payload, 'base64url').toString('utf8'),
+    ) as Partial<AdminUsersCursor>;
+    if (
+      decoded.endpoint !== 'admin-users' ||
+      typeof decoded.createdAt !== 'string' ||
+      !decoded.id ||
+      typeof decoded.id !== 'string' ||
+      decoded.filter !== adminUsersCursorFilter(q) ||
+      Number.isNaN(Date.parse(decoded.createdAt))
+    )
+      throw new Error('invalid_cursor');
+    return decoded as AdminUsersCursor;
+  } catch {
+    throw new Error('invalid_cursor');
+  }
+};
+
+export async function listAdminUsers(
+  query: Readonly<{ q?: string; limit: number; cursor?: string }>,
+): Promise<{ items: AdminUser[]; nextCursor: string | null }> {
+  const q = query.q?.trim().toLocaleLowerCase('en-US') ?? '';
+  const cursor = query.cursor ? await decodeAdminUsersCursor(query.cursor, q) : null;
+  const params: unknown[] = [];
+  const filters: string[] = [];
+  if (q) {
+    const escaped = q.replace(/[\\%_]/g, (value) => `\\${value}`);
+    params.push(`%${escaped}%`);
+    filters.push(
+      `(u.name ilike $${params.length} escape '\\' or u.email ilike $${params.length} escape '\\')`,
+    );
+  }
+  if (cursor) {
+    params.push(cursor.createdAt, cursor.id);
+    filters.push(`(u."createdAt",u.id)<($${params.length - 1},$${params.length})`);
+  }
+  params.push(query.limit + 1);
+  const result = await pool.query<AdminUser & { createdAt: string }>(
+    `select u.id,u.name,u.email,u.role,coalesce(u.banned,false) as banned,u."createdAt" as "createdAt" from "user" u
+     ${filters.length ? `where ${filters.join(' and ')}` : ''}
+     order by u."createdAt" desc,u.id desc limit $${params.length}`,
+    params,
+  );
+  const rows = result.rows.slice(0, query.limit);
+  const last = rows.at(-1);
+  return {
+    items: rows.map(({ createdAt: _createdAt, ...user }) => user),
+    nextCursor:
+      result.rows.length > query.limit && last
+        ? await encodeAdminUsersCursor({
+            endpoint: 'admin-users',
+            createdAt: last.createdAt,
+            id: last.id,
+            filter: adminUsersCursorFilter(q),
+          })
+        : null,
+  };
+}
 
 export async function libraryAccessScope(userId: string): Promise<LibraryAccessScope> {
   const user = await pool.query<{ role: string | null }>('select role from "user" where id=$1', [
