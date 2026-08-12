@@ -65,7 +65,7 @@
       {:else}<ul class="resume-list">{#each resumeItems as item}<li><a href={`/reader/releases/${item.releaseId}`}><strong>リリース {item.releaseId}</strong><span>{item.completed ? '読了' : `ページ ${item.pageOrdinal} から再開`}</span><b>読む →</b></a></li>{/each}</ul>{/if}
     </section>
   {:else}
-    <section class="resume" aria-labelledby="resume-title"><h2 id="resume-title">続きから読む</h2><p>ログインすると、読書位置を同期して続きから読めます。</p><a class="login" href={loginHref(currentDestination())}>ログインして同期</a></section>
+    <section class="resume" aria-labelledby="resume-title"><h2 id="resume-title">続きから読む</h2><p>ログインすると、読書位置を同期して続きから読めます。</p><a class="login" href={loginHref(currentDestination())}>ログインして読書位置を同期</a></section>
   {/if}
   <nav aria-label="カタログを探す"><a href="/creators">作家</a><a href="/groups">グループ</a><a href="/publishers">出版社</a></nav>
   <form onsubmit={(event) => { event.preventDefault(); void load(); }}>
