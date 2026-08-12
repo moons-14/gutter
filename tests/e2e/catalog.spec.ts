@@ -1,6 +1,20 @@
 import { expect, test } from '@playwright/test';
 
 test('catalog navigation reaches a permitted reader entry', async ({ page }) => {
+  await page.route('**/api/reader/releases/42', (route) =>
+    route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        release: {
+          rootId: 'root',
+          progressKey: 'source:x',
+          revision: 'r',
+          validOrdinals: [1],
+          validPageCount: 1,
+        },
+      }),
+    }),
+  );
   await page.route('**/api/catalog/series?**', (route) =>
     route.fulfill({
       contentType: 'application/json',
@@ -46,4 +60,33 @@ test('catalog exposes an explicit empty state', async ({ page }) => {
   );
   await page.goto('/');
   await expect(page.getByRole('heading', { name: '作品はまだありません' })).toBeVisible();
+});
+
+test('signed-in catalog exposes resume entries that open the release reader', async ({ page }) => {
+  let sessionRequests = 0;
+  await page.route('**/api/auth/get-session**', (route) => {
+    sessionRequests += 1;
+    return route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        user: { id: 'resume-user', name: 'Reader' },
+        session: { id: 'session' },
+      }),
+    });
+  });
+  await page.route('**/api/catalog/series?**', (route) =>
+    route.fulfill({ contentType: 'application/json', body: JSON.stringify({ items: [] }) }),
+  );
+  await page.route('**/api/user-state/resume?**', (route) =>
+    route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ items: [{ releaseId: '42', pageOrdinal: 3, completed: false }] }),
+    }),
+  );
+  await page.goto('/');
+  await expect.poll(() => sessionRequests).toBeGreaterThan(0);
+  await expect(page.getByRole('link', { name: /リリース 42/ })).toHaveAttribute(
+    'href',
+    '/reader/releases/42',
+  );
 });
