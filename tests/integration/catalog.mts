@@ -273,7 +273,10 @@ try {
       releases: { rootId: string; progressKey: string; isPreferred: boolean }[];
     } | null;
   assert.equal((await selected())?.releases[0]?.rootId, behaviorRoot);
-    assert.equal((await selected())?.releases[0]?.progressKey, readerProgressKey(behaviorRoot, 'first.cbz'));
+  assert.equal(
+    (await selected())?.releases[0]?.progressKey,
+    readerProgressKey(behaviorRoot, 'first.cbz'),
+  );
   assert.equal('relativePath' in ((await selected())?.releases[0] ?? {}), false);
   assert.equal('sourceItemId' in ((await selected())?.releases[0] ?? {}), false);
   assert.equal('sourceKey' in ((await selected())?.releases[0] ?? {}), false);
