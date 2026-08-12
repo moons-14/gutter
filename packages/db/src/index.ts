@@ -94,14 +94,19 @@ export async function authorizeUserStateResource(
   rootId: string,
   kind: UserTargetKind | 'progress',
   key: string,
+  options: { includeHidden?: boolean } = {},
 ): Promise<boolean> {
   const scope = await libraryAccessScope(userId);
   if (!canAccessLibrary(scope, rootId)) return false;
+  const releaseVisibility = options.includeHidden
+    ? `and not exists (select 1 from global_source_suppressions gs where gs.source_item_id=i.id)`
+    : `and gutter_user_can_read_release($1,r.id)`;
   if (kind === 'progress' || kind === 'check' || kind === 'source')
     return Boolean(
       (
         await pool.query(
-          'select 1 from visible_source_items where root_id=$1 and relative_path=$2 limit 1',
+          `select 1 from visible_source_items i join catalog_releases r on r.source_item_id=i.id
+             where i.root_id=$1 and i.relative_path=$2 and i.active and i.quarantine_reason is null ${releaseVisibility} limit 1`,
           [rootId, normalizeUserSourceKey(key)],
         )
       ).rowCount,
@@ -110,7 +115,7 @@ export async function authorizeUserStateResource(
     return Boolean(
       (
         await pool.query(
-          'select 1 from catalog_series s where s.library_id=$1 and s.identity_key=$2 and exists (select 1 from catalog_publications p join catalog_releases r on r.publication_id=p.id join visible_source_items i on i.id=r.source_item_id where p.series_id=s.id)',
+          `select 1 from catalog_series s where s.library_id=$1 and s.identity_key=$2 and exists (select 1 from catalog_publications p join catalog_releases r on r.publication_id=p.id join visible_source_items i on i.id=r.source_item_id and i.quarantine_reason is null where p.series_id=s.id ${releaseVisibility})`,
           [rootId, key],
         )
       ).rowCount,
@@ -120,7 +125,7 @@ export async function authorizeUserStateResource(
   return Boolean(
     (
       await pool.query(
-        'select 1 from catalog_publications p join catalog_series s on s.id=p.series_id where s.library_id=$1 and s.identity_key=$2 and p.identity_key=$3 and exists (select 1 from catalog_releases r join visible_source_items i on i.id=r.source_item_id where r.publication_id=p.id)',
+        `select 1 from catalog_publications p join catalog_series s on s.id=p.series_id where s.library_id=$1 and s.identity_key=$2 and p.identity_key=$3 and exists (select 1 from catalog_releases r join visible_source_items i on i.id=r.source_item_id and i.quarantine_reason is null where r.publication_id=p.id ${releaseVisibility})`,
         [rootId, split[0], split[1]],
       )
     ).rowCount,
@@ -251,6 +256,49 @@ export async function getUserProgress(
   return result.rows[0] ? progressFromRow(result.rows[0]) : null;
 }
 
+/** Resolve a browser progress key only against visible candidates in the requester's scope. */
+export async function resolveUserProgressKey(
+  userId: string,
+  rootId: string,
+  progressKey: string,
+  options: { includeHidden?: boolean } = {},
+): Promise<string | null> {
+  if (typeof progressKey !== 'string' || !/^source:[A-Za-z0-9_-]+$/.test(progressKey)) return null;
+  const scope = await libraryAccessScope(userId);
+  if (!canAccessLibrary(scope, rootId)) return null;
+  // PostgreSQL 18 provides sha256(bytea), so resolve the opaque identity in SQL
+  // while the path remains server-side. The view plus ACL/root predicates are
+  // deliberately repeated here: a progress key is valid only for a current,
+  // readable source candidate.
+  const hiddenPredicate = options.includeHidden
+    ? ''
+    : `
+        and not exists (
+          select 1 from user_target_state h
+           where h.user_id=$3 and h.root_id=i.root_id and h.hidden
+             and h.target_kind in ('source','check') and h.target_key=i.relative_path
+        )`;
+  const rows = await pool.query<{ relative_path: string }>(
+    `select i.relative_path
+       from visible_source_items i
+      where i.root_id=$1
+        and i.active and i.quarantine_reason is null
+        and exists (select 1 from library_roots r where r.id=i.root_id and r.active)
+        and (exists (select 1 from library_access_grants g where g.user_id=$3 and g.root_id=i.root_id)
+             or exists (select 1 from "user" u where u.id=$3 and u.role='admin'))
+        and not exists (
+          select 1 from global_source_suppressions x where x.source_item_id=i.id
+        )
+        ${hiddenPredicate}
+        and 'source:' || rtrim(translate(
+          encode(sha256(convert_to(i.root_id,'UTF8') || decode('00','hex') || convert_to(i.relative_path,'UTF8')),'base64'),
+          '+/','-_'),'=') = $2
+      limit 1`,
+    [rootId, progressKey, userId],
+  );
+  return rows.rows[0]?.relative_path ?? null;
+}
+
 /** Returns authenticated resume entries without exposing source paths or inventory metadata. */
 export async function getUserResume(
   userId: string,
@@ -259,8 +307,8 @@ export async function getUserResume(
   const bounded = Math.min(Math.max(Math.trunc(limit), 1), 100);
   return (
     await pool.query(
-      `select r.id::text as "releaseId",up.page_ordinal as "pageOrdinal",up.completed,up.revision,
-      up.last_read_at as "lastReadAt"
+      `select r.id::text as "releaseId",up.root_id as "rootId",up.page_ordinal as "pageOrdinal",up.completed,up.revision,
+      up.last_read_at as "lastReadAt",i.relative_path as "relativePath"
      from user_progress up join catalog_releases r on r.root_id=up.root_id
      join visible_source_items i on i.id=r.source_item_id and i.relative_path=up.source_key
      join catalog_publications p on p.id=r.publication_id join catalog_series s on s.id=p.series_id
@@ -271,7 +319,211 @@ export async function getUserResume(
      order by up.last_read_at desc limit $2`,
       [userId, bounded],
     )
+  ).rows.map(({ relativePath, ...row }) => ({
+    ...row,
+    progressKey: readerProgressKey(row.rootId ?? '', relativePath),
+  }));
+}
+
+export type UserStatePage<T> = Readonly<{ items: T[]; nextCursor: string | null }>;
+const userStatePage = (value: unknown, fallback = 30): number => {
+  const n = typeof value === 'number' ? value : Number(value ?? fallback);
+  if (!Number.isSafeInteger(n) || n < 1 || n > 100) throw new Error('invalid_pagination');
+  return n;
+};
+type UserStateCursor = Readonly<{
+  userId: string;
+  endpoint: string;
+  collectionId?: number;
+  scopeHash: string;
+  userStateRevision: number;
+  key: readonly string[];
+  digest: string;
+}>;
+const cursorText = (value: Omit<UserStateCursor, 'digest'>): string => {
+  const payload = JSON.stringify(value);
+  return Buffer.from(
+    JSON.stringify({ ...value, digest: createHash('sha256').update(payload).digest('hex') }),
+    'utf8',
+  ).toString('base64url');
+};
+// This is an unkeyed integrity checksum for opaque transport, not a signature
+// or authentication token. Every bound field is revalidated against live scope.
+const readUserStateCursor = async (
+  userId: string,
+  endpoint: string,
+  collectionId: number | undefined,
+  cursor: string | undefined,
+  keyLength: number,
+): Promise<readonly string[] | null> => {
+  if (!cursor) return null;
+  try {
+    const value = JSON.parse(
+      Buffer.from(cursor, 'base64url').toString('utf8'),
+    ) as Partial<UserStateCursor>;
+    const { digest, ...payload } = value;
+    if (
+      typeof digest !== 'string' ||
+      digest !== createHash('sha256').update(JSON.stringify(payload)).digest('hex') ||
+      payload.userId !== userId ||
+      payload.endpoint !== endpoint ||
+      payload.collectionId !== collectionId ||
+      typeof payload.scopeHash !== 'string' ||
+      !Number.isSafeInteger(payload.userStateRevision) ||
+      !Array.isArray(payload.key) ||
+      payload.key.length !== keyLength ||
+      payload.key.some((v) => typeof v !== 'string')
+    )
+      throw new Error();
+    const scope = await libraryAccessScope(userId);
+    if (
+      payload.scopeHash !== scope.scopeHash ||
+      payload.userStateRevision !== (scope.userStateRevision ?? 0)
+    )
+      throw new Error();
+    return payload.key;
+  } catch {
+    throw new Error('invalid_pagination_cursor');
+  }
+};
+const userStateCursorFor = async (
+  userId: string,
+  endpoint: string,
+  collectionId: number | undefined,
+  key: readonly string[],
+): Promise<string> => {
+  const scope = await libraryAccessScope(userId);
+  return cursorText({
+    userId,
+    endpoint,
+    ...(collectionId === undefined ? {} : { collectionId }),
+    scopeHash: scope.scopeHash,
+    userStateRevision: scope.userStateRevision ?? 0,
+    key,
+  });
+};
+
+export async function listUserCollections(
+  userId: string,
+  limit = 30,
+  cursor?: string,
+): Promise<UserStatePage<Record<string, unknown>>> {
+  const size = userStatePage(limit),
+    after = await readUserStateCursor(userId, 'collections', undefined, cursor, 1);
+  const rows = (
+    await pool.query(
+      `select id::text as "id",name,name_key as "nameKey",created_at as "createdAt",updated_at as "updatedAt" from user_collections where user_id=$1 ${after ? 'and id>$2' : ''} order by id limit $${after ? 3 : 2}`,
+      after ? [userId, after[0], size + 1] : [userId, size + 1],
+    )
   ).rows;
+  return {
+    items: rows.slice(0, size),
+    nextCursor:
+      rows.length > size
+        ? await userStateCursorFor(userId, 'collections', undefined, [rows[size - 1].id])
+        : null,
+  };
+}
+export async function listUserCollectionMembers(
+  userId: string,
+  collectionId: number,
+  limit = 30,
+  cursor?: string,
+): Promise<UserStatePage<Record<string, unknown>> | null> {
+  const size = userStatePage(limit),
+    after = await readUserStateCursor(userId, 'collection-members', collectionId, cursor, 3);
+  if (!(await authorizeUserCollection(userId, collectionId))) return null;
+  const predicate = `(m.root_id,m.target_kind,m.target_key)>($3,$4,$5)`;
+  const rows = (
+    await pool.query(
+      `select m.root_id as "rootId",m.target_kind as "targetKind",m.target_key as "targetKey",m.created_at as "createdAt" from user_collection_members m where m.user_id=$1 and m.collection_id=$2 and (exists(select 1 from library_roots r where r.id=m.root_id and r.active) and (exists(select 1 from library_access_grants g where g.user_id=$1 and g.root_id=m.root_id) or exists(select 1 from "user" u where u.id=$1 and u.role='admin'))) and (m.target_kind in ('source','check') and exists(select 1 from visible_source_items i join catalog_releases r on r.source_item_id=i.id where i.root_id=m.root_id and i.relative_path=m.target_key and i.quarantine_reason is null and gutter_user_can_read_release($1,r.id)) or m.target_kind='series' and exists(select 1 from catalog_series s join catalog_publications p on p.series_id=s.id join catalog_releases r on r.publication_id=p.id join visible_source_items i on i.id=r.source_item_id and i.quarantine_reason is null where s.library_id=m.root_id and s.identity_key=m.target_key and gutter_user_can_read_release($1,r.id)) or m.target_kind='publication' and exists(select 1 from catalog_publications p join catalog_series s on s.id=p.series_id join catalog_releases r on r.publication_id=p.id join visible_source_items i on i.id=r.source_item_id and i.quarantine_reason is null where s.library_id=m.root_id and p.identity_key=split_part(m.target_key,':',2) and s.identity_key=split_part(m.target_key,':',1) and gutter_user_can_read_release($1,r.id))) ${after ? `and ${predicate}` : ''} order by m.root_id,m.target_kind,m.target_key limit $${after ? 6 : 3}`,
+      after ? [userId, collectionId, ...after, size + 1] : [userId, collectionId, size + 1],
+    )
+  ).rows;
+  const items = rows
+    .slice(0, size)
+    .map((item) =>
+      item.targetKind === 'source' || item.targetKind === 'check'
+        ? { ...item, targetKey: readerProgressKey(item.rootId, item.targetKey) }
+        : item,
+    );
+  return {
+    items,
+    nextCursor:
+      rows.length > size
+        ? await userStateCursorFor(userId, 'collection-members', collectionId, [
+            rows[size - 1].rootId,
+            rows[size - 1].targetKind,
+            rows[size - 1].targetKey,
+          ])
+        : null,
+  };
+}
+export async function listUserBookmarks(
+  userId: string,
+  limit = 30,
+  cursor?: string,
+): Promise<UserStatePage<Record<string, unknown>>> {
+  const size = userStatePage(limit),
+    after = await readUserStateCursor(userId, 'bookmarks', undefined, cursor, 1);
+  const rows = (
+    await pool.query(
+      `select b.id,b.root_id as "rootId",b.source_key as "sourceKey",b.page_ordinal as "pageOrdinal",b.label,b.created_at as "createdAt",b.updated_at as "updatedAt"
+         from user_bookmarks b
+        where b.user_id=$1
+          and exists(select 1 from library_roots r where r.id=b.root_id and r.active)
+          and (exists(select 1 from library_access_grants g where g.user_id=$1 and g.root_id=b.root_id)
+               or exists(select 1 from "user" u where u.id=$1 and u.role='admin'))
+          and exists(select 1 from visible_source_items i join catalog_releases r on r.source_item_id=i.id where i.root_id=b.root_id and i.relative_path=b.source_key and i.quarantine_reason is null and gutter_user_can_read_release($1,r.id))
+          ${after ? 'and b.id>$2' : ''}
+        order by b.id limit $${after ? 3 : 2}`,
+      after ? [userId, after[0], size + 1] : [userId, size + 1],
+    )
+  ).rows;
+  const items = rows.slice(0, size).map(({ rootId, sourceKey, ...item }) => ({
+    ...item,
+    rootId,
+    progressKey: readerProgressKey(rootId, sourceKey),
+  }));
+  return {
+    items,
+    nextCursor:
+      rows.length > size
+        ? await userStateCursorFor(userId, 'bookmarks', undefined, [String(rows[size - 1].id)])
+        : null,
+  };
+}
+export async function listUserTargetState(
+  userId: string,
+  limit = 30,
+  cursor?: string,
+): Promise<UserStatePage<Record<string, unknown>>> {
+  const size = userStatePage(limit),
+    after = await readUserStateCursor(userId, 'targets', undefined, cursor, 3);
+  const rows = (
+    await pool.query(
+      `select s.root_id as "rootId",s.target_kind as "targetKind",s.target_key as "targetKey",s.favorite,s.hidden,s.rating,s.note,s.updated_at as "updatedAt" from user_target_state s where s.user_id=$1 and exists(select 1 from library_roots r where r.id=s.root_id and r.active) and (exists(select 1 from library_access_grants g where g.user_id=$1 and g.root_id=s.root_id) or exists(select 1 from "user" u where u.id=$1 and u.role='admin')) and (s.hidden or (s.target_kind in ('source','check') and exists(select 1 from visible_source_items i join catalog_releases r on r.source_item_id=i.id where i.root_id=s.root_id and i.relative_path=s.target_key and i.quarantine_reason is null and gutter_user_can_read_release($1,r.id))) or (s.target_kind='series' and exists(select 1 from catalog_series x join catalog_publications p on p.series_id=x.id join catalog_releases r on r.publication_id=p.id join visible_source_items i on i.id=r.source_item_id and i.quarantine_reason is null where x.library_id=s.root_id and x.identity_key=s.target_key and gutter_user_can_read_release($1,r.id))) or (s.target_kind='publication' and exists(select 1 from catalog_publications p join catalog_series x on x.id=p.series_id join catalog_releases r on r.publication_id=p.id join visible_source_items i on i.id=r.source_item_id and i.quarantine_reason is null where x.library_id=s.root_id and x.identity_key=split_part(s.target_key,':',1) and p.identity_key=split_part(s.target_key,':',2) and gutter_user_can_read_release($1,r.id)))) ${after ? 'and (s.root_id,s.target_kind,s.target_key)>($2,$3,$4)' : ''} order by s.root_id,s.target_kind,s.target_key limit $${after ? 5 : 2}`,
+      after ? [userId, ...after, size + 1] : [userId, size + 1],
+    )
+  ).rows;
+  const items = rows
+    .slice(0, size)
+    .map((item) =>
+      item.targetKind === 'source' || item.targetKind === 'check'
+        ? { ...item, targetKey: readerProgressKey(item.rootId, item.targetKey) }
+        : item,
+    );
+  return {
+    items,
+    nextCursor:
+      rows.length > size
+        ? await userStateCursorFor(userId, 'targets', undefined, [
+            rows[size - 1].rootId,
+            rows[size - 1].targetKind,
+            rows[size - 1].targetKey,
+          ])
+        : null,
+  };
 }
 export async function putUserProgress(
   userId: string,
@@ -1326,7 +1578,7 @@ export async function catalogPublicationDetail(
   );
   if (!publication.rows[0]) return null;
   const releases = await pool.query(
-    `select r.id,i.id as "sourceItemId",i.relative_path as "relativePath",i.mtime_ms as "mtimeMs",i.page_count as "pageCount",
+    `select r.id,i.root_id as "rootId",i.relative_path as "relativePath",i.mtime_ms as "mtimeMs",i.page_count as "pageCount",
     coalesce(o.preferred_source_item_id=i.id,false) as "isPreferred"
     from catalog_releases r join visible_source_items i on i.id=r.source_item_id join catalog_publications p on p.id=r.publication_id join catalog_series s on s.id=p.series_id
     left join catalog_preferred_release_overrides o on o.root_id=r.root_id and o.publication_identity_key=p.identity_key and o.preferred_source_item_id=i.id
@@ -1348,7 +1600,11 @@ export async function catalogPublicationDetail(
   );
   return {
     ...publication.rows[0],
-    releases: releases.rows,
+    releases: releases.rows.map(({ rootId, relativePath, ...release }) => ({
+      ...release,
+      rootId,
+      progressKey: readerProgressKey(rootId, relativePath),
+    })),
     selectedReleaseId: selected?.id ?? null,
     credits: credits.rows,
   };
@@ -2252,6 +2508,7 @@ export type ReaderPageAuthorization = Readonly<{
  * navigation authority.
  */
 export type ReaderReleaseDescriptor = Readonly<{
+  rootId: string;
   progressKey: string;
   revision: string;
   validOrdinals: number[];
@@ -2359,6 +2616,7 @@ export async function getReaderReleaseDescriptor(
   const row = result.rows[0];
   return row
     ? {
+        rootId: row.root_id,
         progressKey: readerProgressKey(row.root_id, row.relative_path),
         revision: `${row.manifest_sha256}:${row.validation_generation}`,
         validOrdinals: row.valid_ordinals,

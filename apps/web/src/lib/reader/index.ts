@@ -9,6 +9,7 @@ export type Presentation = Readonly<{
 }>;
 
 export type ReaderDescriptor = Readonly<{
+  rootId: string;
   progressKey: string;
   revision: string;
   validOrdinals: number[];

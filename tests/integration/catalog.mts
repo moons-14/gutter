@@ -9,6 +9,7 @@ import {
   migrateSchema,
   pool,
   rebuildCatalogProjectionForIntegration,
+  readerProgressKey,
   setGlobalSourceSuppression,
   type LibraryAccessScope,
 } from '../../packages/db/src/index.ts';
@@ -269,17 +270,21 @@ try {
   const selected = async () =>
     (await catalogPublicationDetail(firstPublication.rows[0]!.id, adminScope)) as {
       selectedReleaseId: string;
-      releases: { sourceItemId: string; isPreferred: boolean }[];
+      releases: { rootId: string; progressKey: string; isPreferred: boolean }[];
     } | null;
-  assert.equal((await selected())?.releases[0]?.sourceItemId, sources.rows[0]!.id);
+  assert.equal((await selected())?.releases[0]?.rootId, behaviorRoot);
+    assert.equal((await selected())?.releases[0]?.progressKey, readerProgressKey(behaviorRoot, 'first.cbz'));
+  assert.equal('relativePath' in ((await selected())?.releases[0] ?? {}), false);
+  assert.equal('sourceItemId' in ((await selected())?.releases[0] ?? {}), false);
+  assert.equal('sourceKey' in ((await selected())?.releases[0] ?? {}), false);
   await setGlobalSourceSuppression(sources.rows[0]!.id, 'integration');
-  assert.equal((await selected())?.releases[0]?.sourceItemId, sources.rows[1]!.id);
+  assert.equal((await selected())?.releases[0]?.rootId, behaviorRoot);
   await clearGlobalSourceSuppression(sources.rows[0]!.id);
-  assert.equal((await selected())?.releases[0]?.sourceItemId, sources.rows[0]!.id);
+  assert.equal((await selected())?.releases[0]?.rootId, behaviorRoot);
   await pool.query('update library_roots set active=false where id=$1', [behaviorRoot]);
   assert.equal(await selected(), null);
   await pool.query('update library_roots set active=true where id=$1', [behaviorRoot]);
-  assert.equal((await selected())?.releases[0]?.sourceItemId, sources.rows[0]!.id);
+  assert.equal((await selected())?.releases[0]?.rootId, behaviorRoot);
   await pool.query(`update source_metadata set effective=$2 where source_item_id=$1`, [
     sources.rows[0]!.id,
     JSON.stringify({ title: 'Volume 2', series: 'Behavior series', number: '2' }),
@@ -290,9 +295,9 @@ try {
     [sources.rows[1]!.id],
   );
   const moved = (await catalogPublicationDetail(movedPublication.rows[0]!.id, adminScope)) as {
-    releases: { sourceItemId: string }[];
+    releases: { rootId: string }[];
   } | null;
-  assert.equal(moved?.releases[0]?.sourceItemId, sources.rows[1]!.id);
+  assert.equal(moved?.releases[0]?.rootId, behaviorRoot);
   await pool.query(`update source_metadata set effective=$2 where source_item_id=$1`, [
     sources.rows[0]!.id,
     JSON.stringify({
@@ -313,9 +318,9 @@ try {
     restoredPublication.rows[0]!.id,
     adminScope,
   )) as {
-    releases: { sourceItemId: string }[];
+    releases: { rootId: string }[];
   } | null;
-  assert.equal(restored?.releases[0]?.sourceItemId, sources.rows[0]!.id);
+  assert.equal(restored?.releases[0]?.rootId, behaviorRoot);
   await pool.query('delete from catalog_preferred_release_overrides where root_id=$1', [
     behaviorRoot,
   ]);
@@ -383,7 +388,7 @@ try {
     hugeRelease.rows[0]!.publication_id,
     adminScope,
   );
-  assert.equal(hugeDetail?.releases[0]?.sourceItemId, '9007199254741999');
+  assert.equal(hugeDetail?.releases[0]?.rootId, bigintRoot);
   await setGlobalSourceSuppression(hugeSource.rows[0]!.id, 'bigint');
   assert.equal(
     await catalogPublicationDetail(hugeRelease.rows[0]!.publication_id, adminScope),
@@ -392,8 +397,8 @@ try {
   await clearGlobalSourceSuppression(hugeSource.rows[0]!.id);
   assert.equal(
     (await catalogPublicationDetail(hugeRelease.rows[0]!.publication_id, adminScope))?.releases[0]
-      ?.sourceItemId,
-    '9007199254741999',
+      ?.rootId,
+    bigintRoot,
   );
   await pool.query('delete from catalog_series_list_state where library_id=$1', [bigintRoot]);
   await pool.query(

@@ -150,6 +150,7 @@ test('reader descriptor exposes only ready opaque navigation authority', async (
       descriptorUsers.push(userId);
       return releaseId === '42'
         ? {
+            rootId: 'root-1',
             progressKey: 'source:opaque-stable-key',
             revision: 'a'.repeat(64) + ':7',
             validOrdinals: [0, 2, 5],
@@ -166,6 +167,7 @@ test('reader descriptor exposes only ready opaque navigation authority', async (
     assert.equal(response.headers.get('cache-control'), 'no-store');
     assert.deepEqual(await response.json(), {
       release: {
+        rootId: 'root-1',
         progressKey: 'source:opaque-stable-key',
         revision: 'a'.repeat(64) + ':7',
         validOrdinals: [0, 2, 5],
@@ -193,6 +195,7 @@ test('publication reader session returns only the selected opaque release descri
         ? {
             releaseId: '9',
             release: {
+              rootId: 'root-1',
               progressKey: 'source:opaque-stable-key',
               revision: 'a'.repeat(64) + ':7',
               validOrdinals: [0, 2],
@@ -212,6 +215,7 @@ test('publication reader session returns only the selected opaque release descri
       session: {
         releaseId: '9',
         release: {
+          rootId: 'root-1',
           progressKey: 'source:opaque-stable-key',
           revision: 'a'.repeat(64) + ':7',
           validOrdinals: [0, 2],

@@ -2,17 +2,26 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import {
   catalogPublicationDetail,
+  addUserBookmark,
+  createUserCollection,
   getReaderReleaseDescriptor,
   clearGlobalSourceSuppression,
   isReaderPathVisible,
   libraryAccessScope,
   listCatalogEntities,
   listCatalogSeries,
+  listUserBookmarks,
+  listUserCollectionMembers,
+  listUserCollections,
+  listUserTargetState,
   migrateSchema,
   pool,
   putUserProgress,
+  readerProgressKey,
+  resolveUserProgressKey,
   rebuildCatalogProjectionForIntegration,
   setGlobalSourceSuppression,
+  setUserCollectionMembership,
   setUserTargetState,
   getUserResume,
 } from '../../packages/db/src/index.ts';
@@ -27,6 +36,7 @@ const otherId = `hide-other-${suffix}`;
 const sourceA = 'a.cbz';
 const sourceB = 'b.cbz';
 const sourceSibling = 'sibling.cbz';
+const unicodeRoot = `unicode-${suffix}`;
 
 const sourceIds: string[] = [];
 try {
@@ -86,6 +96,242 @@ try {
   );
   assert.equal(releases.rows.length, 3);
 
+  // Keep a Unicode-only source outside the catalog projection so the resolver
+  // exercises the PostgreSQL byte hashing path directly (including UTF-8 path data).
+  const unicodePath = '漫画/épisode-日本.cbz';
+  const rootUnicodePath = '図書館/巻一.cbz';
+  await pool.query(
+    `insert into library_roots(id,configured_path,canonical_path,state,checked_at,config_generation,active)
+     values($1,$2,$2,'ready_empty',now(),$3,true)`,
+    [unicodeRoot, `/unicode/${suffix}`, 'b'.repeat(64)],
+  );
+  await pool.query(
+    `insert into library_access_grants(user_id,root_id,granted_by_user_id) values($1,$2,$1)`,
+    [userId, unicodeRoot],
+  );
+  const unicodeSource = await pool.query<{ id: string }>(
+    `insert into source_items(root_id,relative_path,kind,size_bytes,mtime_ms,page_count,active,manifest_sha256)
+     values($1,$2,'cbz',1,1,1,true,$3) returning id`,
+    [unicodeRoot, unicodePath, 'c'.repeat(64)],
+  );
+  sourceIds.push(unicodeSource.rows[0]!.id);
+  const rootUnicodeSource = await pool.query<{ id: string }>(
+    `insert into source_items(root_id,relative_path,kind,size_bytes,mtime_ms,page_count,active,manifest_sha256)
+     values($1,$2,'cbz',1,1,1,true,$3) returning id`,
+    [rootId, rootUnicodePath, 'd'.repeat(64)],
+  );
+  sourceIds.push(rootUnicodeSource.rows[0]!.id);
+  await pool.query(
+    `insert into source_items(root_id,relative_path,kind,size_bytes,mtime_ms,page_count,active,quarantine_reason,manifest_sha256)
+     values($1,'quarantined.cbz','cbz',1,1,1,true,'bad_archive',$2)`,
+    [rootId, 'e'.repeat(64)],
+  );
+
+  const vectors = [
+    [rootId, sourceA],
+    [rootId, rootUnicodePath],
+    [unicodeRoot, unicodePath],
+  ] as const;
+  for (const [vectorRoot, path] of vectors) {
+    const key = readerProgressKey(vectorRoot, path);
+    assert.equal(
+      await resolveUserProgressKey(userId, vectorRoot, key),
+      path,
+      `SQL resolver matches readerProgressKey for ${vectorRoot}/${path}`,
+    );
+  }
+  await pool.query(
+    'update source_items set quarantine_reason=$2 where root_id=$1 and relative_path=$3',
+    [unicodeRoot, 'bad_archive', unicodePath],
+  );
+  assert.equal(
+    await resolveUserProgressKey(userId, unicodeRoot, readerProgressKey(unicodeRoot, unicodePath)),
+    null,
+    'quarantined source cannot resolve',
+  );
+  await pool.query('update source_items set quarantine_reason=null,active=false where root_id=$1', [
+    unicodeRoot,
+  ]);
+  assert.equal(
+    await resolveUserProgressKey(userId, unicodeRoot, readerProgressKey(unicodeRoot, unicodePath)),
+    null,
+    'inactive source cannot resolve',
+  );
+  await pool.query('update source_items set active=true where root_id=$1', [unicodeRoot]);
+  await pool.query('update library_roots set active=false where id=$1', [unicodeRoot]);
+  assert.equal(
+    await resolveUserProgressKey(userId, unicodeRoot, readerProgressKey(unicodeRoot, unicodePath)),
+    null,
+    'inactive root cannot resolve',
+  );
+  await pool.query('update library_roots set active=true where id=$1', [unicodeRoot]);
+  await setGlobalSourceSuppression(unicodeSource.rows[0]!.id, 'resolver-test');
+  assert.equal(
+    await resolveUserProgressKey(userId, unicodeRoot, readerProgressKey(unicodeRoot, unicodePath)),
+    null,
+    'globally suppressed source cannot resolve',
+  );
+  await clearGlobalSourceSuppression(unicodeSource.rows[0]!.id);
+  await pool.query('delete from library_access_grants where user_id=$1 and root_id=$2', [
+    userId,
+    unicodeRoot,
+  ]);
+  assert.equal(
+    await resolveUserProgressKey(userId, unicodeRoot, readerProgressKey(unicodeRoot, unicodePath)),
+    null,
+    'revoked source cannot resolve',
+  );
+  await pool.query(
+    'insert into library_access_grants(user_id,root_id,granted_by_user_id) values($1,$2,$1)',
+    [userId, unicodeRoot],
+  );
+
+  // Durable lists expose opaque reader keys only and filter every inaccessible row.
+  for (const [n, path] of [
+    [0, sourceA],
+    [1, sourceB],
+    [2, sourceSibling],
+  ] as const)
+    assert.equal(await addUserBookmark(userId, rootId, path, n, `bookmark-${n}`), true);
+  await pool.query(
+    `insert into user_bookmarks(user_id,root_id,source_key,page_ordinal,label)
+     values($1,$2,'missing.cbz',0,'inaccessible')`,
+    [userId, rootId],
+  );
+  await setUserTargetState(userId, rootId, 'source', sourceA, { favorite: true });
+  await setUserTargetState(userId, rootId, 'source', sourceB, { favorite: true });
+  await setUserTargetState(userId, rootId, 'source', sourceSibling, { favorite: true });
+  await pool.query(
+    `insert into user_target_state(user_id,root_id,target_kind,target_key,favorite)
+     values($1,$2,'source','missing.cbz',true)`,
+    [userId, rootId],
+  );
+  const collection = await createUserCollection(userId, 'Integration list');
+  assert.ok(collection);
+  for (const path of [sourceA, sourceB, sourceSibling, 'missing.cbz'])
+    await setUserCollectionMembership(userId, collection!.id, rootId, 'source', path, true);
+  await pool.query(
+    `insert into user_bookmarks(user_id,root_id,source_key,page_ordinal,label)
+     values($1,$2,'quarantined.cbz',0,'quarantined')`,
+    [userId, rootId],
+  );
+  await pool.query(
+    `insert into user_target_state(user_id,root_id,target_kind,target_key,favorite)
+     values($1,$2,'source','quarantined.cbz',true)`,
+    [userId, rootId],
+  );
+  await setUserCollectionMembership(
+    userId,
+    collection!.id,
+    rootId,
+    'source',
+    'quarantined.cbz',
+    true,
+  );
+  const checkOpaque = (item: Record<string, unknown>) => {
+    assert.equal('sourceKey' in item, false);
+    assert.equal('sourceItemId' in item, false);
+    if ('progressKey' in item) assert.match(String(item.progressKey), /^source:[A-Za-z0-9_-]+$/);
+    if (item.targetKind === 'source')
+      assert.match(String(item.targetKey), /^source:[A-Za-z0-9_-]+$/);
+  };
+  const bookmarkPages: Record<string, unknown>[] = [];
+  for (let cursor: string | undefined; ; ) {
+    const page = await listUserBookmarks(userId, 1, cursor);
+    page.items.forEach(checkOpaque);
+    bookmarkPages.push(...page.items);
+    if (!page.nextCursor) break;
+    cursor = page.nextCursor;
+  }
+  assert.equal(bookmarkPages.length, 3);
+  assert.deepEqual(
+    bookmarkPages.map((x) => x.pageOrdinal),
+    [0, 1, 2],
+  );
+  assert.equal(
+    (await listUserBookmarks(userId, 20)).items.some((x) => x.label === 'quarantined'),
+    false,
+  );
+  assert.equal(
+    (await listUserTargetState(userId, 20)).items.some((x) => x.targetKey === 'quarantined.cbz'),
+    false,
+  );
+  assert.equal(
+    (await listUserCollectionMembers(userId, collection!.id, 20))!.items.some(
+      (x) => x.targetKey === 'quarantined.cbz',
+    ),
+    false,
+  );
+  const targetPages: Record<string, unknown>[] = [];
+  for (let cursor: string | undefined; ; ) {
+    const page = await listUserTargetState(userId, 1, cursor);
+    page.items.forEach(checkOpaque);
+    targetPages.push(...page.items);
+    if (!page.nextCursor) break;
+    cursor = page.nextCursor;
+  }
+  assert.equal(targetPages.length, 3);
+  const memberPages: Record<string, unknown>[] = [];
+  for (let cursor: string | undefined; ; ) {
+    const page = await listUserCollectionMembers(userId, collection!.id, 1, cursor);
+    assert.ok(page);
+    page.items.forEach(checkOpaque);
+    memberPages.push(...page.items);
+    if (!page.nextCursor) break;
+    cursor = page.nextCursor;
+  }
+  assert.equal(memberPages.length, 3);
+  assert.deepEqual(
+    memberPages.map((x) => x.targetKey),
+    [sourceA, sourceB, sourceSibling].map((p) => readerProgressKey(rootId, p)),
+  );
+
+  const collections = await listUserCollections(userId, 1);
+  assert.equal(collections.items.length, 1);
+  assert.equal((collections.items[0] as any).name, 'Integration list');
+  const collectionCursor = (
+    await listUserCollections(userId, 1, collections.nextCursor ?? undefined)
+  ).nextCursor;
+  assert.equal(collectionCursor, null, 'collection keyset terminates deterministically');
+
+  // Cursor bindings cover endpoint, user, collection, scope, revision, and tamper cases.
+  const bookmarkCursor = (await listUserBookmarks(userId, 1)).nextCursor!;
+  await assert.rejects(listUserTargetState(userId, 1, bookmarkCursor), /invalid_pagination_cursor/);
+  const otherCollection = await createUserCollection(otherId, 'Other list');
+  assert.ok(otherCollection);
+  const secondUserCollection = await createUserCollection(userId, 'Second list');
+  assert.ok(secondUserCollection);
+  await assert.rejects(
+    listUserCollectionMembers(userId, secondUserCollection!.id, 1, bookmarkCursor),
+    /invalid_pagination_cursor/,
+  );
+  await assert.rejects(
+    listUserCollectionMembers(otherId, collection!.id, 1, bookmarkCursor),
+    /invalid_pagination_cursor/,
+  );
+  await assert.rejects(
+    listUserBookmarks(userId, 1, `${bookmarkCursor.slice(0, -1)}x`),
+    /invalid_pagination_cursor/,
+  );
+  const revisionCursor = (await listUserBookmarks(userId, 1)).nextCursor!;
+  await setUserTargetState(userId, rootId, 'source', sourceA, { note: 'revision bump' });
+  await assert.rejects(listUserBookmarks(userId, 1, revisionCursor), /invalid_pagination_cursor/);
+  const aclCursor = (await listUserBookmarks(userId, 1)).nextCursor!;
+  await pool.query('delete from library_access_grants where user_id=$1 and root_id=$2', [
+    userId,
+    rootId,
+  ]);
+  await assert.rejects(listUserBookmarks(userId, 1, aclCursor), /invalid_pagination_cursor/);
+  assert.deepEqual((await listUserBookmarks(userId, 1)).items, []);
+  assert.deepEqual(await listUserCollectionMembers(userId, collection!.id, 1), {
+    items: [],
+    nextCursor: null,
+  });
+  await pool.query(
+    'insert into library_access_grants(user_id,root_id,granted_by_user_id) values($1,$2,$1)',
+    [userId, rootId],
+  );
+
   const userScope = await libraryAccessScope(userId);
   const otherScope = await libraryAccessScope(otherId);
   const initial = await listCatalogSeries({ libraryId: rootId, limit: 10 }, userScope);
@@ -102,6 +348,54 @@ try {
   );
   const seriesA = identities.rows[0]!.series_key;
   const pubA = identities.rows[0]!.publication_key;
+  const publicationTargetKey = `${seriesA}:${pubA}`;
+  await setUserTargetState(userId, rootId, 'series', seriesA, { favorite: true });
+  await setUserTargetState(userId, rootId, 'publication', publicationTargetKey, { favorite: true });
+  await setUserCollectionMembership(userId, collection!.id, rootId, 'series', seriesA, true);
+  await setUserCollectionMembership(
+    userId,
+    collection!.id,
+    rootId,
+    'publication',
+    publicationTargetKey,
+    true,
+  );
+  const targetIdentityRows = (await listUserTargetState(userId, 20)).items;
+  assert.ok(
+    targetIdentityRows.some((item) => item.targetKind === 'series' && item.targetKey === seriesA),
+  );
+  assert.ok(
+    targetIdentityRows.some(
+      (item) => item.targetKind === 'publication' && item.targetKey === publicationTargetKey,
+    ),
+  );
+  const identityMemberRows = (await listUserCollectionMembers(userId, collection!.id, 20))!.items;
+  assert.ok(
+    identityMemberRows.some((item) => item.targetKind === 'series' && item.targetKey === seriesA),
+  );
+  assert.ok(
+    identityMemberRows.some(
+      (item) => item.targetKind === 'publication' && item.targetKey === publicationTargetKey,
+    ),
+  );
+  const pagedIdentityTargets: Record<string, unknown>[] = [];
+  for (let cursor: string | undefined; ; ) {
+    const page = await listUserTargetState(userId, 1, cursor);
+    page.items.forEach(checkOpaque);
+    pagedIdentityTargets.push(...page.items);
+    if (!page.nextCursor) break;
+    cursor = page.nextCursor;
+  }
+  assert.equal(pagedIdentityTargets.length, 5);
+  const pagedIdentityMembers: Record<string, unknown>[] = [];
+  for (let cursor: string | undefined; ; ) {
+    const page = (await listUserCollectionMembers(userId, collection!.id, 1, cursor))!;
+    page.items.forEach(checkOpaque);
+    pagedIdentityMembers.push(...page.items);
+    if (!page.nextCursor) break;
+    cursor = page.nextCursor;
+  }
+  assert.equal(pagedIdentityMembers.length, 5);
   const detailBefore = (await catalogPublicationDetail(pubAId, userScope)) as any;
   assert.equal(detailBefore.releases.length, 1);
   assert.equal(detailBefore.credits.length, 1, 'credits are hydrated from visible releases');
@@ -111,6 +405,25 @@ try {
   const cursorPage = await listCatalogSeries({ libraryId: rootId, limit: 1 }, userScope);
   assert.ok(cursorPage.nextCursor);
   await setUserTargetState(userId, rootId, 'source', sourceA, { hidden: true });
+  await setUserTargetState(userId, rootId, 'source', sourceB, { hidden: true });
+  const hiddenIdentityTargets = await listUserTargetState(userId, 20);
+  assert.equal(
+    hiddenIdentityTargets.items.some((item) => item.targetKey === seriesA),
+    false,
+  );
+  assert.equal(
+    hiddenIdentityTargets.items.some((item) => item.targetKey === publicationTargetKey),
+    false,
+  );
+  const hiddenIdentityMembers = (await listUserCollectionMembers(userId, collection!.id, 20))!;
+  assert.equal(
+    hiddenIdentityMembers.items.some((item) => item.targetKey === seriesA),
+    false,
+  );
+  assert.equal(
+    hiddenIdentityMembers.items.some((item) => item.targetKey === publicationTargetKey),
+    false,
+  );
   const hiddenSource = (await catalogPublicationDetail(
     pubAId,
     await libraryAccessScope(userId),
@@ -135,11 +448,12 @@ try {
   );
 
   await setUserTargetState(userId, rootId, 'source', sourceA, { hidden: false });
+  await setUserTargetState(userId, rootId, 'source', sourceB, { hidden: false });
   const restored = await catalogPublicationDetail(pubAId, await libraryAccessScope(userId));
   assert.ok(restored, 'unhide restores the source-backed publication');
   assert.equal(await isReaderPathVisible(userId, readerPath), true);
   assert.ok(await getReaderReleaseDescriptor(releases.rows[0]!.id, userId));
-  const pubKey = `${seriesA}:${pubA}`;
+  const pubKey = publicationTargetKey;
   await setUserTargetState(userId, rootId, 'publication', pubKey, { hidden: true });
   assert.equal(await catalogPublicationDetail(pubAId, await libraryAccessScope(userId)), null);
   assert.ok(
@@ -251,10 +565,14 @@ try {
     )
     .catch(() => undefined);
   await pool.query('delete from source_items where root_id=$1', [rootId]).catch(() => undefined);
+  await pool
+    .query('delete from source_items where root_id=$1', [unicodeRoot])
+    .catch(() => undefined);
   await pool.query('delete from catalog_libraries where id=$1', [rootId]).catch(() => undefined);
   await pool
     .query('delete from "user" where id=any($1::text[])', [[userId, otherId]])
     .catch(() => undefined);
   await pool.query('delete from library_roots where id=$1', [rootId]).catch(() => undefined);
+  await pool.query('delete from library_roots where id=$1', [unicodeRoot]).catch(() => undefined);
   await pool.end();
 }

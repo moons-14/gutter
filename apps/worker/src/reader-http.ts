@@ -44,6 +44,7 @@ export type ReaderHttpDependencies = Readonly<{
 }>;
 
 export type ReaderReleaseDescriptor = Readonly<{
+  rootId: string;
   progressKey: string;
   revision: string;
   validOrdinals: number[];
