@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import CatalogPage from './+page.svelte';
 import PublicationPage from './publications/[id]/+page.svelte';
@@ -11,8 +11,8 @@ afterEach(() => {
 });
 
 describe('catalog UI runtime states', () => {
-  it('renders the catalog loading and failure states', async () => {
-    let resolve!: (value: { ok: boolean; json: () => Promise<unknown> }) => void;
+  it('keeps loading separate from successful empty and offers retry after failure', async () => {
+    let resolve!: (value: { ok: boolean; status?: number; json: () => Promise<unknown> }) => void;
     vi.stubGlobal(
       'fetch',
       vi.fn(
@@ -24,10 +24,63 @@ describe('catalog UI runtime states', () => {
     );
     render(CatalogPage);
     expect(screen.getByText('読み込み中…')).toBeTruthy();
-    resolve({ ok: false, json: async () => ({}) });
-    await waitFor(() =>
-      expect(screen.getByRole('alert').textContent).toContain('カタログを読み込めませんでした'),
+    resolve({ ok: false, status: 503, json: async () => ({}) });
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('利用できません'));
+    expect(screen.getByRole('button', { name: '再試行' })).toBeTruthy();
+    vi.mocked(fetch).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ items: [], nextCursor: null }),
+    } as Response);
+    await screen.getByRole('button', { name: '再試行' }).click();
+    await waitFor(() => expect(screen.getByText('作品はまだありません')).toBeTruthy());
+  });
+
+  it('distinguishes not-found from an unavailable catalog', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({ ok: false, status: 404, json: async () => ({}) })),
     );
+    render(CatalogPage);
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('見つかりません'));
+    expect(screen.getByRole('button', { name: '再試行' })).toBeTruthy();
+  });
+
+  it('serializes creator, group, and publisher catalog filters', async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ items: [], nextCursor: null }),
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    render(CatalogPage);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    const inputs = screen.getAllByRole('textbox');
+    await fireEvent.input(inputs[2], { target: { value: 'Writer' } });
+    await fireEvent.input(inputs[3], { target: { value: 'Circle' } });
+    await fireEvent.input(inputs[4], { target: { value: 'Press' } });
+    await fireEvent.submit(screen.getByRole('button', { name: '検索' }).closest('form')!);
+    const request = new URL(
+      (fetchMock.mock.calls as unknown[][]).at(-1)?.[0] as string,
+      'http://localhost',
+    );
+    expect(request.searchParams.get('creator')).toBe('Writer');
+    expect(request.searchParams.get('group')).toBe('Circle');
+    expect(request.searchParams.get('publisher')).toBe('Press');
+  });
+
+  it('serializes entity search and page-size controls', async () => {
+    const fetchMock = vi.fn(async () => ({ ok: true, json: async () => ({ items: [] }) }));
+    vi.stubGlobal('fetch', fetchMock);
+    render(EntityListPage, { data: { entity: 'creators' } });
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    await fireEvent.input(screen.getByPlaceholderText('名前'), { target: { value: 'Writer' } });
+    await fireEvent.change(screen.getByRole('combobox'), { target: { value: '60' } });
+    await fireEvent.submit(screen.getByRole('button', { name: '検索' }).closest('form')!);
+    const request = new URL(
+      (fetchMock.mock.calls as unknown[][]).at(-1)?.[0] as string,
+      'http://localhost',
+    );
+    expect(request.searchParams.get('q')).toBe('Writer');
+    expect(request.searchParams.get('limit')).toBe('60');
   });
 
   it('renders creator, group, and publisher credits as navigable links', async () => {

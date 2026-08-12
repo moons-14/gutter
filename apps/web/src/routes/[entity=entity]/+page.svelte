@@ -1,7 +1,8 @@
 <script lang="ts">
-  import { onMount } from 'svelte'; export let data: { entity: string }; let items: any[] = []; let error = '';
+  import { onMount } from 'svelte'; import { fetchCatalog, type CatalogRequestState } from '$lib/catalog-fetch'; export let data: { entity: string }; let items: any[] = []; let loading = true; let state: CatalogRequestState = 'success'; let query = ''; let limit = '30';
   const labels: Record<string, string> = { creators: '作家', groups: 'グループ', publishers: '出版社' };
-  onMount(async () => { try { const response = await fetch(`/api/catalog/${data.entity}?limit=100`); if (!response.ok) throw Error(); items = (await response.json()).items; } catch { error = '一覧を読み込めませんでした。'; } });
+  async function load() { loading = true; state = 'success'; const params = new URLSearchParams({ limit }); if (query) params.set('q', query); const result = await fetchCatalog<{ items: any[] }>(`/api/catalog/${data.entity}?${params}`); if (result.state === 'success') items = result.data.items; else state = result.state; loading = false; }
+  onMount(load);
 </script>
-<nav><a href="/">← 作品一覧</a></nav><h1>{labels[data.entity]}</h1>
-{#if error}<p role="alert">{error}</p>{:else if !items.length}<p aria-live="polite">読み込み中、または項目はありません。</p>{:else}<ul>{#each items as item}<li><a href={`/${data.entity}/${item.id}`}>{item.displayName}</a> · {item.publicationCount} 件</li>{/each}</ul>{/if}
+<nav><a href="/">← 作品一覧</a></nav><h1>{labels[data.entity]}</h1><form onsubmit={(event) => { event.preventDefault(); void load(); }}><label>検索 <input bind:value={query} placeholder="名前" /></label><label>表示件数 <select bind:value={limit}><option value="30">30</option><option value="60">60</option><option value="100">100</option></select></label><button>検索</button></form>
+{#if loading}<p aria-live="polite">読み込み中…</p>{:else if state === 'not-found'}<p role="alert">一覧が見つかりません。</p><button onclick={() => void load()}>再試行</button>{:else if state === 'unavailable'}<p role="alert">一覧は現在利用できません。</p><button onclick={() => void load()}>再試行</button>{:else if state === 'network'}<p role="alert">ネットワークに接続できませんでした。</p><button onclick={() => void load()}>再試行</button>{:else if state === 'error'}<p role="alert">一覧の読み込みに失敗しました。</p><button onclick={() => void load()}>再試行</button>{:else if items.length === 0}<p aria-live="polite">項目はまだありません。</p>{:else}<ul>{#each items as item}<li><a href={`/${data.entity}/${item.id}`}>{item.displayName}</a> · {item.publicationCount} 件</li>{/each}</ul>{/if}
