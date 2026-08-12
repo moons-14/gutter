@@ -63,6 +63,58 @@ export const adminUsersRoute = createRoute({
     },
   },
 });
+export const adminUserStateDeleteRoute = createRoute({
+  method: 'delete',
+  path: '/admin/users/{id}/user-state',
+  request: {
+    params: z.object({ id: z.string().min(1) }),
+    headers: z
+      .object({
+        'x-request-id': z
+          .string()
+          .regex(/^[A-Za-z0-9._:-]{1,128}$/)
+          .optional(),
+      })
+      .passthrough(),
+    body: { content: { 'application/json': { schema: z.object({}).strict() } } },
+  },
+  responses: {
+    200: {
+      description: 'permanently deleted user state',
+      content: {
+        'application/json': {
+          schema: z.object({ deleted: z.record(z.string(), z.number()) }).strict(),
+        },
+      },
+    },
+    400: {
+      description: 'invalid request or self deletion',
+      content: {
+        'application/json': { schema: z.object({ error: z.enum(['invalid_request']) }).strict() },
+      },
+    },
+    401: {
+      description: 'authentication required',
+      content: {
+        'application/json': {
+          schema: z.object({ error: z.literal('authentication_required') }).strict(),
+        },
+      },
+    },
+    403: {
+      description: 'invalid same-origin mutation',
+      content: {
+        'application/json': { schema: z.object({ error: z.literal('invalid_origin') }).strict() },
+      },
+    },
+    404: {
+      description: 'not found or unauthorized',
+      content: {
+        'application/json': { schema: z.object({ error: z.literal('not_found') }).strict() },
+      },
+    },
+  },
+});
 
 const decimalId = z.string().regex(/^[1-9][0-9]*$/);
 

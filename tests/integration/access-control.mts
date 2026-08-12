@@ -408,6 +408,11 @@ try {
     [`two-factor-${suffix}`, 'secret', '[]', userId],
   );
   const deletionRequestId = `integration-permanent-delete-${suffix}`;
+  await assert.rejects(
+    permanentlyDeleteUser(otherId, otherId, `integration-self-delete-${suffix}`),
+    /admin_required/,
+    'a non-admin self-target is denied as unauthorized before self-delete semantics',
+  );
   const deletion = await permanentlyDeleteUser(adminId, userId, deletionRequestId);
   assert.equal(
     deletion.verification,

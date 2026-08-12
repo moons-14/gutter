@@ -895,7 +895,6 @@ export async function permanentlyDeleteUser(
   subjectUserId: string,
   requestId: string,
 ): Promise<Record<string, number>> {
-  if (actorUserId === subjectUserId) throw new Error('self_deletion_forbidden');
   if (!requestId || requestId.length > 128) throw new Error('invalid_request_id');
   const client = await pool.connect();
   try {
@@ -905,6 +904,7 @@ export async function permanentlyDeleteUser(
       [actorUserId],
     );
     if (actor.rows[0]?.role !== 'admin') throw new Error('admin_required');
+    if (actorUserId === subjectUserId) throw new Error('self_deletion_forbidden');
     const subject = await client.query<{ email: string }>(
       'select email from "user" where id=$1 for update',
       [subjectUserId],
