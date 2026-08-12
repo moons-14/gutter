@@ -145,6 +145,7 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
   });
   app.openapi(healthRoute, (c) => c.json({ status: 'ok' }, 200));
   app.post('/api/auth/bootstrap', async (c) => {
+    if (!trustedMutationOrigin(c.req.raw)) return c.json({ error: 'invalid_origin' }, 403);
     const client = await pool.connect();
     try {
       // This session lock fences CLI recovery from an in-flight bootstrap request.
