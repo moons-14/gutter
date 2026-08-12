@@ -12,9 +12,10 @@ process.env.GUTTER_READER_CAPABILITY_SECRET ??=
 process.env.GUTTER_AUTH_ORIGIN ??= 'http://localhost:8080';
 process.env.PINO_LOG_LEVEL ??= 'silent';
 
-const { createApp } = await import('../apps/api/src/index.ts');
+const { createApp, adminUserDirectoryLogFields } = await import('../apps/api/src/index.ts');
 
 const user = { id: 'user-a', role: 'user' } as any;
+const admin = { id: 'admin-a', role: 'admin' } as any;
 const progressKey = 'source:opaque-key';
 const resolvedSourcePath = 'issue.cbz';
 const origin = 'http://localhost:8080';
@@ -100,6 +101,102 @@ test('importing createApp is startup-safe and unauthenticated user state is 401'
     new Request('http://api/user-state/export'),
   );
   assert.equal(response.status, 401);
+});
+
+test('admin user directory enforces auth, validates queries, and returns only the safe projection', async () => {
+  const listCalls: unknown[] = [];
+  const directory = {
+    items: [
+      {
+        id: 'opaque-user',
+        name: 'Reader',
+        email: 'reader@example.invalid',
+        role: 'user',
+        banned: false,
+      },
+    ],
+    nextCursor: null,
+  };
+  const app = makeApp({
+    authenticatedUser: async (request) =>
+      request.headers.get('authorization') === 'Bearer admin-a' ? admin : user,
+    listAdminUsers: async (query) => {
+      listCalls.push(query);
+      return directory;
+    },
+  });
+  assert.equal(
+    (
+      await createApp({ authenticatedUser: async () => null } as ApiDeps).fetch(
+        new Request('http://api/admin/users'),
+      )
+    ).status,
+    401,
+  );
+  assert.equal((await request(app, '/admin/users')).status, 404);
+  const response = await app.fetch(
+    new Request('http://api/admin/users?limit=2&q=Reader', {
+      headers: { authorization: 'Bearer admin-a' },
+    }),
+  );
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), directory);
+  assert.deepEqual(listCalls, [{ q: 'Reader', limit: 2, cursor: undefined }]);
+  for (const query of ['limit=0', 'limit=101', 'limit=1.5', 'q=' + 'x'.repeat(257), 'unknown=x']) {
+    const invalid = await app.fetch(
+      new Request(`http://api/admin/users?${query}`, {
+        headers: { authorization: 'Bearer admin-a' },
+      }),
+    );
+    assert.equal(invalid.status, 400, query);
+  }
+});
+
+test('admin directory structured read event is bounded and contains no query or PII', () => {
+  const event = adminUserDirectoryLogFields('request-1', true, 1000);
+  assert.deepEqual(event, {
+    requestId: 'request-1',
+    action: 'admin_user_directory_read',
+    admin: true,
+    filtered: true,
+    resultCount: 100,
+  });
+  assert.doesNotMatch(JSON.stringify(event), /Reader|reader@example|secret|cursor|q=/);
+});
+
+test('admin user directory preserves deterministic pages and rejects cursor/filter mutations', async () => {
+  const calls: unknown[] = [];
+  const app = makeApp({
+    authenticatedUser: async () => admin,
+    listAdminUsers: async (query) => {
+      calls.push(query);
+      if (query.cursor === 'mutated') throw new Error('invalid_cursor');
+      return query.cursor
+        ? { items: [], nextCursor: null }
+        : {
+            items: [{ id: 'u-2', name: 'B', email: 'b', role: null, banned: false }],
+            nextCursor: 'opaque.cursor.mac',
+          };
+    },
+  });
+  const first = await app.fetch(
+    new Request('http://api/admin/users?limit=1', { headers: { authorization: 'Bearer admin-a' } }),
+  );
+  assert.equal(first.status, 200);
+  assert.equal((await first.json()).nextCursor, 'opaque.cursor.mac');
+  const second = await app.fetch(
+    new Request('http://api/admin/users?limit=1&cursor=opaque.cursor.mac', {
+      headers: { authorization: 'Bearer admin-a' },
+    }),
+  );
+  assert.equal(second.status, 200);
+  const invalid = await app.fetch(
+    new Request('http://api/admin/users?cursor=mutated', {
+      headers: { authorization: 'Bearer admin-a' },
+    }),
+  );
+  assert.equal(invalid.status, 400);
+  assert.equal(calls.length, 3);
 });
 
 test('resume validates bounded limits and returns only opaque user-scoped entries', async () => {

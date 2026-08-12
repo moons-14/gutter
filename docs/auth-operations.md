@@ -14,7 +14,17 @@ bootstrap; non-local origins are rejected at startup and use Secure cookies.
 On a new database, POST `/api/auth/bootstrap` once with Better Auth's email/password signup body.
 That request atomically consumes the bootstrap claim and creates the first account with the `admin`
 role. `/api/auth/sign-up/email` is always rejected by Gutter, so later accounts require an admin
-flow (not yet exposed in the browser UI).
+flow.
+
+Administrators can select existing accounts in the browser at `/settings/admin`. The directory is
+served by the internal `GET /admin/users` endpoint (browser proxy: `/api/admin/users`) and returns
+only opaque user ID, name, email, role, and banned status. It supports bounded case-insensitive
+search and keyset pagination; anonymous requests receive 401 and non-admin requests receive a
+non-enumerating 404. Directory reads emit bounded structured request metadata without search text
+or user PII and are not durable audit events.
+Directory cursors are signed with a key derived from `BETTER_AUTH_SECRET`; rotating that secret or
+restarting with a different secret intentionally invalidates all outstanding cursors, which clients
+must treat as a fresh first-page request.
 
 Library access is deny-by-default for ordinary users. An authenticated administrator can grant or
 revoke a stable configured root with `PUT` or `DELETE`

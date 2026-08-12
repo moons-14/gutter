@@ -10,6 +10,7 @@ import {
   catalogSeriesDetailRoute,
   catalogSeriesRoute,
   healthRoute,
+  adminUsersRoute,
   readinessRoute,
   userStateBookmarkDeleteRoute,
   userStateBookmarkPostRoute,
@@ -32,6 +33,7 @@ import {
   catalogSeriesDetail,
   canAccessLibrary,
   changeLibraryAccess,
+  listAdminUsers,
   addUserBookmark,
   createUserCollection,
   deleteUserBookmark,
@@ -70,6 +72,19 @@ import { authenticatedUser, authHandler, trustedMutationOrigin } from './auth.js
 const log = pino({
   redact: ['req.headers.authorization', 'req.headers.cookie', '*.password', '*.token'],
 });
+export function adminUserDirectoryLogFields(
+  requestId: string | undefined,
+  filtered: boolean,
+  resultCount: number,
+) {
+  return {
+    requestId,
+    action: 'admin_user_directory_read' as const,
+    admin: true as const,
+    filtered,
+    resultCount: Math.max(0, Math.min(100, resultCount)),
+  };
+}
 const metrics = new Registry();
 collectDefaultMetrics({ register: metrics });
 const reconciliationRequests = new Gauge({
@@ -102,6 +117,7 @@ export type ApiDeps = Readonly<{
   exportUserState?: typeof exportUserState;
   permanentlyDeleteUser?: typeof permanentlyDeleteUser;
   changeLibraryAccess?: typeof changeLibraryAccess;
+  listAdminUsers?: typeof listAdminUsers;
   readerCapabilityKey?: string;
 }>;
 export const productionDeps: Required<ApiDeps> = {
@@ -128,6 +144,7 @@ export const productionDeps: Required<ApiDeps> = {
   exportUserState,
   permanentlyDeleteUser,
   changeLibraryAccess,
+  listAdminUsers,
   readerCapabilityKey: '',
 };
 /** Build a fresh application. Importing this module has no schema/serve side effects. */
@@ -157,6 +174,7 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
     exportUserState,
     permanentlyDeleteUser,
     changeLibraryAccess,
+    listAdminUsers,
   } = resolved;
   const app = new OpenAPIHono();
   const readerKey = resolved.readerCapabilityKey || null;
@@ -176,6 +194,26 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
       },
       'request',
     );
+  });
+  app.openapi(adminUsersRoute, async (c) => {
+    const actor = await authenticatedUser(c.req.raw);
+    if (!actor) return c.json({ error: 'authentication_required' as const }, 401);
+    if (actor.role !== 'admin') return c.json({ error: 'not_found' as const }, 404);
+    const parsed = c.req.valid('query');
+    const q = parsed.q?.trim() ?? '';
+    if (q.length > 256) return c.json({ error: 'invalid_request' as const }, 400);
+    try {
+      const result = await listAdminUsers({ q, limit: parsed.limit, cursor: parsed.cursor });
+      log.info(
+        adminUserDirectoryLogFields(c.req.header('x-request-id'), Boolean(q), result.items.length),
+        'admin directory read',
+      );
+      return c.json(result, 200);
+    } catch (error) {
+      if (error instanceof Error && error.message === 'invalid_cursor')
+        return c.json({ error: 'invalid_cursor' as const }, 400);
+      throw error;
+    }
   });
   app.openapi(healthRoute, (c) => c.json({ status: 'ok' }, 200));
   app.post('/api/auth/bootstrap', async (c) => {
