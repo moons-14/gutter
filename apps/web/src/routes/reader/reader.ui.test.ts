@@ -37,6 +37,31 @@ function readerFetch() {
 }
 
 describe('reader interaction UI', () => {
+  it('makes access denial and empty-source failures actionable', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({ ok: false, status: 403, json: async () => ({}) })),
+    );
+    render(Reader, { data: { id: 'denied' } });
+    await waitFor(() =>
+      expect(screen.getByRole('alert').textContent).toContain('アクセスが許可されていません'),
+    );
+    expect(screen.getByRole('button', { name: '再試行' })).toBeTruthy();
+    cleanup();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({ release: { ...release, validOrdinals: [], validPageCount: 0 } }),
+      })),
+    );
+    render(Reader, { data: { id: '7' } });
+    await waitFor(() =>
+      expect(screen.getByRole('alert').textContent).toContain('読めるページがありません'),
+    );
+  });
+
   it('renders labelled controls and only navigates valid ordinals', async () => {
     vi.stubGlobal('fetch', readerFetch());
     render(Reader, { data: { id: '7' } });
@@ -68,6 +93,89 @@ describe('reader interaction UI', () => {
     expect(fetcher.mock.calls.some(([url]) => String(url).includes('/releases/9/pages/1'))).toBe(
       true,
     );
+  });
+
+  it('rejects malformed publication session release IDs', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string) =>
+        input.includes('/publications/')
+          ? { ok: true, status: 200, json: async () => ({ session: { releaseId: '-1', release } }) }
+          : { ok: true, status: 200, blob: async () => new Blob(['page']) },
+      ),
+    );
+    render(Reader, { data: { id: '42' }, publication: true });
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('見つからないか'));
+    expect(screen.queryByRole('img')).toBeNull();
+  });
+
+  it('does not interpolate malformed speculative next-release IDs', async () => {
+    const calls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string) => {
+        calls.push(input);
+        if (input.includes('/publications/12'))
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({ session: { releaseId: '-9', release } }),
+          };
+        if (input.includes('/pages/'))
+          return { ok: true, status: 200, blob: async () => new Blob(['page']) };
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ release: { ...release, nextPublicationId: '12' } }),
+        };
+      }),
+    );
+    render(Reader, { data: { id: '7' } });
+    await waitFor(() => expect(screen.getByRole('img', { name: 'ページ 1' })).toBeTruthy());
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(calls.some((input) => input.includes('/releases/-9/'))).toBe(false);
+  });
+
+  it('maps descriptor statuses and retry recovery without exposing source details', async () => {
+    for (const [status, message] of [
+      [401, 'アクセスが許可されていません'],
+      [404, '見つからないか'],
+      [502, '現在利用できません'],
+      [503, '現在利用できません'],
+      [504, '現在利用できません'],
+    ] as const) {
+      cleanup();
+      let attempt = 0;
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () =>
+          attempt++ === 0
+            ? { ok: false, status, json: async () => ({}) }
+            : { ok: true, status: 200, json: async () => ({ release }) },
+        ),
+      );
+      render(Reader, { data: { id: '7' } });
+      await waitFor(() => expect(screen.getByRole('alert').textContent).toContain(message));
+      await fireEvent.click(screen.getByRole('button', { name: '再試行' }));
+      await waitFor(() => expect(screen.getByRole('button', { name: '次のページ' })).toBeTruthy());
+    }
+    cleanup();
+    let networkAttempt = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string) => {
+        if (input.includes('/pages/'))
+          return { ok: false, status: 0, blob: async () => new Blob() };
+        if (networkAttempt++ === 0) throw new Error('offline');
+        return { ok: true, status: 200, json: async () => ({ release }) };
+      }),
+    );
+    render(Reader, { data: { id: '7' } });
+    await waitFor(() =>
+      expect(screen.getByRole('alert').textContent).toContain('現在利用できません'),
+    );
+    await fireEvent.click(screen.getByRole('button', { name: '再試行' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: '次のページ' })).toBeTruthy());
   });
 
   it('hands a completed next-page Blob to the destination reader without a second byte fetch', async () => {
@@ -138,7 +246,17 @@ describe('reader interaction UI', () => {
     );
     vi.stubGlobal('fetch', fetcher);
     render(Reader, { data: { id: '7' } });
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'リーダーのページ操作' })).toBeTruthy(),
+    );
+    const surface = screen.getByRole('button', { name: 'リーダーのページ操作' });
+    surface.focus();
     await waitFor(() => expect(screen.getByRole('button', { name: '続きから読む' })).toBeTruthy());
+    await waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByRole('button', { name: '続きから読む' })),
+    );
+    await fireEvent.click(screen.getByRole('button', { name: '続きから読む' }));
+    expect(document.activeElement).toBe(surface);
     expect(
       fetcher.mock.calls.filter(([url]) => String(url).includes('/user-state/progress?')),
     ).toHaveLength(1);

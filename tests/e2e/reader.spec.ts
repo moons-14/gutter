@@ -64,18 +64,21 @@ test('reader reports a page failure honestly while offline', async ({ page }) =>
 test('signed-in reader resumes, persists progress, and bookmarks the current page', async ({
   page,
 }) => {
-  await page.route('**/api/auth/get-session', (route) =>
-    route.fulfill({
+  let sessionRequests = 0;
+  await page.route('**/api/auth/get-session**', (route) => {
+    sessionRequests += 1;
+    return route.fulfill({
       contentType: 'application/json',
       body: JSON.stringify({
         user: { id: 'user-playwright', name: 'Reader', email: 'reader@example.test' },
         session: { id: 'session-playwright', userId: 'user-playwright' },
       }),
-    }),
-  );
+    });
+  });
   await stubReader(page);
 
   const progressPutBodies: Record<string, unknown>[] = [];
+  let serverRevision = 4;
   await page.route('**/api/user-state/progress**', async (route) => {
     const request = route.request();
     const url = new URL(request.url());
@@ -106,7 +109,7 @@ test('signed-in reader resumes, persists progress, and bookmarks the current pag
           progressKey: 'source:playwright',
           pageOrdinal: body.pageOrdinal,
           completed: body.completed,
-          revision: 5,
+          revision: ++serverRevision,
         },
       }),
     });
@@ -123,6 +126,7 @@ test('signed-in reader resumes, persists progress, and bookmarks the current pag
   });
 
   await page.goto('/reader/publications/7');
+  await expect.poll(() => sessionRequests).toBeGreaterThan(0);
   await expect(page.getByRole('button', { name: '続きから読む' })).toBeVisible();
   await expect(page.getByText('1 / 3')).toBeVisible();
   await page.getByRole('button', { name: '続きから読む' }).click();
@@ -130,14 +134,18 @@ test('signed-in reader resumes, persists progress, and bookmarks the current pag
   await page.getByRole('button', { name: '次のページ' }).click();
   await expect(page.getByText('3 / 3')).toBeVisible();
   await expect
-    .poll(() => progressPutBodies)
-    .toContainEqual({
-      rootId: 'root-playwright',
-      progressKey: 'source:playwright',
-      expectedRevision: 4,
-      pageOrdinal: 5,
-      completed: true,
-    });
+    .poll(() => progressPutBodies.some((body) => body.pageOrdinal === 5 && body.completed === true))
+    .toBe(true);
+  const finalProgress = progressPutBodies.find(
+    (body) => body.pageOrdinal === 5 && body.completed === true,
+  )!;
+  expect(finalProgress).toMatchObject({
+    rootId: 'root-playwright',
+    progressKey: 'source:playwright',
+    pageOrdinal: 5,
+    completed: true,
+  });
+  expect(finalProgress.expectedRevision).toBeGreaterThanOrEqual(4);
 
   await page.getByRole('button', { name: 'しおりを保存' }).click();
   await expect(page.getByRole('status')).toContainText('保存');

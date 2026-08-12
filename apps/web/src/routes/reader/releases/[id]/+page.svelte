@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, onMount } from 'svelte';
+  import { onDestroy, onMount, tick } from 'svelte';
   import { get } from 'svelte/store';
   import { currentDestination, loginHref, session } from '$lib/session';
   import {
@@ -13,6 +13,7 @@
   export let publication = false;
   let state: ReaderState | null = null;
   let error = '';
+  let errorKind: 'access' | 'missing' | 'empty' | 'unavailable' | 'failure' = 'failure';
   let pageError: number | null = null;
   let resourceVersion = 0;
   let scheduler: PageResourceScheduler | null = null;
@@ -23,6 +24,9 @@
   let nextTransferred = false;
   let incomingHandoff: ReturnType<typeof takeNextHandoff> = null;
   let showResume = false;
+  let resumeDialog: HTMLElement;
+  let resumePrimary: HTMLButtonElement;
+  let resumeFocusOrigin: HTMLElement | null = null;
   let startX: number | null = null;
   let pendingResume: number | null = null;
   let pointerTapReady = false;
@@ -45,6 +49,13 @@
   let remotePutAbortController: AbortController | null = null;
   let descriptorGeneration = 0;
   const visibility = new Map<number, number>();
+  const validReleaseId = (value: unknown): value is string => typeof value === 'string' && /^[1-9][0-9]*$/.test(value);
+  function setResumeVisible(next: boolean) {
+    if (next && !showResume && typeof document !== 'undefined') resumeFocusOrigin = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    showResume = next;
+    if (next) setTimeout(() => resumePrimary?.focus(), 0);
+  }
+  $: if (showResume) void focusResume();
 
   async function loadDescriptor(refresh = false) {
     const generation = ++descriptorGeneration;
@@ -59,17 +70,22 @@
     }
     try {
       error = '';
+      errorKind = 'failure';
       nextSession = null;
       nextTransferred = false;
       const response = await fetch(
         publication ? `/api/reader/publications/${data.id}` : `/api/reader/releases/${data.id}`,
         { cache: 'no-store' },
       );
-      const body: { release: ReaderDescriptor | null; session: { releaseId: string; release: ReaderDescriptor } | null } = await response.json();
+      const body = (await response.json().catch(() => ({}))) as { release?: ReaderDescriptor | null; session?: { releaseId: string; release: ReaderDescriptor } | null };
       const releaseId = publication ? body.session?.releaseId : data.id;
       const descriptor = publication ? body.session?.release : body.release;
-      if (!response.ok || !releaseId || !descriptor || descriptor.validOrdinals.length === 0)
+      if (!response.ok) {
+        errorKind = response.status === 401 || response.status === 403 ? 'access' : response.status === 404 ? 'missing' : 'unavailable';
         throw new Error('reader_unavailable');
+      }
+      if (!validReleaseId(releaseId) || !descriptor) { errorKind = 'missing'; throw new Error('reader_missing'); }
+      if (descriptor.validOrdinals.length === 0) { errorKind = 'empty'; throw new Error('reader_empty'); }
       const saved = refresh ? null : loadProgress(descriptor);
       state = {
         releaseId,
@@ -84,13 +100,13 @@
         incomingHandoff = null;
       }
       pendingResume = saved;
-      showResume = saved !== null && saved !== state.ordinal;
+      setResumeVisible(saved !== null && saved !== state.ordinal);
       remoteLoaded = false;
       remoteStatus = '';
       remoteError = '';
       void loadRemoteProgress(generation);
     } catch {
-      error = 'このリリースは現在読めません。';
+      error = errorKind === 'access' ? 'このリリースへのアクセスが許可されていません。' : errorKind === 'missing' ? 'このリリースは見つからないか、現在利用できません。' : errorKind === 'empty' ? '読めるページがありません。' : 'このリリースは現在利用できません。ネットワークやライブラリの状態を確認してください。';
     } finally {
       refreshingDescriptor = false;
     }
@@ -127,7 +143,7 @@
       const ordinal = progress?.pageOrdinal;
       if (typeof ordinal === 'number' && Number.isInteger(ordinal) && descriptor.validOrdinals.includes(ordinal)) {
         pendingResume = ordinal;
-        showResume = ordinal !== state.ordinal;
+        setResumeVisible(ordinal !== state.ordinal);
         state = { ...state, persistProgress: true };
       }
       lastRemoteOrdinal = state.ordinal;
@@ -164,7 +180,7 @@
         if (typeof progress.revision === 'number') remoteRevision = progress.revision;
         if (typeof progress.pageOrdinal === 'number' && descriptor.validOrdinals.includes(progress.pageOrdinal)) {
           pendingResume = progress.pageOrdinal;
-          showResume = progress.pageOrdinal !== state.ordinal;
+          setResumeVisible(progress.pageOrdinal !== state.ordinal);
         }
         remoteStatus = 'サーバー側の読書位置を採用しました。';
         lastRemoteOrdinal = state.ordinal;
@@ -231,7 +247,7 @@
           const publicationId = key.slice(5);
           const response = await fetch(`/api/reader/publications/${publicationId}`, { cache: 'no-store', signal });
           const body: { session: { releaseId: string; release: ReaderDescriptor } | null } = await response.json();
-          if (!response.ok || !body.session || body.session.release.validOrdinals.length === 0) throw new Error('next_unavailable');
+          if (!response.ok || !body.session || !validReleaseId(body.session.releaseId) || body.session.release.validOrdinals.length === 0) throw new Error('next_unavailable');
           nextSession = { releaseId: body.session.releaseId, ordinal: body.session.release.validOrdinals[0] };
           return `/api/reader/releases/${body.session.releaseId}/pages/${body.session.release.validOrdinals[0]}`;
         },
@@ -265,12 +281,21 @@
   }
 
   function navigate(step: -1 | 1) { if (state) { direction = step; state = { ...move(state, step), persistProgress: true }; pageError = null; } }
+  async function focusResume() {
+    await tick();
+    if (showResume) resumePrimary?.focus();
+  }
+  function restoreResumeFocus() {
+    const target = resumeFocusOrigin && document.contains(resumeFocusOrigin) ? resumeFocusOrigin : document.querySelector<HTMLButtonElement>('.reader-surface');
+    target?.focus(); resumeFocusOrigin = null;
+  }
   function resume() {
     if (state && pendingResume !== null) state = { ...state, ordinal: pendingResume, persistProgress: true };
-    showResume = false;
+    setResumeVisible(false);
     pendingResume = null;
+    restoreResumeFocus();
   }
-  function startOver() { if (state) state = { ...state, ordinal: state.descriptor.validOrdinals[0]!, persistProgress: true }; showResume = false; pendingResume = null; }
+  function startOver() { if (state) state = { ...state, ordinal: state.descriptor.validOrdinals[0]!, persistProgress: true }; setResumeVisible(false); pendingResume = null; restoreResumeFocus(); }
   function updatePresentation(update: Partial<typeof defaultPresentation>) { if (state) state = setPresentation(state, update); }
   function changeMode(event: Event) {
     const mode = (event.currentTarget as HTMLSelectElement).value;
@@ -368,12 +393,13 @@
 <section bind:this={reader} class:width-fit={state?.presentation.fit === 'width'} class="reader" aria-label="リーダー">
   <button class="reader-surface" type="button" aria-label="リーダーのページ操作" onkeydown={keydown} onpointerdown={pointerdown} onpointerup={pointerup} onpointercancel={pointercancel} onclick={tap} ondblclick={doubleTap}></button>
   {#if error}
-    <div class="slot"><p role="alert">{error}</p><button onclick={() => globalThis.location.reload()}>再試行</button></div>
+    <div class="slot"><p role="alert">{error}</p><button onclick={() => void loadDescriptor(true)}>再試行</button></div>
   {:else if !state}
     <p aria-live="polite">読み込み中…</p>
   {:else}
+    <p class="reader-help" aria-label="リーダーの使い方">左右キー・スワイプでページ移動。ダブルタップで拡大。表示形式・読む方向・全画面は下の操作から変更できます。</p>
     {#if showResume}
-      <div class="resume" role="dialog" aria-label="読書を再開"><p>前回の続きがあります。</p><button onclick={resume}>続きから読む</button><button onclick={startOver}>最初から読む</button></div>
+      <div bind:this={resumeDialog} class="resume" role="dialog" aria-modal="true" aria-labelledby="resume-title"><h2 id="resume-title">読書を再開</h2><p>前回の続きがあります。</p><button bind:this={resumePrimary} onclick={resume}>続きから読む</button><button onclick={startOver}>最初から読む</button></div>
     {/if}
     <div class:spread={state.presentation.mode === 'spread'} class="pages" data-resource-version={resourceVersion} style:transform={`scale(${state.presentation.zoom})`} aria-live="polite">
       {#each rendered as page (page)}
@@ -417,6 +443,7 @@
   :global(main) { padding: 0; }
   :global(main > header) { display: none; }
   .reader { position: relative; min-height: 100vh; display: grid; place-items: center; background: #000; overflow: auto; }
+  .reader-help { position: fixed; z-index: 2; top: 1rem; left: 1rem; max-width: min(32rem, calc(100vw - 2rem)); margin: 0; padding: .5rem .75rem; color: #d7dbe5; background: rgb(0 0 0 / .72); border-radius: .4rem; font-size: .875rem; }
   .reader-surface { position: fixed; inset: 0; z-index: 1; width: 100vw; height: 100vh; border: 0; background: transparent; cursor: pointer; }
   .reader-surface:focus-visible { outline: 3px solid #7dd3fc; outline-offset: -3px; }
   .pages { position: relative; z-index: 0; display: flex; max-width: 100vw; max-height: 100vh; pointer-events: none; transition: transform .15s ease; transform-origin: center; }

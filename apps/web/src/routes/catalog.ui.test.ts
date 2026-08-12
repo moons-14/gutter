@@ -4,13 +4,89 @@ import CatalogPage from './+page.svelte';
 import PublicationPage from './publications/[id]/+page.svelte';
 import EntityListPage from './[entity=entity]/+page.svelte';
 import EntityDetailPage from './[entity=entity]/[id]/+page.svelte';
+import { session } from '$lib/session';
 
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+  session.set({ loading: true, user: null });
 });
 
 describe('catalog UI runtime states', () => {
+  it('shows authenticated resume entries and routes directly to their release reader', async () => {
+    session.set({ loading: false, user: { id: 'reader-1' } });
+    const fetchMock = vi.fn(async (input: string) =>
+      input.includes('/user-state/resume')
+        ? {
+            ok: true,
+            json: async () => ({ items: [{ releaseId: '42', pageOrdinal: 7, completed: false }] }),
+          }
+        : { ok: true, json: async () => ({ items: [], nextCursor: null }) },
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    render(CatalogPage);
+    await waitFor(() =>
+      expect(screen.getByRole('link', { name: /リリース 42/ }).getAttribute('href')).toBe(
+        '/reader/releases/42',
+      ),
+    );
+    expect(
+      fetchMock.mock.calls.some(([url]) => String(url).includes('/user-state/resume?limit=6')),
+    ).toBe(true);
+  });
+
+  it('binds resume requests to the current user and ignores stale responses', async () => {
+    session.set({ loading: false, user: { id: 'user-a' } });
+    const pending: Array<(response: Response) => void> = [];
+    const fetchMock = vi.fn(async (input: string) =>
+      input.includes('/user-state/resume')
+        ? new Promise<Response>((resolve) => pending.push(resolve))
+        : ({ ok: true, json: async () => ({ items: [], nextCursor: null }) } as Response),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    render(CatalogPage);
+    await waitFor(() => expect(pending).toHaveLength(1));
+    session.set({ loading: false, user: null });
+    session.set({ loading: false, user: { id: 'user-b' } });
+    await waitFor(() => expect(pending).toHaveLength(2));
+    pending[0]!({
+      ok: true,
+      json: async () => ({ items: [{ releaseId: '999', pageOrdinal: 1, completed: false }] }),
+    } as Response);
+    pending[1]!({
+      ok: true,
+      json: async () => ({ items: [{ releaseId: '42', pageOrdinal: 3, completed: false }] }),
+    } as Response);
+    await waitFor(() => expect(screen.getByRole('link', { name: /リリース 42/ })).toBeTruthy());
+    expect(screen.queryByRole('link', { name: /999/ })).toBeNull();
+    expect(
+      fetchMock.mock.calls.filter(([url]) => String(url).includes('/user-state/resume')),
+    ).toHaveLength(2);
+  });
+
+  it('filters malformed resume release IDs before rendering links', async () => {
+    session.set({ loading: false, user: { id: 'reader-1' } });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string) =>
+        input.includes('/user-state/resume')
+          ? {
+              ok: true,
+              json: async () => ({
+                items: [
+                  { releaseId: '-1', pageOrdinal: 1, completed: false },
+                  { releaseId: '0', pageOrdinal: 1, completed: false },
+                ],
+              }),
+            }
+          : { ok: true, json: async () => ({ items: [], nextCursor: null }) },
+      ),
+    );
+    render(CatalogPage);
+    await waitFor(() => expect(screen.getByText('続きから読める作品はありません。')).toBeTruthy());
+    expect(screen.queryByRole('link', { name: /-1|0/ })).toBeNull();
+  });
+
   it('keeps loading separate from successful empty and offers retry after failure', async () => {
     let resolve!: (value: { ok: boolean; status?: number; json: () => Promise<unknown> }) => void;
     vi.stubGlobal(
