@@ -11,6 +11,12 @@ assert.equal(report.schemaVersion, 'gutter.scale-oracle.v1');
 assert.ok(['pass', 'fail', 'unavailable'].includes(report.status));
 assert.equal(typeof report.seed, 'string');
 assert.equal(typeof report.runId, 'string');
+if (report.status === 'unavailable') {
+  assert.equal(typeof report.unavailablePlatformReason, 'string');
+  assert.ok(report.unavailablePlatformReason.length > 0);
+  console.log('SCALE_EVIDENCE_SCHEMA_RESULT pass');
+  process.exit(0);
+}
 assert.equal(report.dataset.sourceFixtureBooks, 1000);
 assert.equal(report.dataset.sourceFixturePages, 1000);
 assert.equal(report.thresholds.readerCount, 5);

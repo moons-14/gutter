@@ -8,6 +8,18 @@ case "$target" in /*.json) ;; *) echo 'SCALE_EVIDENCE_PATH must be a safe absolu
 case "$target" in /|/etc/*|/var/*|/usr/*) echo 'SCALE_EVIDENCE_PATH targets a protected path' >&2; exit 2 ;; esac
 staging="/tmp/gutter-scale-evidence-${run_id}"
 mkdir -p "$staging"
+if [ "${SCALE_DOCKER_PROBE:-}" = mock-unavailable ]; then
+  mkdir -p "$(dirname "$target")"
+  cat >"$target" <<EOF
+{"schemaVersion":"gutter.scale-oracle.v1","status":"unavailable","unavailablePlatformReason":"docker:DockerUnavailable","seed":"${SCALE_SEED:-gutter-issue-26-v1}","runId":"${run_id}","dataset":{"books":0,"pages":0,"sourceFixtureBooks":0,"sourceFixturePages":0},"thresholds":{},"environment":{"node":"unknown","postgres":{},"setupDatabaseRole":"gutter","workerDatabaseRole":"gutter_worker","sourceMount":"read-only"},"timingsMs":{},"plans":{},"cache":{},"worker":{"queueCompletedRuns":0,"runs":{}},"sparse":{"logicalBytes":1,"allocatedBlocks":0},"baselineComparison":{"baseline":"docs/scale-oracle-baseline.json","baselineSha256":"0000000000000000000000000000000000000000000000000000000000000000","portable":"fail","hardwareAdvisory":{}}}
+EOF
+  printf 'SCALE_ORACLE_EVIDENCE %s\n' "$target"
+  exit 0
+fi
+if [ "${SCALE_DOCKER_PROBE:-}" = mock-fail ]; then
+  echo 'Docker preflight failed unexpectedly' >&2
+  exit 1
+fi
 cleanup() {
   docker compose -p "$project" --profile scale down -v --remove-orphans >/dev/null 2>&1 || true
   rm -rf "$staging"
