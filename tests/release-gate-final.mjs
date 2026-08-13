@@ -157,17 +157,31 @@ async function buildFixture() {
   for (const subject of subjects) {
     const sbomPath = `release-artifacts/${subject.service}.sbom.json`;
     const provenancePath = `release-artifacts/${subject.service}.provenance.json`;
-    const payload = {
-      subject: subject.reference,
-      image: subject.reference,
-      digest: subject.digest,
-      components: [{ bomRef: subject.digest, name: subject.service }],
-    };
+    const imageName = subject.reference.slice(0, subject.reference.indexOf('@'));
     await addArtifact(
       sbomPath,
       'sbom-report',
       'sbom',
-      JSON.stringify({ bomFormat: 'CycloneDX', ...payload }),
+      JSON.stringify({
+        bomFormat: 'CycloneDX',
+        specVersion: '1.6',
+        metadata: {
+          component: {
+            'bom-ref': `fixture-${subject.service}`,
+            type: 'container',
+            name: imageName,
+            version: subject.digest,
+          },
+        },
+        components: [
+          {
+            'bom-ref': `pkg:npm/fixture-${subject.service}@1.0.0`,
+            type: 'library',
+            name: `fixture-${subject.service}`,
+            version: '1.0.0',
+          },
+        ],
+      }),
     );
     await addArtifact(
       provenancePath,
@@ -280,6 +294,19 @@ async function withFixture(mutator, expected) {
   }
 }
 
+async function replaceArtifact(root, path, value) {
+  const bytes = Buffer.from(JSON.stringify(value));
+  await writeFile(join(root, path), bytes);
+  const evidencePath = join(root, 'evidence.json');
+  const evidence = JSON.parse(await readFile(evidencePath, 'utf8'));
+  const artifact = evidence.gates
+    .flatMap((gate) => gate.artifacts)
+    .find((entry) => entry.path === path);
+  assert.ok(artifact, `fixture artifact is missing: ${path}`);
+  artifact.sha256 = sha256(bytes);
+  await writeFile(evidencePath, JSON.stringify(evidence));
+}
+
 test('final mode accepts a complete isolated release fixture', async () => {
   const fixture = await buildFixture();
   try {
@@ -319,6 +346,32 @@ test('final mode rejects swapped SBOM subjects', () =>
     artifact.sha256 = sha256(Buffer.from(other));
     await writeFile(evidencePath, JSON.stringify(evidence));
   }, /sha256:1111111111111111111111111111111111111111111111111111111111111111/));
+
+test('final mode rejects synthetic top-level SBOM subject fields', () =>
+  withFixture(async ({ root, subjects }) => {
+    const path = `release-artifacts/${subjects[0].service}.sbom.json`;
+    const parsed = JSON.parse(await readFile(join(root, path), 'utf8'));
+    delete parsed.metadata;
+    parsed.subject = subjects[0].reference;
+    parsed.digest = subjects[0].digest;
+    await replaceArtifact(root, path, parsed);
+  }, /SBOM container type mismatch/));
+
+test('final mode rejects an SBOM component digest mismatch', () =>
+  withFixture(async ({ root, subjects }) => {
+    const path = `release-artifacts/${subjects[0].service}.sbom.json`;
+    const parsed = JSON.parse(await readFile(join(root, path), 'utf8'));
+    parsed.metadata.component.version = subjects[1].digest;
+    await replaceArtifact(root, path, parsed);
+  }, /SBOM digest mismatch/));
+
+test('final mode rejects an empty SBOM package inventory', () =>
+  withFixture(async ({ root, subjects }) => {
+    const path = `release-artifacts/${subjects[0].service}.sbom.json`;
+    const parsed = JSON.parse(await readFile(join(root, path), 'utf8'));
+    parsed.components = [];
+    await replaceArtifact(root, path, parsed);
+  }, /SBOM components missing/));
 
 test('final mode rejects swapped provenance subjects', () =>
   withFixture(async ({ root, subjects }) => {
