@@ -5,7 +5,10 @@ set -eu
 # manufacture release-evidence.json; the release manager must add exact-tree hashes and review
 # the logs before invoking verify-release-gate.mjs final.
 out=${RELEASE_ARTIFACT_DIR:?set RELEASE_ARTIFACT_DIR to a disposable evidence directory}
-mkdir -p "$out"
+case "$out" in /*) out_abs="$out" ;; *) out_abs="$(pwd)/$out" ;; esac
+mkdir -p "$out_abs"
+out=$(cd "$out_abs" && pwd)
+export RELEASE_ARTIFACT_DIR="$out"
 gitleaks_image=${RELEASE_GITLEAKS_IMAGE:?set RELEASE_GITLEAKS_IMAGE to the digest-pinned tool ref}
 trivy_image=${RELEASE_TRIVY_IMAGE:?set RELEASE_TRIVY_IMAGE to the digest-pinned tool ref}
 trivy_db_repository=${RELEASE_TRIVY_DB_REPOSITORY:?set RELEASE_TRIVY_DB_REPOSITORY to the immutable digest-pinned Trivy DB ref}
@@ -21,10 +24,12 @@ results="$out/runner-results.tsv"
 : >"$results"
 failed=0
 generated_secrets=''
+generated_postgres_password=0
 cleanup_generated_secrets() {
   if [ -n "$generated_secrets" ]; then
     rm -f $generated_secrets
   fi
+  if [ "$generated_postgres_password" -eq 1 ]; then unset POSTGRES_PASSWORD; fi
 }
 trap cleanup_generated_secrets EXIT INT TERM
 umask 077
@@ -36,6 +41,11 @@ for secret in api_db_password worker_db_password better_auth_secret reader_capab
     generated_secrets="$generated_secrets $path"
   fi
 done
+if [ -z "${POSTGRES_PASSWORD:-}" ]; then
+  POSTGRES_PASSWORD=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
+  export POSTGRES_PASSWORD
+  generated_postgres_password=1
+fi
 run_gate() {
   id=$1
   shift
@@ -74,9 +84,9 @@ if [ -n "${RELEASE_IMAGE_REGISTRY:-}" ]; then
   printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io -u "${GITHUB_ACTOR:?GITHUB_ACTOR is required}" --password-stdin
 fi
 for service in api worker web; do
-  image_id=$(docker compose images -q "$service" | head -n 1)
+  image_ref="gutter-release-$service:local"
+  image_id=$(docker image inspect --format '{{.Id}}' "$image_ref")
   case "$image_id" in sha256:[0-9a-f][0-9a-f]*) ;; *) echo "missing immutable image ID for $service" >&2; exit 1 ;; esac
-  docker tag "$image_id" "gutter-release-$service:local"
   if [ -n "${RELEASE_IMAGE_REGISTRY:-}" ]; then
     published="$RELEASE_IMAGE_REGISTRY/$service:${GITHUB_SHA:?GITHUB_SHA is required}"
     docker tag "$image_id" "$published"
@@ -84,13 +94,13 @@ for service in api worker web; do
     digest=$(docker image inspect --format '{{index .RepoDigests 0}}' "$published")
     case "$digest" in *@sha256:[0-9a-f][0-9a-f]*) application_image_refs="$application_image_refs $digest" ;; *) echo "missing registry digest for $service" >&2; exit 1 ;; esac
   else
-    application_image_refs="$application_image_refs gutter-release-$service:local@$image_id"
+    application_image_refs="$application_image_refs local/gutter-release-$service@$image_id"
   fi
 done
 export RELEASE_IMAGE_REFS="$application_image_refs"
 run_gate containers 'trivy built application image IDs' sh -ec 'for image in $RELEASE_IMAGE_REFS; do docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "$RELEASE_TRIVY_IMAGE" image --db-repository "$RELEASE_TRIVY_DB_REPOSITORY" --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed "${image%%@*}"; done'
-run_gate sbom 'syft built application image IDs cyclonedx' sh -ec 'for image in $RELEASE_IMAGE_REFS; do name=$(printf "%s" "$image" | tr "/:@" "___"); docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "$RELEASE_SYFT_IMAGE" "${image%%@*}" -o cyclonedx-json >"$RELEASE_ARTIFACT_DIR/$name.sbom.json"; sha256sum "$RELEASE_ARTIFACT_DIR/$name.sbom.json" >"$RELEASE_ARTIFACT_DIR/$name.sbom.json.sha256"; done'
-run_gate provenance 'cosign built application image attestations' sh -ec 'for image in $RELEASE_IMAGE_REFS; do name=$(printf "%s" "$image" | tr "/:@" "___"); docker run --rm "$RELEASE_COSIGN_IMAGE" verify-attestation --type slsaprovenance --certificate-identity-regexp "$RELEASE_COSIGN_CERTIFICATE_IDENTITY_REGEXP" --certificate-oidc-issuer "$RELEASE_COSIGN_OIDC_ISSUER" "${image%%@*}" --output json >"$RELEASE_ARTIFACT_DIR/$name.provenance.json"; done'
+run_gate sbom 'syft built application image IDs cyclonedx' sh -ec 'for service in api worker web; do docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "$RELEASE_SYFT_IMAGE" "gutter-release-$service:local" -o cyclonedx-json >"$RELEASE_ARTIFACT_DIR/$service.sbom.json"; sha256sum "$RELEASE_ARTIFACT_DIR/$service.sbom.json" >"$RELEASE_ARTIFACT_DIR/$service.sbom.json.sha256"; done'
+run_gate provenance 'cosign built application image attestations' sh -ec 'for image in $RELEASE_IMAGE_REFS; do service=$(printf "%s" "$image" | sed -E "s#^.*/?gutter-release-(api|worker|web)(@.*|:.*)$#\1#"); docker run --rm "$RELEASE_COSIGN_IMAGE" verify-attestation --type slsaprovenance --certificate-identity-regexp "$RELEASE_COSIGN_CERTIFICATE_IDENTITY_REGEXP" --certificate-oidc-issuer "$RELEASE_COSIGN_OIDC_ISSUER" "$image" --output json >"$RELEASE_ARTIFACT_DIR/$service.provenance.json"; done'
 if [ -f docs/scale-oracle-evidence.schema.json ]; then
   run_gate scale-concurrency 'SCALE_FULL=1 production Compose scale oracle' env SCALE_FULL=1 SCALE_EVIDENCE_PATH="$RELEASE_ARTIFACT_DIR/scale-evidence.json" ./scripts/run-scale-oracle.sh
 else

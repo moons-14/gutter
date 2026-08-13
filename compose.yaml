@@ -24,6 +24,7 @@ services:
     networks: [internal]
     secrets: [api_db_password, worker_db_password]
   api:
+    image: gutter-release-api:local
     build: { context: ., target: api }
     command: [node, --import, tsx, src/index.ts]
     environment:
@@ -53,6 +54,7 @@ services:
     networks: [internal]
     secrets: [api_db_password, better_auth_secret, reader_capability_secret]
   worker:
+    image: gutter-release-worker:local
     build: { context: ., target: worker }
     command: [node, --import, tsx, src/index.ts]
     environment:
@@ -70,6 +72,7 @@ services:
     networks: [internal]
     secrets: [worker_db_password, reader_capability_secret]
   web:
+    image: gutter-release-web:local
     build:
       context: .
       dockerfile: Dockerfile.web

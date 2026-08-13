@@ -142,7 +142,10 @@ const imageRefs = [...`${compose}\n${production}`.matchAll(/\bimage:\s*([^\s]+)/
 const fromRefs = [...`${dockerfile}\n${webDockerfile}`.matchAll(/^FROM\s+([^\s]+)/gm)].map(
   (m) => m[1],
 );
-const allImages = [...imageRefs, ...fromRefs.filter((image) => image.includes(':'))];
+const allImages = [
+  ...imageRefs.filter((image) => !image.startsWith('gutter-release-')),
+  ...fromRefs.filter((image) => image.includes(':')),
+];
 for (const image of allImages)
   if (!/@sha256:[0-9a-f]{64}$/.test(image)) throw new Error(`image is not digest pinned: ${image}`);
 const normalizeImageRef = (image) => image.replace(/^docker\.io\/library\//, '');
@@ -405,7 +408,7 @@ for (const image of evidence.images) {
   assert.match(image.reference, /@sha256:[0-9a-f]{64}$/);
   assert.match(image.digest, /^sha256:[0-9a-f]{64}$/);
   assert.ok(
-    /^(?:gutter-release-(?:api|worker|web):local|ghcr\.io\/[^@/]+\/[^@/]+\/(?:api|worker|web):[^@]+)@sha256:[0-9a-f]{64}$/.test(
+    /^(?:local\/gutter-release-(?:api|worker|web)|ghcr\.io\/[^@/]+\/[^@/]+\/(?:api|worker|web))@sha256:[0-9a-f]{64}$/.test(
       image.reference,
     ),
     `evidence image is not an immutable application subject: ${image.reference}`,
@@ -417,13 +420,20 @@ for (const image of evidence.images) {
   );
 }
 for (const image of evidence.images) {
-  const subject = image.reference.slice(0, image.reference.indexOf('@')).replaceAll(':', '_');
+  const subject = image.reference.match(/(?:api|worker|web)(?=@sha256)/)?.[0];
+  assert.ok(subject, `application subject name missing: ${image.reference}`);
   for (const role of ['sbom-report', 'provenance-attestation']) {
     const gateId = role === 'sbom-report' ? 'sbom' : 'provenance';
     assert.ok(
       evidence.gates
         .find((gate) => gate.id === gateId)
-        .artifacts.some((artifact) => artifact.role === role && artifact.path.includes(subject)),
+        .artifacts.some(
+          (artifact) =>
+            artifact.role === role &&
+            artifact.path.endsWith(
+              `${subject}.${role === 'sbom-report' ? 'sbom' : 'provenance'}.json`,
+            ),
+        ),
       `${role} missing for ${image.reference}`,
     );
   }

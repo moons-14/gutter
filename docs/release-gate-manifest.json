@@ -57,7 +57,7 @@
     "backup-restore",
     "scale-concurrency"
   ],
-  "requiredPlatformNames": ["linux", "nfs", "smb"],
+  "requiredPlatformNames": ["linux", "macos-docker", "windows-docker"],
   "requiredImageNames": ["node", "postgres", "caddy"],
   "requiredApplicationImageNames": ["api", "worker", "web"],
   "threatClaims": {

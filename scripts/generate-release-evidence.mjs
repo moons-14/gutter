@@ -113,16 +113,16 @@ const evidence = {
   platforms: [
     { name: 'linux', status: 'pass', command: 'release workflow' },
     {
-      name: 'nfs',
+      name: 'macos-docker',
       status: 'unavailable',
       command: 'release workflow',
-      reason: 'NFS capability requires a configured NFS server/export',
+      reason: 'Docker Desktop macOS runner is not available on this Linux runner',
     },
     {
-      name: 'smb',
+      name: 'windows-docker',
       status: 'unavailable',
       command: 'release workflow',
-      reason: 'SMB capability requires a configured SMB server/share',
+      reason: 'Docker Desktop Windows runner is not available on this Linux runner',
     },
   ],
   references: {
