@@ -17,12 +17,17 @@ chmod 600 "$root/secrets"/*
 checksum=$(sha256sum "$root/source/fixture.txt" | cut -d' ' -f1)
 cat > "$root/override.yaml" <<EOF
 services:
+  web:
+    networks:
+      internal: !override {}
   db:
     environment: { POSTGRES_PASSWORD: drill-db-password }
   migrate:
     environment: { DATABASE_URL: postgresql://gutter:drill-db-password@db:5432/gutter }
   api:
     environment: { DATABASE_HOST: db, DATABASE_NAME: gutter, DATABASE_USER: gutter_api, DATABASE_PASSWORD_FILE: /run/secrets/api_db_password, BETTER_AUTH_SECRET_FILE: /run/secrets/better_auth_secret, GUTTER_READER_CAPABILITY_SECRET_FILE: /run/secrets/reader_capability_secret }
+    networks:
+      internal: !override {}
   worker:
     environment: { DATABASE_HOST: db, DATABASE_NAME: gutter, DATABASE_USER: gutter_worker, DATABASE_PASSWORD_FILE: /run/secrets/worker_db_password, GUTTER_ALLOWED_ROOTS_JSON: '[]' }
 secrets:
@@ -31,8 +36,13 @@ secrets:
   better_auth_secret: { file: $root/secrets/better_auth_secret }
   reader_capability_secret: { file: $root/secrets/reader_capability_secret }
 networks:
-  internal: !reset {}
+  internal: !override
+    internal: true
 EOF
+if [ "${DRILL_CONFIG_ONLY:-}" = 1 ]; then
+  docker compose -p "$project_a" -f compose.yaml -f "$root/override.yaml" config
+  exit 0
+fi
 cleanup() { docker compose -p "$project_a" -f compose.yaml -f "$root/override.yaml" down -v --remove-orphans >/dev/null 2>&1 || true; docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" down -v --remove-orphans >/dev/null 2>&1 || true; }
 trap cleanup EXIT INT TERM
 docker compose -p "$project_a" -f compose.yaml -f "$root/override.yaml" up -d db migrate
