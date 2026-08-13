@@ -4,18 +4,18 @@ jobs:
   quality:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with: { node-version: 24.19.0, package-manager-cache: false }
       - run: corepack enable && corepack prepare pnpm@11.20.0 --activate
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec playwright install --with-deps chrome
-      - run: pnpm audit:licenses && pnpm check && pnpm check:openapi-compat && pnpm test:public && pnpm lint && pnpm typecheck && pnpm unit && pnpm build && pnpm --filter @gutter/web test:e2e
+      - run: pnpm audit:licenses && pnpm verify:release-gate && pnpm check && pnpm check:openapi-compat && pnpm test:public && pnpm lint && pnpm typecheck && pnpm unit && pnpm build && pnpm --filter @gutter/web test:e2e
   compose-smoke:
     needs: quality
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - name: Generate database password
         run: |
           password="$(openssl rand -hex 32)"

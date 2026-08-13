@@ -1,4 +1,4 @@
-FROM node:24.19.0-bookworm-slim AS build
+FROM node:24.19.0-bookworm-slim@sha256:3638d9a6fe4030bd716be989438248074489337ba3275657f93595428be4fc03 AS build
 WORKDIR /src
 RUN corepack enable && corepack prepare pnpm@11.20.0 --activate
 COPY . .
@@ -19,7 +19,7 @@ RUN pnpm exec playwright install --with-deps chromium
 FROM build AS migrate-deploy
 RUN pnpm --filter @gutter/db --prod deploy /out
 
-FROM node:24.19.0-bookworm-slim AS runtime-base
+FROM node:24.19.0-bookworm-slim@sha256:3638d9a6fe4030bd716be989438248074489337ba3275657f93595428be4fc03 AS runtime-base
 WORKDIR /app
 ENV NODE_ENV=production
 RUN useradd --system --uid 10001 gutter \

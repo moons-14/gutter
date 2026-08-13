@@ -1,6 +1,6 @@
 services:
   db:
-    image: postgres:18.1
+    image: postgres:18.1@sha256:1090bc3a8ccfb0b55f78a494d76f8d603434f7e4553543d6e807bc7bd6bbd17f
     environment:
       POSTGRES_DB: gutter
       POSTGRES_USER: gutter
@@ -24,6 +24,7 @@ services:
     networks: [internal]
     secrets: [api_db_password, worker_db_password]
   api:
+    image: gutter-release-api:local
     build: { context: ., target: api }
     command: [node, --import, tsx, src/index.ts]
     environment:
@@ -53,6 +54,7 @@ services:
     networks: [internal]
     secrets: [api_db_password, better_auth_secret, reader_capability_secret]
   worker:
+    image: gutter-release-worker:local
     build: { context: ., target: worker }
     command: [node, --import, tsx, src/index.ts]
     environment:
@@ -70,6 +72,7 @@ services:
     networks: [internal]
     secrets: [worker_db_password, reader_capability_secret]
   web:
+    image: gutter-release-web:local
     build:
       context: .
       dockerfile: Dockerfile.web
@@ -104,7 +107,7 @@ services:
     profiles: [public-api]
     networks: [internal]
   reader-fixture:
-    image: node:24.19.0-bookworm-slim
+    image: node:24.19.0-bookworm-slim@sha256:3638d9a6fe4030bd716be989438248074489337ba3275657f93595428be4fc03
     working_dir: /src
     command: [node, tests/public-reader-fixture.mjs]
     volumes: [.:/src:ro]
@@ -149,7 +152,7 @@ services:
     profiles: [integration]
     networks: [internal]
   integration-db:
-    image: postgres:18.1
+    image: postgres:18.1@sha256:1090bc3a8ccfb0b55f78a494d76f8d603434f7e4553543d6e807bc7bd6bbd17f
     environment:
       POSTGRES_DB: gutter_integration
       POSTGRES_USER: gutter

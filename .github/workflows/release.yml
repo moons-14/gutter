@@ -1,0 +1,42 @@
+name: Release evidence
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+jobs:
+  release-evidence:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with: { node-version: 24.19.0, package-manager-cache: false }
+      - run: corepack enable && corepack prepare pnpm@11.20.0 --activate
+      - run: pnpm install --frozen-lockfile
+      - name: Execute release gates
+        env:
+          RELEASE_ARTIFACT_DIR: release-artifacts
+          RELEASE_IMAGE_REGISTRY: ghcr.io/moons-14/gutter
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_GITLEAKS_IMAGE: docker.io/zricethezav/gitleaks:v8.24.2@sha256:b5918eb91b8d2473cec722f066abb4352e4ffdc4ec9f4283ec143aba9ec9ebc4
+          RELEASE_TRIVY_IMAGE: docker.io/aquasec/trivy:0.59.1@sha256:029e990b328d149bf0a9ffe355919041e1f86192db2df47e217f8a36dd42ceac
+          RELEASE_TRIVY_DB_REPOSITORY: ghcr.io/aquasecurity/trivy-db:2@sha256:182c8405cd03caefe80982cf39bf071c9176ca3b1d1018a6ac02706c4597c72e
+          RELEASE_SYFT_IMAGE: docker.io/anchore/syft:v1.19.0@sha256:bc1ae555a43011d23bb011a4f50e175fc9a5984a008a3f8f2d692b211fcacd2a
+          RELEASE_COSIGN_IMAGE: gcr.io/projectsigstore/cosign:v2.4.3@sha256:c77247c92f4dfea851c70555738226498393e34e2f9ca83cb959e51c230e4ad7
+          RELEASE_COSIGN_CERTIFICATE_IDENTITY_REGEXP: https://github.com/moons-14/gutter/.github/workflows/release.yml@refs/tags/v.*
+          RELEASE_COSIGN_OIDC_ISSUER: https://token.actions.githubusercontent.com
+        run: pnpm run:release-gates
+      - name: Validate final evidence
+        run: test -s release-evidence.json && node scripts/verify-release-gate.mjs final release-evidence.json
+      - if: always()
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4
+        with:
+          name: gutter-release-evidence
+          path: |
+            release-artifacts
+            release-evidence.json
+          if-no-files-found: error
