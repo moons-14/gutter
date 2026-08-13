@@ -111,6 +111,22 @@ const reconciliationRequests = new Gauge({
   labelNames: ['trigger', 'state'],
   registers: [metrics],
 });
+const queueLagSeconds = new Gauge({
+  name: 'gutter_queue_lag_seconds',
+  help: 'Age in seconds of the oldest queued scan request (zero when empty).',
+  registers: [metrics],
+});
+const scanRuns = new Gauge({
+  name: 'gutter_scan_runs',
+  help: 'Historical scan runs by bounded state.',
+  labelNames: ['state'],
+  registers: [metrics],
+});
+const databaseSizeBytes = new Gauge({
+  name: 'gutter_database_size_bytes',
+  help: 'PostgreSQL database size in bytes.',
+  registers: [metrics],
+});
 type PublicPrincipal = Readonly<{
   id: string;
   role: string | null;
@@ -1679,6 +1695,19 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
       const labels = reconciliationMetricLabels(row.trigger, row.state);
       if (labels) reconciliationRequests.set(labels, Number(row.count));
     }
+    const lag = await pool.query<{ seconds: string | null }>(
+      "select extract(epoch from (now() - min(created_at)))::text as seconds from scan_requests where state='queued'",
+    );
+    queueLagSeconds.set(Math.max(0, Number(lag.rows[0]?.seconds ?? 0)));
+    const runs = await pool.query<{ state: string; count: string }>(
+      "select state,count(*) from scan_runs where state in ('running','completed','failed','cancelled') group by state",
+    );
+    scanRuns.reset();
+    for (const row of runs.rows) scanRuns.set({ state: row.state }, Number(row.count));
+    const size = await pool.query<{ bytes: string }>(
+      'select pg_database_size(current_database())::text as bytes',
+    );
+    databaseSizeBytes.set(Number(size.rows[0]?.bytes ?? 0));
     return c.text(await metrics.metrics(), 200, { 'content-type': metrics.contentType });
   });
   app.doc('/openapi.json', {

@@ -22,7 +22,7 @@ services:
       BETTER_AUTH_SECRET_FILE: /run/secrets/better_auth_secret
       GUTTER_READER_CAPABILITY_SECRET_FILE: /run/secrets/reader_capability_secret
       GUTTER_AUTH_ORIGIN: https://gutter.example.invalid
-      GUTTER_AUTH_TRUSTED_PROXIES_JSON: '["172.30.0.20"]'
+      GUTTER_AUTH_TRUSTED_PROXIES_JSON: '[]'
     secrets: [api_db_password, better_auth_secret, reader_capability_secret]
   worker:
     environment:
@@ -42,9 +42,7 @@ services:
     volumes:
       - caddy-data:/data
       - caddy-config:/config
-    networks:
-      internal: { ipv4_address: 172.30.0.20 }
-      edge: {}
+    networks: [internal, edge]
     healthcheck:
       test: [CMD-SHELL, 'wget -q -O /dev/null http://127.0.0.1:2019/config/']
       interval: 5s

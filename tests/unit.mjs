@@ -35,6 +35,7 @@ const {
   searchKey,
 } = await import('../packages/catalog-domain/src/index.ts');
 const { startWatcherHints } = await import('../apps/worker/src/watcher-hints.ts');
+const { assertCacheReady } = await import('../apps/worker/src/cache-status.ts');
 const { dispatchReconciliationRequests } = await import('../apps/worker/src/discovery-queue.ts');
 const { signReaderCapability, verifyReaderCapability } =
   await import('../packages/reader-stream/src/index.ts');
@@ -564,7 +565,7 @@ async function withEnvironment(values, run) {
 }
 
 test('M5 documents the access-control schema version', () => {
-  assert.equal(schemaVersion, '0012_public_progress_lookup');
+  assert.equal(schemaVersion, '0014_qualified_progress_digest');
 });
 
 test('catalog UI exposes entity discovery and publication credit links', async () => {
@@ -669,7 +670,7 @@ test('auth config permits insecure cookies only on localhost and binds the exact
   );
 });
 
-test('auth proxy preserves the Better Auth path and uses a fixed internal source address', async () => {
+test('auth proxy preserves the Better Auth path without stale fixed network identities', async () => {
   const [caddy, compose] = await Promise.all([
     readFile(join(process.cwd(), 'Caddyfile'), 'utf8'),
     readFile(join(process.cwd(), 'compose.yaml'), 'utf8'),
@@ -677,12 +678,11 @@ test('auth proxy preserves the Better Auth path and uses a fixed internal source
   assert.match(caddy, /handle \/api\/auth\/\*/);
   assert.match(caddy, /handle \/api\/reader\/\*[\s\S]*?reverse_proxy api:3000/);
   assert.doesNotMatch(caddy, /handle \/api\/reader\/\*[\s\S]*?reverse_proxy worker:3001/);
-  assert.match(compose, /GUTTER_AUTH_TRUSTED_PROXIES_JSON: '\["172\.30\.0\.20"\]'/);
+  assert.match(compose, /GUTTER_AUTH_TRUSTED_PROXIES_JSON: '\[\]'/);
   assert.match(compose, /DATABASE_USER: gutter_api/);
   assert.match(compose, /DATABASE_USER: gutter_worker/);
   assert.match(compose, /GUTTER_READER_CAPABILITY_SECRET_FILE/);
-  assert.match(compose, /ipv4_address: 172\.30\.0\.20/);
-  assert.match(compose, /subnet: 172\.30\.0\.0\/24/);
+  assert.doesNotMatch(compose, /ipv4_address:|subnet:/);
 });
 
 test('library-root parser normalizes paths and produces a stable generation', () => {
@@ -785,6 +785,15 @@ test('library-root validation rejects root and parent symlinks', async () => {
     validateLibraryRoots([{ id: 'parent', path: join(parent, '.') }]),
     LibraryRootStructuralError,
   );
+});
+
+test('worker cache readiness requires an existing writable directory', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'gutter-cache-ready-'));
+  await assertCacheReady(root);
+  await assert.rejects(assertCacheReady(join(root, 'missing')));
+  const file = join(root, 'file');
+  await writeFile(file, 'not a directory');
+  await assert.rejects(assertCacheReady(file));
 });
 
 test('library-root validation rejects canonical overlap and maps injected permission errors', async () => {

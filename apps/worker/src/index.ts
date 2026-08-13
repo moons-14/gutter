@@ -49,6 +49,7 @@ import { startWatcherHints } from './watcher-hints.js';
 import { startReaderHttpServer } from './reader-http.js';
 import { cacheStatus, recordCacheStatus } from './cache-status.js';
 import { dispatchMetadataLookup } from './metadata-dispatcher.js';
+import { startOperatorMetricsServer } from './operator-metrics.js';
 
 const log = pino({ redact: ['*.password', '*.token'] });
 await assertSchema();
@@ -70,6 +71,12 @@ const shutdown = new AbortController();
 const readerCapabilityKey = await readerCapabilitySecret();
 const derivedCacheConfigValue = derivedCacheConfig();
 const derivedCache = new DerivedCache(derivedCacheConfigValue);
+const operatorMetricsServer = startOperatorMetricsServer({
+  pool,
+  cacheRoot: derivedCacheConfigValue.root,
+  cacheQuotaBytes: derivedCacheConfigValue.quotaBytes,
+  signal: shutdown.signal,
+});
 const runDerivedCacheGc = async () => {
   const before = await cacheStatus(
     derivedCacheConfigValue.root,

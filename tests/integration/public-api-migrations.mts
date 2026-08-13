@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import test from 'node:test';
 import { Pool } from 'pg';
@@ -10,6 +10,10 @@ import { migrate } from '../../packages/db/node_modules/drizzle-orm/node-postgre
 const databaseUrl = process.env.DATABASE_URL;
 const migrationsFolder = resolve(process.cwd(), 'packages/db/drizzle');
 const skipReason = 'real PostgreSQL migration oracle requires DATABASE_URL';
+const runtimeAclPolicy = await readFile(
+  new URL('../../packages/db/drizzle/0013_runtime_acl_bootstrap.sql', import.meta.url),
+  'utf8',
+);
 
 async function withDatabase<T>(fn: (url: string, pool: Pool) => Promise<T>): Promise<T> {
   assert.ok(databaseUrl);
@@ -54,6 +58,34 @@ async function assertLookupOracle(pool: Pool): Promise<void> {
      select $1,'source-'||g||'.cbz','cbz',1,g,1,true,$2 from generate_series(1,2500) g`,
     [rootId, 'b'.repeat(64)],
   );
+  const triggerPath = 'runtime-trigger.cbz';
+  const triggerKey = `source:${createHash('sha256')
+    .update(`${rootId}\u0000${triggerPath}`)
+    .digest('base64url')}`;
+  await pool.query('begin');
+  try {
+    await pool.query('set local role gutter_worker');
+    const inserted = await pool.query<{ public_progress_key: string }>(
+      `insert into source_items(root_id,relative_path,kind,size_bytes,mtime_ms,page_count,active,manifest_sha256)
+       values($1,$2,'cbz',1,1,1,true,$3) returning public_progress_key`,
+      [rootId, triggerPath, 'c'.repeat(64)],
+    );
+    assert.equal(inserted.rows[0]?.public_progress_key, triggerKey);
+    const readerRows = await pool.query<{ count: string }>(
+      `select count(*)::text as count
+         from catalog_releases r
+         join visible_source_items i on i.id=r.source_item_id
+         join public_reader_source_pages p on p.source_item_id=i.id
+        where r.id=$1 and p.ordinal=$2 and gutter_user_can_read_release($3,r.id)
+          and i.active and i.quarantine_reason is null`,
+      ['0', 0, 'oracle-user'],
+    );
+    assert.equal(readerRows.rows[0]?.count, '0');
+    await pool.query('rollback');
+  } catch (error) {
+    await pool.query('rollback').catch(() => undefined);
+    throw error;
+  }
   const sourceKey = `source:${Buffer.from(
     await (async () => {
       const crypto = await import('node:crypto');
@@ -92,20 +124,51 @@ async function assertLookupOracle(pool: Pool): Promise<void> {
   await pool.query('reset enable_seqscan');
 }
 
+async function assertCanonicalRuntimePolicy(pool: Pool): Promise<void> {
+  await pool.query(runtimeAclPolicy);
+  const privileges = await pool.query<{ insert: boolean; update: boolean; delete: boolean }>(
+    `select has_table_privilege('gutter_worker','public.global_source_suppressions','INSERT') as insert,
+            has_table_privilege('gutter_worker','public.global_source_suppressions','UPDATE') as update,
+            has_table_privilege('gutter_worker','public.global_source_suppressions','DELETE') as delete`,
+  );
+  assert.deepEqual(privileges.rows[0], { insert: false, update: false, delete: false });
+  assert.equal(
+    (
+      await pool.query(
+        `select has_function_privilege('gutter_worker','public.digest(bytea,text)','EXECUTE') as allowed`,
+      )
+    ).rows[0]?.allowed,
+    true,
+  );
+  assert.equal(
+    (
+      await pool.query(
+        `select has_table_privilege('gutter_worker','public.public_reader_source_pages','SELECT') as allowed`,
+      )
+    ).rows[0]?.allowed,
+    true,
+  );
+}
+
 const migrationOptions = databaseUrl ? {} : { skip: skipReason };
 
 test(
-  'fresh migration registers 0012, creates pgcrypto and a real source_items index',
+  'fresh migration registers 0014, creates pgcrypto and a real source_items index',
   migrationOptions,
   async () => {
     await withDatabase(async (url, pool) => {
       await applyMigrations(url, migrationsFolder);
       const versions = await pool.query<{ version: string }>(
-        `select version from gutter_schema where version in ('0011_public_api_tokens','0012_public_progress_lookup') order by version`,
+        `select version from gutter_schema where version in ('0011_public_api_tokens','0012_public_progress_lookup','0013_runtime_acl_bootstrap','0014_qualified_progress_digest') order by version`,
       );
       assert.deepEqual(
         versions.rows.map((row) => row.version),
-        ['0011_public_api_tokens', '0012_public_progress_lookup'],
+        [
+          '0011_public_api_tokens',
+          '0012_public_progress_lookup',
+          '0013_runtime_acl_bootstrap',
+          '0014_qualified_progress_digest',
+        ],
       );
       assert.equal(
         (await pool.query(`select 1 from pg_extension where extname='pgcrypto'`)).rowCount,
@@ -123,13 +186,14 @@ test(
           .rows[0]?.relkind,
         'v',
       );
+      await assertCanonicalRuntimePolicy(pool);
       await assertLookupOracle(pool);
     });
   },
 );
 
 test(
-  '0011 to 0012 upgrade applies through the committed Drizzle journal',
+  '0011 to 0014 upgrade applies through the committed Drizzle journal',
   migrationOptions,
   async () => {
     const temporary = await mkdtemp('/tmp/gutter-migrations-');
@@ -153,11 +217,28 @@ test(
         assert.equal(
           (
             await pool.query(
+              `select count(*)::int as count from "drizzle"."__drizzle_migrations" where created_at=1787266800000`,
+            )
+          ).rows[0]?.count,
+          1,
+        );
+        assert.equal(
+          (
+            await pool.query(
               `select count(*)::int as count from "drizzle"."__drizzle_migrations" where created_at=1787094000000`,
             )
           ).rows[0]?.count,
           1,
         );
+        assert.equal(
+          (
+            await pool.query(
+              `select count(*)::int as count from "drizzle"."__drizzle_migrations" where created_at=1787180400000`,
+            )
+          ).rows[0]?.count,
+          1,
+        );
+        await assertCanonicalRuntimePolicy(pool);
         await assertLookupOracle(pool);
       });
     } finally {
