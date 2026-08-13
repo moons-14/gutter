@@ -12,3 +12,12 @@ show once, and support explicit revocation. No OAuth server or public admin API 
 
 V1 permits additive changes. Removing or narrowing a path, method, parameter, response, or enum
 requires a new major version after deprecation. CI blocks removal against the previous artifact.
+
+The committed compatibility oracle is `docs/openapi-v1.baseline.json`; it is never generated from
+the candidate. `docs/openapi-v1.yaml` is the reviewed source contract and
+`docs/openapi-v1.json` is the served artifact; both must parse to exactly the same document. Run
+`pnpm run check:openapi-compat` to compare baseline to candidate and verify served parity. To make
+an intentional v1 contract change, review the source and served artifact together, run the negative
+fixture suite (`pnpm exec tsx --test tests/openapi-compat.mts`), then replace the baseline with the
+last reviewed release artifact in a separately reviewed commit. Never update the baseline from the
+candidate as part of an ordinary CI run.
