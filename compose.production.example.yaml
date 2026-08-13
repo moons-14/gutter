@@ -22,7 +22,7 @@ services:
       BETTER_AUTH_SECRET_FILE: /run/secrets/better_auth_secret
       GUTTER_READER_CAPABILITY_SECRET_FILE: /run/secrets/reader_capability_secret
       GUTTER_AUTH_ORIGIN: https://gutter.example.invalid
-      GUTTER_AUTH_TRUSTED_PROXIES_JSON: '["172.30.0.20"]'
+      GUTTER_AUTH_TRUSTED_PROXIES_JSON: '[]'
     secrets: [api_db_password, better_auth_secret, reader_capability_secret]
   worker:
     environment:

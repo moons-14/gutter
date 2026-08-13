@@ -5,9 +5,11 @@ version control, and mount it only into `api`. The production Compose example us
 Set `GUTTER_AUTH_ORIGIN` and Caddy's `GUTTER_SITE_ADDRESS` to the same externally visible HTTPS
 origin. Caddy is the sole supported public ingress and TLS terminator: publish its ports 80 and
 443 directly and do not put a TLS proxy or CDN in front of it. Caddy overwrites client-supplied
-`X-Forwarded-For` with the directly observed peer. Compose assigns Caddy the fixed internal
-address `172.30.0.20`, which is the only trusted forwarded-IP proxy for the API; do not broaden
-`GUTTER_AUTH_TRUSTED_PROXIES_JSON`. The production example persists Caddy's `/data` and `/config`
+`X-Forwarded-For` with the directly observed peer. Internal Docker addresses are assigned
+dynamically, so the Compose defaults keep `GUTTER_AUTH_TRUSTED_PROXIES_JSON` empty: Better Auth
+uses the directly observed API peer and ignores spoofable forwarded-IP claims. An operator may
+set an explicit, verified proxy identity only when the deployment supplies one through a stable
+trust boundary. The production example persists Caddy's `/data` and `/config`
 volumes so certificates and state survive replacement. HTTP is accepted solely for localhost
 bootstrap; non-local origins are rejected at startup and use Secure cookies.
 

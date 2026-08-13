@@ -1,4 +1,14 @@
-import { lstat, mkdir, readdir, readFile, rename, writeFile } from 'node:fs/promises';
+import {
+  access,
+  lstat,
+  mkdir,
+  readdir,
+  readFile,
+  rename,
+  unlink,
+  writeFile,
+} from 'node:fs/promises';
+import { W_OK } from 'node:constants';
 import { join } from 'node:path';
 
 const stateName = '.operator-status.json';
@@ -29,6 +39,17 @@ async function safeRoot(root: string, create = false): Promise<boolean> {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
     throw error;
   }
+}
+
+/** Readiness is strict about the disposable cache: it must already be a writable directory. */
+export async function assertCacheReady(root: string): Promise<void> {
+  const details = await lstat(root).catch(() => null);
+  if (!details || details.isSymbolicLink() || !details.isDirectory())
+    throw new Error('cache_root_missing_or_not_directory');
+  await access(root, W_OK);
+  const probe = join(root, `.readiness-${process.pid}`);
+  await writeFile(probe, 'ready', { flag: 'wx', mode: 0o600 });
+  await unlink(probe);
 }
 
 async function bytesAt(path: string): Promise<number> {

@@ -34,7 +34,9 @@ services:
       BETTER_AUTH_SECRET_FILE: /run/secrets/better_auth_secret
       GUTTER_READER_CAPABILITY_SECRET_FILE: /run/secrets/reader_capability_secret
       GUTTER_AUTH_ORIGIN: ${GUTTER_AUTH_ORIGIN:-http://localhost:8080}
-      GUTTER_AUTH_TRUSTED_PROXIES_JSON: '["172.30.0.20"]'
+      # Docker assigns internal addresses; Better Auth ignores forwarded client IPs unless an
+      # operator explicitly supplies a verified proxy identity for the deployment.
+      GUTTER_AUTH_TRUSTED_PROXIES_JSON: '[]'
     depends_on: { migrate: { condition: service_completed_successfully } }
     healthcheck:
       test:

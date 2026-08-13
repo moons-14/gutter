@@ -1,6 +1,6 @@
 import { createServer } from 'node:http';
 import { statfs } from 'node:fs/promises';
-import { cacheStatus } from './cache-status.js';
+import { assertCacheReady, cacheStatus } from './cache-status.js';
 
 type QueryPool = { query: <T>(sql: string) => Promise<{ rows: T[] }> };
 
@@ -22,6 +22,7 @@ export function startOperatorMetricsServer(options: {
       try {
         await options.pool.query("select 1 from gutter_schema where version='0010_user_state'");
         await options.pool.query('select 1 from pgboss.job limit 1');
+        await assertCacheReady(options.cacheRoot);
         const cache = await cacheStatus(options.cacheRoot, options.cacheQuotaBytes);
         if (cache.quotaBytes < 1) throw new Error('invalid_cache_quota');
         response.writeHead(200).end('ready\n');

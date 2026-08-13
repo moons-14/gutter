@@ -9,6 +9,8 @@ backup destination into a source library, and never let a recovery command write
 PostgreSQL is the durable system of record. Back up the Better Auth tables (`user`, `session`,
 `account`, `verification`, `twoFactor`, `passkey`), ACL/grant and revision tables, user progress,
 bookmarks, collections, overrides/suppressions, scan/audit history, and deletion tombstones. Keep
+This includes `catalog_preferred_release_overrides`, hidden `user_target_state` rows,
+`gutter_user_state_audit`, inactive `source_items` tombstones, and `source_metadata_issues`.
 the current Better Auth secret and any retained previous secret with the encrypted backup; without
 the matching secret, sessions and encrypted recovery material may be unusable. ACL and user-state
 audit rows are append-only and must survive restore.
@@ -26,18 +28,22 @@ Use an existing, restricted backup directory and secret-managed `GUTTER_DATABASE
 
 ```sh
 GUTTER_BACKUP_DIR=/secure/gutter-backups GUTTER_DATABASE_URL="$DATABASE_URL" \
-  ./scripts/backup-postgres.sh
+  GUTTER_BACKUP_ROLE=gutter_backup ./scripts/backup-postgres.sh
 ```
 
-The script creates a timestamped custom-format dump, checks its table-of-contents, uses mode 0600,
-and refuses broad directories. Encrypt/copy that dump and the Better Auth secret through the
+The dedicated `GUTTER_BACKUP_ROLE` must be a non-superuser with SELECT on the complete versioned
+`scripts/backup-table-manifest.v1` table set. The script creates a timestamped custom-format dump,
+checksum sidecar, and table-manifest sidecar, checks its table-of-contents, uses mode 0600, and
+refuses broad directories. Encrypt/copy that dump, both sidecars, and the Better Auth secret through the
 operator's external backup system. Verify restore archives with `pg_restore --list`; retain at
 least the last successful backup and test one on every release.
 
 For a fresh, isolated Compose project, provision a new database and secret, stop API/worker, then:
 
 ```sh
-GUTTER_RESTORE_CONFIRM=YES GUTTER_BACKUP_ARCHIVE=/secure/gutter-backups/gutter-<stamp>.dump \
+GUTTER_RESTORE_CONFIRM=YES GUTTER_RESTORE_CONFIRMATION=gutter-restore \
+  GUTTER_RESTORE_TARGET_IDENTITY=gutter-restore \
+  GUTTER_BACKUP_ARCHIVE=/secure/gutter-backups/gutter-<stamp>.dump \
   GUTTER_DATABASE_URL="$ISOLATED_DATABASE_URL" ./scripts/restore-postgres.sh
 pnpm migrate
 docker compose -p gutter-restore -f compose.yaml up -d db migrate api worker web
@@ -62,11 +68,11 @@ in bounded batches; (3) verify counts and application metrics; (4) contract only
 after the minimum rollback window. Avoid destructive renames, type narrowing, or dropping columns
 in the same release as the code that first uses them.
 
-The executable migration boundary check is `scripts/migration-compatibility-oracle.sh`. It creates
-a disposable prior-schema database, applies the current migrations, checks that representative
-legacy rows remain readable, and records rollback as restore of the pre-upgrade dump followed by
-roll-forward. A downgrade that requires destructive SQL is unsupported; the oracle must pass before
-publishing a migration.
+The executable migration boundary check is `scripts/migration-compatibility-oracle.sh`. Against an
+explicit disposable target and `GUTTER_MIGRATION_CONFIRM=YES`, it restores the prior-schema dump,
+records representative legacy row counts, applies current migrations, and checks those rows remain
+readable. Rollback means restoring that pre-upgrade dump and rolling forward; a downgrade that
+requires destructive SQL is unsupported.
 
 Supported upgrade is one release at a time from the prior recorded schema. Take and verify a
 backup, run migrations, then readiness and scan smoke checks. Rollback is supported only before a
