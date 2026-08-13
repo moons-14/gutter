@@ -59,6 +59,10 @@ for the build inputs, the committed license inventory and generated audit, relea
 limits, and the rollback boundary. A registry or signing service may store attestations, but the
 application has no external SaaS dependency and no runtime call to one.
 
+The pinned Syft release path emits CycloneDX 1.6. Final verification binds each SBOM's container
+component name and version to the exact immutable application image name and digest, and requires
+a non-empty package inventory; synthetic top-level subject fields are not accepted as a substitute.
+
 Run `pnpm verify:release-gate contract` in ordinary CI to validate the contract and pinned image
 references without pretending that release evidence exists. A release manager runs
 `pnpm verify:release-gate final path/to/release-evidence.json` only after all gates have run. Final

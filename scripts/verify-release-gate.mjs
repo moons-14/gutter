@@ -499,21 +499,21 @@ for (const platform of evidence.platforms) {
 const validatedSubjects = new Map();
 const validateSbom = (parsed, image) => {
   assert.equal(parsed.bomFormat, 'CycloneDX', `SBOM is not CycloneDX: ${image.reference}`);
+  assert.equal(parsed.specVersion, '1.6', `SBOM version mismatch: ${image.reference}`);
   const component = parsed.metadata?.component;
-  const purl = component?.purl;
-  if (typeof purl === 'string') {
-    const normalizedPurl = decodeURIComponent(purl);
-    assert.ok(
-      normalizedPurl.includes(image.reference),
-      `SBOM subject mismatch: ${image.reference}`,
-    );
-    assert.ok(normalizedPurl.includes(image.digest), `SBOM digest mismatch: ${image.reference}`);
-    return;
-  }
-  // Fixture/attestation adapters may expose the same binding explicitly; require all fields.
-  assert.equal(parsed.subject, image.reference, `SBOM subject mismatch: ${image.reference}`);
-  assert.equal(parsed.digest, image.digest, `SBOM digest mismatch: ${image.reference}`);
-  assert.ok(Array.isArray(parsed.components), `SBOM components missing: ${image.reference}`);
+  assert.equal(component?.type, 'container', `SBOM container type mismatch: ${image.reference}`);
+  const separator = image.reference.indexOf('@');
+  assert.ok(separator > 0, `SBOM image subject is malformed: ${image.reference}`);
+  assert.equal(
+    component?.name,
+    image.reference.slice(0, separator),
+    `SBOM subject mismatch: ${image.reference}`,
+  );
+  assert.equal(component?.version, image.digest, `SBOM digest mismatch: ${image.reference}`);
+  assert.ok(
+    Array.isArray(parsed.components) && parsed.components.length > 0,
+    `SBOM components missing: ${image.reference}`,
+  );
 };
 const validateProvenance = (parsed, image) => {
   const records = Array.isArray(parsed) ? parsed : [parsed];
