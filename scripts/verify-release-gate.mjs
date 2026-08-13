@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { readFile, lstat, realpath, open } from 'node:fs/promises';
+import { constants } from 'node:fs';
 import { dirname, relative, resolve, sep } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 
@@ -25,7 +26,7 @@ const safeArtifact = async (file) => {
   const info = await lstat(target);
   if (info.isSymbolicLink()) throw new Error(`artifact symlink is not allowed: ${file}`);
   if (!info.isFile()) throw new Error(`artifact is not a regular file: ${file}`);
-  const handle = await open(target, 'r');
+  const handle = await open(target, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
   try {
     const before = await handle.stat();
     const bytes = await handle.readFile();
@@ -43,6 +44,38 @@ const safeArtifact = async (file) => {
   }
 };
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
+const validateScaleEvidence = async (artifact) => {
+  if (!artifact.path.startsWith('release-artifacts/scale-evidence.json'))
+    throw new Error('scale evidence must be under release-artifacts');
+  const report = JSON.parse(await safeArtifact(artifact.path));
+  assert.equal(report.schemaVersion, 'gutter.scale-oracle.v1');
+  assert.equal(report.status, 'pass');
+  assert.ok(report.seed && report.runId);
+  assert.equal(report.dataset.books, 100000);
+  assert.equal(report.dataset.pages, 2000000);
+  assert.equal(report.worker.queueCompletedRuns >= 2, true);
+  assert.equal(report.cache.coldProducers, 1);
+  assert.equal(report.cache.warmHit, true);
+  assert.equal(report.cache.pressure.protectedLiveEntry, true);
+  assert.equal(report.cache.pressure.reclaimedBytes > 0, true);
+  assert.equal(report.sparse.logicalBytes, 20 * 1024 ** 4);
+  assert.equal(report.sparse.allocatedBlocks < 1024, true);
+  for (const timing of Object.values(report.timingsMs)) {
+    assert.ok(Number.isFinite(timing.p50) && Number.isFinite(timing.p95));
+  }
+  assert.equal(report.baselineComparison.portable, 'pass');
+  return report;
+};
+const validateNasEvidence = async (artifact) => {
+  const lines = (await safeArtifact(artifact.path)).toString().trim().split('\n');
+  const linux = JSON.parse(lines.find((line) => line.includes('linux-local-source')) ?? '{}');
+  assert.equal(linux.status, 'pass');
+  assert.equal(linux.outageObserved, true);
+  assert.equal(linux.projectionReadable, true);
+  assert.match(linux.projectionHashBefore, /^[0-9a-f]{64}$/);
+  assert.equal(linux.projectionHashBefore, linux.projectionHashDuring);
+  assert.match(linux.sourceHash, /^[0-9a-f]{64}$/);
+};
 const assertKeys = (value, allowed, label) => {
   for (const key of Object.keys(value ?? {}))
     if (!allowed.includes(key)) throw new Error(`unexpected ${label} property: ${key}`);
@@ -101,7 +134,13 @@ const fromRefs = [...`${dockerfile}\n${webDockerfile}`.matchAll(/^FROM\s+([^\s]+
 const allImages = [...imageRefs, ...fromRefs.filter((image) => image.includes(':'))];
 for (const image of allImages)
   if (!/@sha256:[0-9a-f]{64}$/.test(image)) throw new Error(`image is not digest pinned: ${image}`);
-const imageName = (image) => image.slice(0, image.indexOf('@')).split('/').at(-1).split(':')[0];
+const normalizeImageRef = (image) => image.replace(/^docker\.io\/library\//, '');
+const imageName = (image) =>
+  normalizeImageRef(image)
+    .slice(0, normalizeImageRef(image).indexOf('@'))
+    .split('/')
+    .at(-1)
+    .split(':')[0];
 assert.deepEqual(
   [...new Set(allImages.map(imageName))].sort(),
   [...manifest.requiredImageNames].sort(),
@@ -111,12 +150,13 @@ const actionWorkflow = `${await read('.github/workflows/ci.yml')}\n${await read(
 for (const ref of actionWorkflow.matchAll(/uses:\s*([^\s]+)/g))
   if (!/@[0-9a-f]{40}$/.test(ref[1]))
     throw new Error(`GitHub Action is not commit pinned: ${ref[1]}`);
-const normalizeImage = (image) => image.replace(/^docker\.io\/library\//, '');
 const workflowImageRefs = [...actionWorkflow.matchAll(/RELEASE_IMAGE_REFS:\s*(.+)$/gm)].flatMap(
   (match) => match[1].trim().split(/\s+/),
 );
 if (
-  workflowImageRefs.some((image) => !allImages.map(normalizeImage).includes(normalizeImage(image)))
+  workflowImageRefs.some(
+    (image) => !allImages.map(normalizeImageRef).includes(normalizeImageRef(image)),
+  )
 )
   throw new Error('workflow image refs do not match digest-pinned tree refs');
 for (const [name, ref] of Object.entries(toolRefs.images))
@@ -273,6 +313,15 @@ if (
     ))
 )
   throw new Error('scale-concurrency pass requires scale-evidence artifact');
+if (scaleGate.status === 'pass') {
+  const scaleArtifact = scaleGate.artifacts.find((artifact) => artifact.role === 'scale-evidence');
+  await validateScaleEvidence(scaleArtifact);
+}
+const nasGate = evidence.gates.find((gate) => gate.id === 'nas-source');
+if (nasGate.status === 'pass')
+  await validateNasEvidence(
+    nasGate.artifacts.find((artifact) => artifact.role === 'nas-evidence') ?? nasGate.artifacts[0],
+  );
 if (!evidence.references.issue27.includes('compose-restore-drill'))
   throw new Error('issue27 backup/restore evidence reference is required');
 if (hasScaleSchema && !evidence.references.issue26.includes('scale'))

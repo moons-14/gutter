@@ -60,7 +60,14 @@ const gates = [...results.values()].map((result) => ({
   status: result.status === 0 ? 'pass' : result.status === 99 ? 'blocked' : 'fail',
   command: result.command,
   commandHash: result.commandHash,
-  artifacts: [{ path: result.log, role: 'runner-log', gate: result.id, sha256: result.logHash }],
+  artifacts: [
+    {
+      path: result.log,
+      role: result.id === 'nas-source' ? 'nas-evidence' : 'runner-log',
+      gate: result.id,
+      sha256: result.logHash,
+    },
+  ],
 }));
 for (const artifact of requiredArtifacts)
   gates.find((gate) => gate.id === artifact.gate).artifacts.push(artifact);
