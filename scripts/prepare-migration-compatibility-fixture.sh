@@ -22,14 +22,33 @@ docker run --detach --rm --name "$container" \
   --publish 127.0.0.1::5432 "$image" >/dev/null
 port=''
 attempt=1
+ready=0
 while [ "$attempt" -le 60 ]; do
   port=$(docker port "$container" 5432/tcp 2>/dev/null | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p' | head -1)
-  if [ -n "$port" ] && docker exec "$container" pg_isready -U gutter -d gutter >/dev/null 2>&1; then break; fi
+  # The official image starts a temporary server during init. pg_isready can report that
+  # server ready before POSTGRES_DB exists, so require the final PID 1 and a real query against
+  # the target database before provisioning the fixture.
+  if [ -n "$port" ] &&
+    docker exec "$container" sh -ec 'test "$(cat /proc/1/comm)" = postgres' >/dev/null 2>&1 &&
+    docker exec "$container" psql -U gutter -d gutter -v ON_ERROR_STOP=1 -Atqc 'select 1' >/dev/null 2>&1; then
+    ready=1
+    break
+  fi
+  if [ "$(docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null || true)" != true ]; then
+    echo 'migration fixture container exited before readiness' >&2
+    docker logs "$container" >&2 || true
+    exit 1
+  fi
   sleep 1
   attempt=$((attempt + 1))
 done
-test -n "$port"
-docker exec "$container" pg_isready -U gutter -d gutter >/dev/null
+if [ "$ready" -ne 1 ]; then
+  echo 'migration fixture database did not become ready' >&2
+  docker logs "$container" >&2 || true
+  exit 1
+fi
+docker exec "$container" sh -ec 'test "$(cat /proc/1/comm)" = postgres' >/dev/null
+docker exec "$container" psql -U gutter -d gutter -v ON_ERROR_STOP=1 -Atqc 'select 1' >/dev/null
 database_url="postgresql://gutter:$password@127.0.0.1:$port/gutter"
 
 # Read the canonical Drizzle journal rather than inventing migration timestamps. The fixture
