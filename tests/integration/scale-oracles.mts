@@ -300,7 +300,10 @@ try {
   assert.match(plans, /catalog_series_list_state/);
   assert.match(plans, /catalog_releases/);
   assert.match(plans, /source_items/);
-  assert.match(plans, /catalog_series_list_state_(library_(name|metadata_updated)|search_trgm)_idx/);
+  assert.match(
+    plans,
+    /catalog_series_list_state_(library_(name|metadata_updated)|search_trgm)_idx/,
+  );
   const firstPage = await listCatalogSeries(
     { libraryId: rootId, q: 'zzzz-no-match', limit: 10 },
     adminScope,

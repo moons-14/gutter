@@ -146,7 +146,6 @@ services:
       GUTTER_INTEGRATION_TEST: '1'
     depends_on:
       integration-db: { condition: service_healthy }
-      scale-worker: { condition: service_started }
     profiles: [integration]
     networks: [internal]
   integration-db:
