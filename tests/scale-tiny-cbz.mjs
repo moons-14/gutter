@@ -55,11 +55,20 @@ try {
   assert.equal(scanned.summary.pages, count);
   assert.equal(scanned.summary.quarantined, 0);
   const { validateSourceItem } = await import('../packages/page-validator/src/index.ts');
+  async function validateWithRetry(item) {
+    for (let attempt = 0; ; attempt++) {
+      try { return await validateSourceItem(root, item); }
+      catch (error) {
+        if (error?.message !== 'archive_unavailable' || attempt >= 3) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 25 * (attempt + 1)));
+      }
+    }
+  }
   let validated = 0;
   const concurrency = 4;
   for (let offset = 0; offset < scanned.items.length; offset += concurrency) {
     const batch = scanned.items.slice(offset, offset + concurrency);
-    const results = await Promise.all(batch.map((item) => validateSourceItem(root, item)));
+    const results = await Promise.all(batch.map((item) => validateWithRetry(item)));
     validated += results.reduce((sum, result) => sum + result.validCount, 0);
   }
   assert.equal(validated, count, 'all 10,000 CBZ pages validated');
