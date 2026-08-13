@@ -5,7 +5,9 @@ trap 'echo "restore drill failed at line $LINENO" >&2' ERR
 # End-to-end recovery oracle.  This deliberately uses two isolated Compose projects:
 # A is seeded and backed up, then destroyed; B restores the durable state into a new
 # database, starts every runtime service, and rebuilds the catalog from a read-only root.
-run_id=$(date -u +%Y%m%d%H%M%S)-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
+run_id=${DRILL_RUN_ID:-$(date -u +%Y%m%d%H%M%S)-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')}
+compose_build_flags=""
+[ "${DRILL_NO_BUILD:-0}" = 1 ] && compose_build_flags="--no-build"
 case "$run_id" in *[!0-9a-f-]*|'') echo 'invalid drill run identity' >&2; exit 2;; esac
 project_a="gutter-issue27-drill-a-$run_id"
 project_b="gutter-issue27-drill-b-$run_id"
@@ -134,7 +136,7 @@ write_durable_digests() {
   done < "$manifest_file"
   LC_ALL=C sort -o "$digest_file" "$digest_file"
 }
-docker compose -p "$project_a" -f compose.yaml -f "$root/override.yaml" up -d db migrate
+docker compose -p "$project_a" -f compose.yaml -f "$root/override.yaml" up $compose_build_flags -d db migrate
 docker compose -p "$project_a" -f compose.yaml -f "$root/override.yaml" wait migrate
 docker compose -p "$project_a" -f compose.yaml -f "$root/override.yaml" exec -T db psql -U gutter -d gutter -v ON_ERROR_STOP=1 <<SQL
 insert into library_roots(id,configured_path,canonical_path,state,checked_at,config_generation) values ('drill-root','/drill-source','/drill-source','ready_nonempty',now(),'$root_generation');
@@ -202,7 +204,7 @@ chmod 0644 "$root/artifacts/backup.dump" "$root/artifacts/backup.dump.sha256"
 docker compose -p "$project_a" -f compose.yaml -f "$root/override.yaml" cp "db:/drill-artifacts/$archive_name.manifest" "$root/artifacts/backup.dump.manifest"
 docker compose -p "$project_a" -f compose.yaml -f "$root/override.yaml" down -v --remove-orphans
 
-docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" up -d db
+docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" up $compose_build_flags -d db
 for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
   docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T db pg_isready -U gutter -d gutter >/dev/null 2>&1 && break
   [ "$attempt" = 12 ] && exit 1
@@ -245,10 +247,10 @@ end $$;
 SQL
 post_digest=$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T db psql -U gutter -d gutter -Atc "select concat_ws('|',(select count(*) from library_roots),(select count(*) from \"user\"),(select count(*) from session),(select count(*) from account),(select count(*) from library_access_grants),(select count(*) from gutter_acl_revisions),(select count(*) from gutter_acl_audit),(select count(*) from gutter_user_state_revisions),(select count(*) from user_progress),(select count(*) from user_target_state),(select count(*) from user_bookmarks),(select count(*) from user_collections),(select count(*) from user_collection_members),(select count(*) from gutter_user_state_audit),(select count(*) from catalog_preferred_release_overrides),(select count(*) from global_source_suppressions),(select count(*) from source_items where not active),(select count(*) from source_metadata_issues))")
 test "$post_digest" = "$pre_digest"
-docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" up -d api worker web
+docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" up $compose_build_flags -d api worker web
 echo "restore drill checkpoint: runtime started web_port=$web_port" >&2
 for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-  curl -fsS "http://localhost:$web_port/" >/dev/null 2>&1 && docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker wget -q -O- http://127.0.0.1:9090/ready >/dev/null 2>&1 && break
+  curl -fsS "http://127.0.0.1:$web_port/" >/dev/null 2>&1 && docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker wget -q -O- http://127.0.0.1:9090/ready >/dev/null 2>&1 && break
   [ "$attempt" = 15 ] && exit 1
   sleep 2
 done
@@ -306,7 +308,7 @@ test "$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" 
 test "$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T db psql -U gutter -d gutter -Atc "select count(*) from user_target_state where target_key='retired' and hidden")" -eq 1
 test "$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker sh -c 'test -d /drill-source && test ! -w /drill-source && test -d /cache/derived')"
 test "$(sha256sum "$root/source/title/001.png" | cut -d' ' -f1)" = "$source_sha"
-curl -fsS "http://localhost:$web_port/" >/dev/null
-test "$(curl -sS -o /dev/null -w '%{http_code}' "http://localhost:$web_port/api/metrics")" = 404
+curl -fsS "http://127.0.0.1:$web_port/" >/dev/null
+test "$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$web_port/api/metrics")" = 404
 docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker sh -c 'wget -q -O- http://127.0.0.1:9090/ready >/dev/null && wget -q -O- http://127.0.0.1:9090/metrics | grep -q gutter_worker_cache_used_bytes'
 echo "restore drill passed: project=$project_b durable_user=1 acl_audit=1 user_state=1 source_sha256=$source_sha cache_sha_before=$cache_sha cache_sha_after=$cache_sha_regenerated source=read-only validation=$validation_state/$validation_valid"
