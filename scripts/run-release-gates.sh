@@ -80,7 +80,8 @@ run_gate nas-source './scripts/nas-source-oracle.sh' ./scripts/nas-source-oracle
 application_image_refs=''
 api_subject=''; worker_subject=''; web_subject=''
 if [ -n "${RELEASE_PREPARED_SUBJECTS:-}" ]; then
-  test -f "$RELEASE_PREPARED_SUBJECTS" ! -L "$RELEASE_PREPARED_SUBJECTS"
+  test -f "$RELEASE_PREPARED_SUBJECTS"
+  test ! -L "$RELEASE_PREPARED_SUBJECTS"
   test "$(wc -c <"$RELEASE_PREPARED_SUBJECTS")" -le 65536
   allow_local_arg=''
   if [ "${RELEASE_GATE_TEST_MODE:-0}" = 1 ] && [ "${out#/tmp/}" != "$out" ]; then
@@ -91,7 +92,8 @@ if [ -n "${RELEASE_PREPARED_SUBJECTS:-}" ]; then
   target_real=$(realpath -m "$out/application-subjects.json")
   if [ "$source_real" != "$target_real" ]; then printf '%s\n' "$validated" >"$out/application-subjects.json"; fi
   test -s "${RELEASE_PREPARED_SUBJECTS%.json}.tsv"
-  test -f "${RELEASE_PREPARED_SUBJECTS%.json}.tsv" ! -L "${RELEASE_PREPARED_SUBJECTS%.json}.tsv"
+  test -f "${RELEASE_PREPARED_SUBJECTS%.json}.tsv"
+  test ! -L "${RELEASE_PREPARED_SUBJECTS%.json}.tsv"
   if [ "$(realpath "${RELEASE_PREPARED_SUBJECTS%.json}.tsv")" != "$(realpath -m "$out/application-subjects.tsv")" ]; then
     cp "${RELEASE_PREPARED_SUBJECTS%.json}.tsv" "$out/application-subjects.tsv"
   fi

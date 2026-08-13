@@ -70,6 +70,19 @@ test('container scan preserves colon-tag local image input', async () => {
   assert.doesNotMatch(runner, /docker run[^\n]+\$scan_ref['\"];/);
 });
 
+test('prepared release subjects use portable regular-file and symlink checks', async () => {
+  const runner = await readFile('scripts/run-release-gates.sh', 'utf8');
+  assert.doesNotMatch(runner, /test -f [^\n]+ ! -L/);
+  assert.match(
+    runner,
+    /test -f \"\$RELEASE_PREPARED_SUBJECTS\"\n\s+test ! -L \"\$RELEASE_PREPARED_SUBJECTS\"/,
+  );
+  assert.match(
+    runner,
+    /test -f \"\$\{RELEASE_PREPARED_SUBJECTS%\.json\}\.tsv\"\n\s+test ! -L \"\$\{RELEASE_PREPARED_SUBJECTS%\.json\}\.tsv\"/,
+  );
+});
+
 test('custom Caddy build inputs are immutable and narrowly patched', async () => {
   const dockerfile = await readFile('Dockerfile.web', 'utf8');
   const refs = JSON.parse(await readFile('docs/release-tool-refs.json', 'utf8'));
