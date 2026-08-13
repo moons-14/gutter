@@ -62,6 +62,12 @@ in bounded batches; (3) verify counts and application metrics; (4) contract only
 after the minimum rollback window. Avoid destructive renames, type narrowing, or dropping columns
 in the same release as the code that first uses them.
 
+The executable migration boundary check is `scripts/migration-compatibility-oracle.sh`. It creates
+a disposable prior-schema database, applies the current migrations, checks that representative
+legacy rows remain readable, and records rollback as restore of the pre-upgrade dump followed by
+roll-forward. A downgrade that requires destructive SQL is unsupported; the oracle must pass before
+publishing a migration.
+
 Supported upgrade is one release at a time from the prior recorded schema. Take and verify a
 backup, run migrations, then readiness and scan smoke checks. Rollback is supported only before a
 contract migration or while the old binary remains compatible with the expanded schema. If a

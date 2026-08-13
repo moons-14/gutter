@@ -101,7 +101,7 @@ const queueLagSeconds = new Gauge({
 });
 const scanRuns = new Gauge({
   name: 'gutter_scan_runs',
-  help: 'Current scan runs by bounded state.',
+  help: 'Historical scan runs by bounded state.',
   labelNames: ['state'],
   registers: [metrics],
 });
