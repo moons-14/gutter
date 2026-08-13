@@ -27,7 +27,8 @@
     "generate:pwa-icons": "node scripts/generate-pwa-icons.mjs",
     "audit:licenses": "node scripts/audit-licenses.mjs",
     "dev": "docker compose up --build",
-    "migrate": "pnpm --filter @gutter/db migrate"
+    "migrate": "pnpm --filter @gutter/db migrate",
+    "verify:operations": "node scripts/verify-operations.mjs"
   },
   "devDependencies": {
     "@playwright/test": "1.62.1",
