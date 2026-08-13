@@ -28,7 +28,8 @@ Use an existing, restricted backup directory and secret-managed `GUTTER_DATABASE
 
 ```sh
 GUTTER_BACKUP_DIR=/secure/gutter-backups GUTTER_DATABASE_URL="$DATABASE_URL" \
-  GUTTER_BACKUP_ROLE=gutter_backup ./scripts/backup-postgres.sh
+  GUTTER_BACKUP_ROLE=gutter_backup GUTTER_BACKUP_PASSWORD_FILE=/run/secrets/gutter_backup_password \
+  ./scripts/backup-postgres.sh
 ```
 
 The dedicated `GUTTER_BACKUP_ROLE` must be a non-superuser with SELECT on the complete versioned
@@ -72,8 +73,9 @@ in the same release as the code that first uses them.
 The executable migration boundary check is `scripts/migration-compatibility-oracle.sh`. Against an
 explicit disposable target and `GUTTER_MIGRATION_CONFIRM=YES`, it restores the prior-schema dump,
 records representative legacy row counts, applies current migrations, and checks those rows remain
-readable. Rollback means restoring that pre-upgrade dump and rolling forward; a downgrade that
-requires destructive SQL is unsupported.
+readable. This is a pre-upgrade restore+migrate preservation oracle; it does not claim to execute an
+old binary or prove an expand/contract compatibility window. Rollback means restoring that
+pre-upgrade dump and rolling forward; a downgrade that requires destructive SQL is unsupported.
 
 Supported upgrade is one release at a time from the prior recorded schema. Take and verify a
 backup, run migrations, then readiness and scan smoke checks. Rollback is supported only before a

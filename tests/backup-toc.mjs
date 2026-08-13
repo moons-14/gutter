@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { readFile } from 'node:fs/promises';
+import { compareManifestAndToc, parseManifest, parseToc } from '../scripts/compare-backup-manifest.mjs';
 
 // Realistic pg_restore --list output: data rows are numeric entries, while comments
 // begin with ';'. Reserved identifiers may be quoted (notably the Better Auth "user" table).
@@ -11,18 +13,30 @@ const fixture = `;
 218; 0 0 COMMENT public TABLE user postgres
 `;
 
-function parsePublicTables(toc) {
-  return toc
-    .split('\n')
-    .filter((line) => /^\s*\d+;\s+\d+\s+\d+\s+TABLE\s+public\s+/.test(line))
-    .map((line) => line.trim().split(/\s+/)[5].replace(/^"|"$/g, ''))
-    .sort();
-}
-
 test('parses numeric TOC rows and quoted identifiers, ignoring comments', () => {
-  assert.deepEqual(parsePublicTables(fixture), ['library_roots', 'session', 'user']);
+  assert.deepEqual(parseToc(fixture), ['library_roots', 'session', 'user']);
 });
 
 test('rejects an empty table set before manifest comparison', () => {
-  assert.deepEqual(parsePublicTables('; only comments\n'), []);
+  assert.throws(() => parseToc('; only comments\n'), /no public table/);
+});
+
+test('accepts the versioned manifest with one terminal newline and compares exact sorted sets', () => {
+  const manifest = 'user\nsession\nlibrary_roots\n';
+  assert.deepEqual(parseManifest(manifest), ['library_roots', 'session', 'user']);
+  assert.deepEqual(compareManifestAndToc(manifest, fixture), ['library_roots', 'session', 'user']);
+});
+
+test('rejects blank, duplicate, empty, and mismatched manifest/table sets', () => {
+  assert.throws(() => parseManifest('user\n\nsession\n'), /blank/);
+  assert.throws(() => parseManifest('user\nuser\n'), /duplicate/);
+  assert.throws(() => parseManifest(''), /blank|empty/);
+  assert.throws(() => compareManifestAndToc('user\nsession\n', fixture), /mismatch/);
+});
+
+test('accepts the checked-in current manifest and rejects a TOC that omits one required table', async () => {
+  const manifest = await readFile(new URL('../scripts/backup-table-manifest.v1', import.meta.url), 'utf8');
+  const expected = parseManifest(manifest);
+  assert.ok(expected.length > 20);
+  assert.throws(() => compareManifestAndToc(manifest, fixture), /mismatch/);
 });

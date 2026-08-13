@@ -19,6 +19,8 @@ test -z "$(docker ps -aq --filter "label=com.docker.compose.project=$project_b")
 
 printf 'drill-db-password\n' > "$root/secrets/api_db_password"
 printf 'drill-db-password\n' > "$root/secrets/worker_db_password"
+backup_password="drill-backup-$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')"
+printf '%s\n' "$backup_password" > "$root/secrets/backup_db_password"
 printf 'drill-auth-secret-012345678901234567890123\n' > "$root/secrets/better_auth_secret"
 printf 'drill-reader-secret-0123456789012345678901\n' > "$root/secrets/reader_capability_secret"
 # A deterministic 1x1 PNG is enough for the scanner's real directory path.
@@ -37,6 +39,7 @@ services:
     volumes:
       - ./scripts:/drill-scripts:ro
       - $root/artifacts:/drill-artifacts
+    secrets: [backup_db_password]
   migrate:
     environment: { DATABASE_URL: postgresql://gutter:drill-db-password@db:5432/gutter }
   api:
@@ -57,6 +60,7 @@ secrets:
   worker_db_password: { file: $root/secrets/worker_db_password }
   better_auth_secret: { file: $root/secrets/better_auth_secret }
   reader_capability_secret: { file: $root/secrets/reader_capability_secret }
+  backup_db_password: { file: $root/secrets/backup_db_password }
 EOF
 
 merged_config="$root/merged-config.yaml"
@@ -90,7 +94,7 @@ insert into library_access_grants(user_id,root_id,granted_by_user_id) values ('d
 insert into gutter_acl_revisions(user_id,revision) values ('drill-user',7);
 insert into gutter_acl_audit(actor_user_id,subject_user_id,root_id,action,request_id) values ('drill-admin','drill-user','drill-root','grant','drill-acl-request');
 insert into gutter_user_state_revisions(user_id,revision) values ('drill-user',11);
-insert into user_progress(user_id,root_id,source_key,page_ordinal,completed,revision) values ('drill-user','drill-root','title',1,true,3);
+insert into user_progress(user_id,root_id,source_key,page_ordinal,completed,revision) values ('drill-user','drill-root','title',0,true,3);
 insert into user_target_state(user_id,root_id,target_kind,target_key,favorite,rating,note,hidden) values ('drill-user','drill-root','source','title',true,5,'drill note',false);
 insert into user_bookmarks(user_id,root_id,source_key,page_ordinal,label) values ('drill-user','drill-root','title',1,'drill bookmark');
 insert into user_collections(user_id,name,name_key) values ('drill-user','Drill Collection','drill collection');
@@ -99,19 +103,19 @@ insert into source_items(root_id,relative_path,kind,size_bytes,mtime_ms,page_cou
 insert into global_source_suppressions(source_item_id,reason) values ((select id from source_items where relative_path='title'),'drill-suppression');
 insert into source_items(root_id,relative_path,kind,size_bytes,mtime_ms,page_count,quarantine_reason,active,manifest_sha256) values ('drill-root','visible','directory',0,0,1,null,true,repeat('0',64));
 insert into catalog_preferred_release_overrides(root_id,publication_identity_key,preferred_source_item_id) values ('drill-root',repeat('a',64),(select id from source_items where relative_path='visible'));
-insert into user_target_state(user_id,root_id,target_kind,target_key,favorite,rating,note,hidden) values ('drill-user','drill-root','source','visible',false,null,'hidden drill source',true);
+insert into user_target_state(user_id,root_id,target_kind,target_key,favorite,rating,note,hidden) values ('drill-user','drill-root','source','retired',false,null,'hidden drill source',true);
 insert into gutter_user_state_audit(actor_user_id,subject_user_id,action,request_id) values ('drill-admin','drill-user','permanent_delete','drill-user-state-audit');
 insert into source_items(root_id,relative_path,kind,size_bytes,mtime_ms,page_count,quarantine_reason,active,manifest_sha256) values ('drill-root','retired','directory',0,0,1,'drill-tombstone',false,repeat('1',64));
 insert into source_metadata_issues(source_item_id,code,rule,detail) values ((select id from source_items where relative_path='visible'),'drill-error','drill-rule','drill metadata error');
 SQL
 pre_digest=$(docker compose -p "$project_a" -f compose.yaml -f "$root/override.yaml" exec -T db psql -U gutter -d gutter -Atc "select concat_ws('|',(select count(*) from library_roots),(select count(*) from \"user\"),(select count(*) from session),(select count(*) from account),(select count(*) from library_access_grants),(select count(*) from gutter_acl_revisions),(select count(*) from gutter_acl_audit),(select count(*) from gutter_user_state_revisions),(select count(*) from user_progress),(select count(*) from user_target_state),(select count(*) from user_bookmarks),(select count(*) from user_collections),(select count(*) from user_collection_members),(select count(*) from gutter_user_state_audit),(select count(*) from catalog_preferred_release_overrides),(select count(*) from global_source_suppressions),(select count(*) from source_items where not active),(select count(*) from source_metadata_issues))")
 # Create a dedicated non-superuser read-only backup actor and prove every manifest table is readable.
-docker compose -p "$project_a" -f compose.yaml -f "$root/override.yaml" exec -T db psql -U gutter -d gutter -v ON_ERROR_STOP=1 -c "do \$\$ begin if not exists (select 1 from pg_roles where rolname='drill_backup') then create role drill_backup login; end if; end \$\$; grant connect on database gutter to drill_backup; grant usage on schema public to drill_backup; grant select on all tables in schema public to drill_backup; alter role drill_backup login nosuperuser noreplication;"
+docker compose -p "$project_a" -f compose.yaml -f "$root/override.yaml" exec -T db psql -U gutter -d gutter -v backup_password="$backup_password" -v ON_ERROR_STOP=1 -c "do \$\$ begin if not exists (select 1 from pg_roles where rolname='drill_backup') then create role drill_backup login; end if; end \$\$; alter role drill_backup password :'backup_password'; grant connect on database gutter to drill_backup; grant usage on schema public to drill_backup; grant select on all tables in schema public to drill_backup; alter role drill_backup login nosuperuser noreplication;"
 for table in $expected_tables; do
   privilege=$(docker compose -p "$project_a" -f compose.yaml -f "$root/override.yaml" exec -T db psql -U gutter -d gutter -Atc "select has_table_privilege('drill_backup', to_regclass(format('%I','$table')), 'SELECT')" | tr -d '\r')
   [ "$privilege" = t ] || { echo "backup_role_missing_select:$table:$privilege" >&2; exit 1; }
 done
-docker compose -p "$project_a" -f compose.yaml -f "$root/override.yaml" exec -T db sh -c "GUTTER_BACKUP_DIR=/drill-artifacts GUTTER_DATABASE_URL=postgresql://gutter@127.0.0.1:5432/gutter GUTTER_BACKUP_ROLE=drill_backup GUTTER_BACKUP_MANIFEST=/drill-scripts/backup-table-manifest.v1 sh /drill-scripts/backup-postgres.sh" >/dev/null
+docker compose -p "$project_a" -f compose.yaml -f "$root/override.yaml" exec -T db sh -c "GUTTER_BACKUP_DIR=/drill-artifacts GUTTER_DATABASE_URL=postgresql://127.0.0.1:5432/gutter GUTTER_BACKUP_ROLE=drill_backup GUTTER_BACKUP_PASSWORD_FILE=/run/secrets/backup_db_password GUTTER_BACKUP_MANIFEST=/drill-scripts/backup-table-manifest.v1 sh /drill-scripts/backup-postgres.sh" >/dev/null
 archive=$(find "$root/artifacts" -maxdepth 1 -name 'gutter-*.dump' -type f | sort | tail -1)
 test -n "$archive"
 cp "$archive" "$root/artifacts/backup.dump"
@@ -132,6 +136,8 @@ done
 docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T db psql -U gutter -d gutter -v ON_ERROR_STOP=1 -c "do \$\$ begin if not exists (select 1 from pg_roles where rolname='gutter_api') then create role gutter_api login password 'drill-db-password'; end if; if not exists (select 1 from pg_roles where rolname='gutter_worker') then create role gutter_worker login password 'drill-db-password'; end if; end \$\$;"
 (cd "$root/artifacts" && sha256sum -c backup.dump.sha256)
 docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T db sh -c "GUTTER_RESTORE_CONFIRM=YES GUTTER_RESTORE_CONFIRMATION=$project_b GUTTER_RESTORE_TARGET_IDENTITY=$project_b GUTTER_RESTORE_EXPECTED_DATABASE=gutter GUTTER_BACKUP_ARCHIVE=/drill-artifacts/backup.dump GUTTER_DATABASE_URL=postgresql://gutter@127.0.0.1:5432/gutter GUTTER_BACKUP_MANIFEST=/drill-scripts/backup-table-manifest.v1 sh /drill-scripts/restore-postgres.sh"
+test "$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T db psql -U gutter -d gutter -Atc "select count(*) from pg_roles where rolname in ('gutter_api','gutter_worker') and not rolsuper")" -eq 2
+test "$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T db psql -U gutter -d gutter -Atc "select has_table_privilege('gutter_worker','public.source_items','SELECT')")" = t
 post_digest=$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T db psql -U gutter -d gutter -Atc "select concat_ws('|',(select count(*) from library_roots),(select count(*) from \"user\"),(select count(*) from session),(select count(*) from account),(select count(*) from library_access_grants),(select count(*) from gutter_acl_revisions),(select count(*) from gutter_acl_audit),(select count(*) from gutter_user_state_revisions),(select count(*) from user_progress),(select count(*) from user_target_state),(select count(*) from user_bookmarks),(select count(*) from user_collections),(select count(*) from user_collection_members),(select count(*) from gutter_user_state_audit),(select count(*) from catalog_preferred_release_overrides),(select count(*) from global_source_suppressions),(select count(*) from source_items where not active),(select count(*) from source_metadata_issues))")
 test "$post_digest" = "$pre_digest"
 docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" up -d api worker web
@@ -150,14 +156,20 @@ test "$validation_state" = completed
 validation_valid=$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T db psql -U gutter -d gutter -Atc "select coalesce((select valid_count from page_validation_runs v join source_items i on i.id=v.source_item_id where i.relative_path='visible' order by v.id desc limit 1),0)" | tr -d '\r')
 test "$validation_valid" -gt 0
 release_id=$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T db psql -U gutter -d gutter -Atc "select r.id from catalog_releases r join source_items i on i.id=r.source_item_id where i.relative_path='visible' order by r.id limit 1" | tr -d '\r')
-reader_path="/api/reader/releases/$release_id/pages/1"
+reader_path="/api/reader/releases/$release_id/pages/0"
 reader_token=$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker node --import tsx --input-type=module -e "import { readFileSync } from 'node:fs'; import { signReaderCapability } from '@gutter/reader-stream'; process.stdout.write(signReaderCapability(readFileSync('/run/secrets/reader_capability_secret','utf8').trim(),{userId:'drill-user',rootId:'drill-root',path:'$reader_path',aclRevision:7}));" | tr -d '\r')
+initial_cache=$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker sh -c 'find /cache/derived -type f -not -name .operator-status.json | wc -l' | tr -d '\r')
+test "$initial_cache" -eq 0
 docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker sh -c "wget -q --header='x-gutter-reader-capability: $reader_token' -O /tmp/drill-reader-page http://127.0.0.1:3001$reader_path"
+reader_sha=$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker sha256sum /tmp/drill-reader-page | cut -d' ' -f1 | tr -d '\r')
+test "$reader_sha" = "$source_sha"
 cache_after=$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker sh -c 'find /cache/derived -type f -not -name .operator-status.json | wc -l' | tr -d '\r')
 [ "$cache_after" -gt 0 ]
 cache_sha=$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker sh -c 'find /cache/derived -type f -not -name .operator-status.json -print0 | sort -z | xargs -0 sha256sum | sha256sum' | tr -d '\r')
 docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker sh -c 'find /cache/derived -type f -not -name .operator-status.json -delete'
 docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker sh -c "wget -q --header='x-gutter-reader-capability: $reader_token' -O /tmp/drill-reader-page-2 http://127.0.0.1:3001$reader_path"
+reader_sha_2=$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker sha256sum /tmp/drill-reader-page-2 | cut -d' ' -f1 | tr -d '\r')
+test "$reader_sha_2" = "$reader_sha"; test "$reader_sha_2" = "$source_sha"
 cache_regenerated=$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker sh -c 'find /cache/derived -type f -not -name .operator-status.json | wc -l' | tr -d '\r')
 test "$cache_regenerated" -gt 0
 cache_sha_regenerated=$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker sh -c 'find /cache/derived -type f -not -name .operator-status.json -print0 | sort -z | xargs -0 sha256sum | sha256sum' | tr -d '\r')
@@ -166,6 +178,8 @@ test "$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" 
 test "$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T db psql -U gutter -d gutter -Atc "select count(*) from global_source_suppressions s join source_items i on i.id=s.source_item_id where i.relative_path='title' and s.reason='drill-suppression'")" -eq 1
 test "$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T db psql -U gutter -d gutter -Atc "select count(*) from catalog_releases r join source_items i on i.id=r.source_item_id where i.relative_path='visible'")" -eq 1
 test "$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T db psql -U gutter -d gutter -Atc "select count(*) from user_progress where user_id='drill-user' and revision=3")" -eq 1
+test "$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T db psql -U gutter -d gutter -Atc "select count(*) from user_target_state where target_key='visible' and hidden")" -eq 0
+test "$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T db psql -U gutter -d gutter -Atc "select count(*) from user_target_state where target_key='retired' and hidden")" -eq 1
 test "$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker sh -c 'test -d /drill-source && test ! -w /drill-source && test -d /cache/derived')"
 test "$(sha256sum "$root/source/title/001.png" | cut -d' ' -f1)" = "$source_sha"
 curl -fsS http://localhost:8080/ >/dev/null

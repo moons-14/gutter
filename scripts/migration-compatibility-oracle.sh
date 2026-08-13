@@ -15,4 +15,4 @@ DATABASE_URL="$GUTTER_DATABASE_URL" DB_URL= PGDATABASE= PGHOST= PGPORT= PGUSER= 
 test "$(psql "$GUTTER_DATABASE_URL" -Atc 'select count(*) from library_roots')" -eq "$legacy_roots"
 test "$(psql "$GUTTER_DATABASE_URL" -Atc 'select count(*) from source_items')" -eq "$legacy_source_items"
 psql "$GUTTER_DATABASE_URL" -v ON_ERROR_STOP=1 -c "select to_regclass('public.gutter_schema'), to_regclass('public.library_roots'), to_regclass('public.source_items');" >/dev/null
-echo "expand/contract compatibility passed; preserved library_roots=$legacy_roots source_items=$legacy_source_items; rollback boundary is restore prior dump then roll forward"
+echo "pre-upgrade restore+migrate row-preservation oracle passed; preserved library_roots=$legacy_roots source_items=$legacy_source_items; rollback boundary is restore prior dump then roll forward"
