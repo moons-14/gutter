@@ -51,7 +51,21 @@ secrets:
   reader_capability_secret: { file: $root/secrets/reader_capability_secret }
 EOF
 
-docker compose -p "$project_a" -f compose.yaml -f "$root/override.yaml" config >/dev/null
+merged_config="$root/merged-config.yaml"
+if ! docker compose -p "$project_a" -f compose.yaml -f "$root/override.yaml" config >"$merged_config"; then
+  echo 'restore drill preflight failed: merged Compose config is invalid' >&2
+  exit 1
+fi
+if grep -Eq '(^|[[:space:]])(ipv4_address|subnet):' "$merged_config"; then
+  echo 'restore drill preflight failed: fixed network address or subnet detected' >&2
+  exit 1
+fi
+if ! grep -Eq '^networks:[[:space:]]*$' "$merged_config" \
+  || ! grep -Eq '^  internal:[[:space:]]*$' "$merged_config" \
+  || ! grep -Eq '^    internal: true[[:space:]]*$' "$merged_config"; then
+  echo 'restore drill preflight failed: internal network must be defined and internal' >&2
+  exit 1
+fi
 [ "${DRILL_CONFIG_ONLY:-0}" = 1 ] && exit 0
 expected_tables='user session account verification twoFactor passkey gutter_auth_bootstrap library_roots library_access_grants gutter_acl_revisions gutter_acl_audit gutter_user_state_revisions user_progress user_target_state user_bookmarks user_collections user_collection_members gutter_user_state_audit gutter_acl_request_claims'
 docker compose -p "$project_a" -f compose.yaml -f "$root/override.yaml" up -d db migrate

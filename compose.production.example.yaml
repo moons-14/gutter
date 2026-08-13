@@ -42,9 +42,7 @@ services:
     volumes:
       - caddy-data:/data
       - caddy-config:/config
-    networks:
-      internal: { ipv4_address: 172.30.0.20 }
-      edge: {}
+    networks: [internal, edge]
     healthcheck:
       test: [CMD-SHELL, 'wget -q -O /dev/null http://127.0.0.1:2019/config/']
       interval: 5s

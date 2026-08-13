@@ -2,6 +2,11 @@ import { readFile } from 'node:fs/promises';
 const runbook = await readFile(new URL('../docs/operations-runbook.md', import.meta.url), 'utf8');
 const drill = await readFile(new URL('./compose-restore-drill.sh', import.meta.url), 'utf8');
 const caddy = await readFile(new URL('../Caddyfile', import.meta.url), 'utf8');
+const compose = await readFile(new URL('../compose.yaml', import.meta.url), 'utf8');
+const productionCompose = await readFile(
+  new URL('../compose.production.example.yaml', import.meta.url),
+  'utf8',
+);
 const migration = await readFile(
   new URL('./migration-compatibility-oracle.sh', import.meta.url),
   'utf8',
@@ -17,8 +22,13 @@ const required = [
 ];
 for (const term of required)
   if (!runbook.includes(term)) throw new Error(`runbook_missing:${term}`);
-if (/172\.30\.0\.0\/24|ipv4_address/.test(drill)) throw new Error('drill_fixed_network_detected');
+if (/172\.30\.0\.0\/24|ipv4_address|(^|\n)[ \t]*subnet:/.test(compose + productionCompose))
+  throw new Error('fixed_network_detected');
+if (!/^networks:\s*$/m.test(compose) || !/^  internal:\s*$/m.test(compose) || !/^    internal: true\s*$/m.test(compose))
+  throw new Error('internal_network_definition_missing');
 if (!drill.includes('internal: !override')) throw new Error('drill_network_override_missing');
+if (!drill.includes('merged_config=') || !drill.includes('fixed network address or subnet detected'))
+  throw new Error('drill_network_preflight_missing');
 if (!caddy.includes('handle /api/metrics') || !caddy.includes('respond 404'))
   throw new Error('public_metrics_not_denied');
 if (!migration.includes('pg_restore --list') || !migration.includes('roll forward'))
