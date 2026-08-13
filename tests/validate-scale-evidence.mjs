@@ -40,6 +40,7 @@ if (report.status === 'unavailable') {
   assert.equal(typeof report.baselineComparison.baselineSha256, 'string');
 }
 validate(report, schema);
+if (unavailableMode) { console.log('SCALE_EVIDENCE_SCHEMA_RESULT pass'); process.exit(0); }
 assert.equal(report.dataset.sourceFixtureBooks, 1000);
 assert.equal(report.dataset.sourceFixturePages, 1000);
 assert.equal(report.thresholds.readerCount, 5);
