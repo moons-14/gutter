@@ -167,13 +167,17 @@ services:
     command: [pnpm, integration:scale-oracles]
     environment:
       GUTTER_SCALE_ORACLE: '1'
+      SCALE_SOURCE_ROOT: /scale-source
       DATABASE_URL: 'postgresql://gutter:${POSTGRES_PASSWORD:-}@integration-db:5432/gutter_integration'
     depends_on: { integration-db: { condition: service_healthy } }
     profiles: [scale]
+    volumes:
+      - scale-source:/scale-source
     networks: [internal]
 volumes:
   db-data:
   cache-data:
+  scale-source:
 secrets:
   api_db_password:
     file: ./secrets/api_db_password
