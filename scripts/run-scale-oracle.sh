@@ -27,7 +27,6 @@ cleanup() {
 trap cleanup EXIT INT TERM
 export POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-issue26-postgres-test}"
 export SCALE_RUN_ID="$run_id" SCALE_ROOT_ID="$root_id" SCALE_EVIDENCE_DIR="$staging"
-export SCALE_FULL="${SCALE_FULL-}" SCALE_BOOKS="${SCALE_BOOKS-}" SCALE_PAGES_PER_BOOK="${SCALE_PAGES_PER_BOOK-}"
 docker compose -p "$project" --profile scale run --rm scale-oracles
 mkdir -p "$(dirname "$target")"
 cp "$staging/evidence.json" "$target"
