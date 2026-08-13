@@ -43,7 +43,7 @@
     if (!mounted || !$session.user || $session.user.role !== 'admin') return;
     const requestIdentity = sessionIdentity, requestGeneration = generation;
     const controller = new AbortController(); libraryRequest?.abort(); libraryRequest = controller;
-    try { const response = await fetch('/api/catalog/libraries', { signal: controller.signal }); if (response.ok && current(requestIdentity, requestGeneration)) libraries = (await response.json()).items; }
+    try { const response = await fetch('/api/catalog/libraries', { signal: controller.signal }); if (current(requestIdentity, requestGeneration)) { if (response.ok) libraries = (await response.json()).items; else error = 'ライブラリを読み込めませんでした。'; } }
     catch (e) { if (!(e instanceof DOMException && e.name === 'AbortError') && current(requestIdentity, requestGeneration)) error = 'ライブラリを読み込めませんでした。'; }
   }
   async function changeAccess(action: 'grant' | 'revoke') {

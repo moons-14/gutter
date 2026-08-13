@@ -30,8 +30,7 @@
 </script>
 
 <svelte:head><link rel="manifest" href="/manifest.webmanifest" /><meta name="theme-color" content="#101114" /></svelte:head>
-<main>
-  <header>
+<header>
     <a class="brand" href="/" aria-label="gutter のホーム">gutter</a>
     <nav aria-label="メインナビゲーション">
       <a href="/">カタログ</a>
@@ -50,7 +49,8 @@
         <a class="account-action" href={loginTarget}>ログイン</a>
       {/if}
     </div>
-  </header>
+</header>
+<main>
   {#if signOutStatus}<p class="session-feedback" role="status">{signOutStatus}</p>{/if}
   {#if signOutError}<p class="session-feedback" role="alert">{signOutError}</p>{/if}
   <slot />
@@ -61,7 +61,7 @@
   :global(body) { margin: 0; background: #101114; color: #f3f3f5; font-family: ui-sans-serif, system-ui, sans-serif; }
   :global(a) { color: inherit; }
   main { min-height: 100vh; max-width: 80rem; margin: auto; padding: clamp(1rem, 4vw, 3rem); }
-  header { display:flex; align-items:center; gap:1rem; padding-bottom:1rem; border-bottom:1px solid #30333b; }
+  header { max-width:80rem; margin:auto; padding:clamp(1rem, 4vw, 3rem) clamp(1rem, 4vw, 3rem) 1rem; display:flex; align-items:center; gap:1rem; border-bottom:1px solid #30333b; }
   .brand { color:#fff; font-size:1.3rem; font-weight:800; letter-spacing:-.04em; text-decoration:none; }
   nav { display:flex; flex:1; flex-wrap:wrap; gap:.25rem; } nav a { border-radius:.5rem; padding:.5rem .65rem; text-decoration:none; } nav a:hover, nav a:focus-visible { background:#282b33; }
   .session-actions { display:flex; align-items:center; flex-wrap:wrap; justify-content:flex-end; gap:.5rem; }

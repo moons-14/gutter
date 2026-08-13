@@ -361,3 +361,17 @@ test('blocks permanent self-delete before prompt or request', async () => {
   expect(fetcher.mock.calls.some(([url]) => String(url).includes('/user-state'))).toBe(false);
   expect((await screen.findByRole('alert')).textContent).toContain('自分自身は削除できません');
 });
+
+test('reports unavailable libraries without false success', async () => {
+  session.set({ loading: false, user: { id: 'admin', name: 'Admin', role: 'admin' } });
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const url = String(input);
+    if (url.includes('/catalog/libraries')) return new Response('{}', { status: 500 });
+    return new Response(JSON.stringify({ items: [], nextCursor: null }));
+  });
+  render(AdminSettings);
+  expect((await screen.findByRole('alert')).textContent).toContain(
+    'ライブラリを読み込めませんでした。',
+  );
+  expect(screen.queryByText('アクセスを付与しました。')).toBeNull();
+});

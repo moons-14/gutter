@@ -16,3 +16,9 @@ because its secret overlay uses Compose reset tags to remove direct variables be
 `*_FILE` secrets.
 
 Catalog list performance is verified with a generated 100k-row `catalog_series_list_state` fixture: `ANALYZE` plus JSON `EXPLAIN ANALYZE` must name the keyset B-tree and selective (three-or-more-character) trigram indexes. Timings are observational, not pass/fail thresholds.
+
+Browser quality checks use exactly one Playwright Google Chrome project. Local runs use the
+installed Chrome Stable channel, or the binary named by `GUTTER_CHROME_EXECUTABLE`; CI installs
+that Chrome channel explicitly. The suite does not cover Firefox, WebKit, device emulation,
+native applications, or PWA installation behavior. E2E runs are capped at four workers for
+reproducibility with the shared Vite server.
