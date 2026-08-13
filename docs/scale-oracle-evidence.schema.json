@@ -1,0 +1,259 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Gutter scale oracle evidence",
+  "type": "object",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": ["status", "worker"],
+      "properties": {
+        "status": { "const": "pass" },
+        "worker": {
+          "type": "object",
+          "properties": { "queueCompletedRuns": { "const": 3 } }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": ["status", "unavailablePlatformReason", "worker"],
+      "properties": {
+        "status": { "const": "unavailable" },
+        "unavailablePlatformReason": { "type": "string", "minLength": 1 },
+        "worker": {
+          "type": "object",
+          "properties": {
+            "queueCompletedRuns": { "const": 0 },
+            "runs": { "type": "object", "additionalProperties": false }
+          }
+        }
+      }
+    }
+  ],
+  "required": [
+    "schemaVersion",
+    "status",
+    "unavailablePlatformReason",
+    "seed",
+    "runId",
+    "dataset",
+    "thresholds",
+    "environment",
+    "timingsMs",
+    "plans",
+    "cache",
+    "worker",
+    "sparse",
+    "baselineComparison"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "gutter.scale-oracle.v1" },
+    "status": { "enum": ["pass", "fail", "unavailable"] },
+    "unavailablePlatformReason": { "type": ["string", "null"] },
+    "seed": { "type": "string", "minLength": 1 },
+    "runId": { "type": "string", "minLength": 8 },
+    "dataset": {
+      "type": "object",
+      "required": ["books", "pages", "sourceFixtureBooks", "sourceFixturePages"],
+      "properties": {
+        "books": { "type": "integer", "minimum": 1 },
+        "pages": { "type": "integer", "minimum": 1 },
+        "sourceFixtureBooks": { "type": "integer", "minimum": 1 },
+        "sourceFixturePages": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "thresholds": {
+      "type": "object",
+      "required": [
+        "sourceFixtureBooks",
+        "sourceFixturePages",
+        "readerCount",
+        "coldProducerCount",
+        "sparseAllocatedBlocksMax",
+        "advisoryCatalogP95Ms",
+        "advisorySearchP95Ms",
+        "advisoryScanP95Ms"
+      ],
+      "properties": {
+        "sourceFixtureBooks": { "const": 1000 },
+        "sourceFixturePages": { "const": 1000 },
+        "readerCount": { "const": 5 },
+        "coldProducerCount": { "const": 1 },
+        "sparseAllocatedBlocksMax": { "type": "number", "minimum": 0 },
+        "advisoryCatalogP95Ms": { "type": "number", "minimum": 0 },
+        "advisorySearchP95Ms": { "type": "number", "minimum": 0 },
+        "advisoryScanP95Ms": { "type": "number", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "environment": {
+      "type": "object",
+      "required": ["node", "postgres", "setupDatabaseRole", "workerDatabaseRole", "sourceMount"],
+      "properties": {
+        "node": { "type": "string" },
+        "postgres": { "type": "object" },
+        "setupDatabaseRole": { "const": "gutter" },
+        "workerDatabaseRole": { "const": "gutter_worker" },
+        "sourceMount": { "const": "read-only" }
+      },
+      "additionalProperties": false
+    },
+    "timingsMs": {
+      "type": "object",
+      "required": ["catalog", "search", "noChangeScan", "changedScan"],
+      "properties": {
+        "catalog": { "$ref": "#/$defs/samples" },
+        "search": { "$ref": "#/$defs/samples" },
+        "noChangeScan": { "$ref": "#/$defs/samples" },
+        "changedScan": { "$ref": "#/$defs/samples" }
+      },
+      "additionalProperties": false
+    },
+    "plans": {
+      "type": "object",
+      "required": ["queryShape", "list", "search"],
+      "properties": {
+        "queryShape": { "type": "string", "minLength": 1 },
+        "list": { "type": "array", "items": { "$ref": "#/$defs/planRow" } },
+        "search": { "type": "array", "items": { "$ref": "#/$defs/planRow" } }
+      },
+      "additionalProperties": false
+    },
+    "cache": {
+      "type": "object",
+      "required": ["readers", "coldProducers", "warmHit", "gc", "pressure"],
+      "properties": {
+        "readers": { "const": 5 },
+        "coldProducers": { "const": 1 },
+        "warmHit": { "type": "boolean" },
+        "gc": { "type": "boolean" },
+        "pressure": {
+          "type": "object",
+          "required": ["quotaBytes", "reclaimedBytes", "protectedLiveEntry"],
+          "properties": {
+            "quotaBytes": { "type": "number", "minimum": 0 },
+            "reclaimedBytes": { "type": "number", "minimum": 0 },
+            "protectedLiveEntry": { "const": true }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "worker": {
+      "type": "object",
+      "required": ["queueCompletedRuns", "runs"],
+      "properties": {
+        "queueCompletedRuns": { "type": "integer", "minimum": 0 },
+        "runs": {
+          "type": "object",
+          "properties": {
+            "first": { "$ref": "#/$defs/run" },
+            "noChange": { "$ref": "#/$defs/run" },
+            "changed": { "$ref": "#/$defs/run" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["queueCompletedRuns", "runs"],
+          "properties": {
+            "queueCompletedRuns": { "const": 3 },
+            "runs": { "required": ["first", "noChange", "changed"] }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["queueCompletedRuns", "runs"],
+          "properties": {
+            "queueCompletedRuns": { "const": 0 },
+            "runs": { "maxProperties": 0 }
+          }
+        }
+      ]
+    },
+    "sparse": {
+      "type": "object",
+      "required": ["logicalBytes", "allocatedBlocks"],
+      "properties": {
+        "logicalBytes": { "type": "integer", "minimum": 1 },
+        "allocatedBlocks": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "baselineComparison": {
+      "type": "object",
+      "required": ["baseline", "baselineSha256", "portable", "hardwareAdvisory"],
+      "properties": {
+        "baseline": { "const": "docs/scale-oracle-baseline.json" },
+        "baselineSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "portable": { "enum": ["pass", "fail"] },
+        "hardwareAdvisory": { "type": "object" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "$defs": {
+    "run": {
+      "type": "object",
+      "required": ["id", "requestId", "pgBossJobId", "state", "summary"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "requestId": { "type": "string", "minLength": 1 },
+        "pgBossJobId": { "type": "string", "minLength": 1 },
+        "state": { "const": "completed" },
+        "summary": {
+          "type": "object",
+          "required": ["updated", "unchanged", "discovered", "pages"],
+          "properties": {
+            "updated": { "type": "integer", "minimum": 0 },
+            "unchanged": { "type": "integer", "minimum": 0 },
+            "discovered": { "type": "integer", "minimum": 0 },
+            "pages": { "type": "integer", "minimum": 0 }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "planRow": {
+      "type": "object",
+      "required": ["QUERY PLAN"],
+      "properties": {
+        "QUERY PLAN": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["Plan"],
+            "properties": {
+              "Plan": {
+                "type": "object",
+                "required": ["Node Type"],
+                "properties": { "Node Type": { "type": "string", "minLength": 1 } },
+                "additionalProperties": true
+              }
+            },
+            "additionalProperties": true
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "samples": {
+      "type": "object",
+      "required": ["p50", "p95", "count"],
+      "properties": {
+        "p50": { "type": "number", "minimum": 0 },
+        "p95": { "type": "number", "minimum": 0 },
+        "count": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}
