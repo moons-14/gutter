@@ -61,7 +61,7 @@ grant select, insert, update, delete on
   metadata_provider_candidates, metadata_decisions
 to gutter_worker;
 grant select on gutter_schema, catalog_preferred_release_overrides, visible_source_items,
-  reader_eligible_source_pages to gutter_worker;
+  reader_eligible_source_pages, public_reader_source_pages to gutter_worker;
 grant execute on function gutter_user_can_read_release(text, bigint) to gutter_worker;
 -- The progress-key trigger runs as the runtime worker and resolves this exact pgcrypto overload.
 grant execute on function public.digest(bytea, text) to gutter_worker;

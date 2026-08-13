@@ -71,6 +71,16 @@ async function assertLookupOracle(pool: Pool): Promise<void> {
       [rootId, triggerPath, 'c'.repeat(64)],
     );
     assert.equal(inserted.rows[0]?.public_progress_key, triggerKey);
+    const readerRows = await pool.query<{ count: string }>(
+      `select count(*)::text as count
+         from catalog_releases r
+         join visible_source_items i on i.id=r.source_item_id
+         join public_reader_source_pages p on p.source_item_id=i.id
+        where r.id=$1 and p.ordinal=$2 and gutter_user_can_read_release($3,r.id)
+          and i.active and i.quarantine_reason is null`,
+      ['0', 0, 'oracle-user'],
+    );
+    assert.equal(readerRows.rows[0]?.count, '0');
     await pool.query('rollback');
   } catch (error) {
     await pool.query('rollback').catch(() => undefined);
@@ -126,6 +136,14 @@ async function assertCanonicalRuntimePolicy(pool: Pool): Promise<void> {
     (
       await pool.query(
         `select has_function_privilege('gutter_worker','public.digest(bytea,text)','EXECUTE') as allowed`,
+      )
+    ).rows[0]?.allowed,
+    true,
+  );
+  assert.equal(
+    (
+      await pool.query(
+        `select has_table_privilege('gutter_worker','public.public_reader_source_pages','SELECT') as allowed`,
       )
     ).rows[0]?.allowed,
     true,

@@ -63,6 +63,7 @@ test('worker policy excludes auth, ACL, and user-state DML while preserving queu
     policy,
     /grant execute on function gutter_change_library_access\(text, text, text, text, text\) to gutter_api/,
   );
+  assert.match(policy, /reader_eligible_source_pages, public_reader_source_pages to gutter_worker/);
   assert.match(
     progressDigest,
     /revoke insert, update, delete on global_source_suppressions from gutter_worker/,
