@@ -71,12 +71,16 @@ in bounded batches; (3) verify counts and application metrics; (4) contract only
 after the minimum rollback window. Avoid destructive renames, type narrowing, or dropping columns
 in the same release as the code that first uses them.
 
-The executable migration boundary check is `scripts/migration-compatibility-oracle.sh`. Against an
-explicit disposable target and `GUTTER_MIGRATION_CONFIRM=YES`, it restores the prior-schema dump,
-records representative legacy row counts, applies current migrations, and checks those rows remain
-readable. This is a pre-upgrade restore+migrate preservation oracle; it does not claim to execute an
-old binary or prove an expand/contract compatibility window. Rollback means restoring that
-pre-upgrade dump and rolling forward; a downgrade that requires destructive SQL is unsupported.
+The operator-facing migration boundary check is `scripts/migration-compatibility-oracle.sh`.
+Against an explicit disposable target and `GUTTER_MIGRATION_CONFIRM=YES`, it restores the supplied
+prior-schema dump, records representative legacy row counts, applies current migrations, and checks
+those rows remain readable. The release runner drives that oracle through
+`scripts/prepare-migration-compatibility-fixture.sh`: it creates a PostgreSQL 18.1 fixture at the
+recorded prior migration from the canonical Drizzle journal, seeds representative durable rows,
+and takes the pre-upgrade dump. Both paths reject a dump that already records the current migration.
+This is a pre-upgrade restore+migrate preservation oracle; it does not claim to execute an old binary
+or prove an expand/contract compatibility window. Rollback means restoring that pre-upgrade dump and
+rolling forward; a downgrade that requires destructive SQL is unsupported.
 
 Supported upgrade is one release at a time from the prior recorded schema. Take and verify a
 backup, run migrations, then readiness and scan smoke checks. Rollback is supported only before a

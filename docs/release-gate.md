@@ -44,15 +44,15 @@ digests, and the output of these gates on that same tree. The machine-readable r
 `docs/platform-evidence.schema.json` and include every gate ID and all three platform names from
 `docs/release-gate-manifest.json`; every artifact entry carries a SHA-256 checksum.
 
-| Gate                                        | Required result              | Evidence                                                                        |
-| ------------------------------------------- | ---------------------------- | ------------------------------------------------------------------------------- |
-| dependency, format, lint, type, unit, build | pass                         | CI log and command line                                                         |
-| license and MIT/exception notices           | pass                         | `docs/license-audit.json`, `docs/license-inventory.md`                          |
-| secret/container/static checks              | pass                         | `scripts/verify-release-gate.mjs` output and image scan/SBOM                    |
-| migration and OpenAPI compatibility         | pass                         | `scripts/migration-compatibility-oracle.sh`, `scripts/check-openapi-compat.mjs` |
-| browser E2E and Compose smoke               | pass                         | CI artifacts                                                                    |
-| backup/restore                              | pass                         | `scripts/compose-restore-drill.sh` output and checksum manifest                 |
-| scale/concurrency (#26)                     | pass or explicit unavailable | #26 evidence JSON, schema, and baseline                                         |
+| Gate                                        | Required result | Evidence                                                                                                                              |
+| ------------------------------------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| dependency, format, lint, type, unit, build | pass            | CI log and command line                                                                                                               |
+| license and MIT/exception notices           | pass            | `docs/license-audit.json`, `docs/license-inventory.md`                                                                                |
+| secret/container/static checks              | pass            | `scripts/verify-release-gate.mjs` output and image scan/SBOM                                                                          |
+| migration and OpenAPI compatibility         | pass            | `scripts/prepare-migration-compatibility-fixture.sh`, `scripts/migration-compatibility-oracle.sh`, `scripts/check-openapi-compat.mjs` |
+| browser E2E and Compose smoke               | pass            | CI artifacts                                                                                                                          |
+| backup/restore                              | pass            | `scripts/compose-restore-drill.sh` output and checksum manifest                                                                       |
+| scale/concurrency (#26)                     | pass            | #26 evidence JSON, schema, and baseline                                                                                               |
 
 The final gate must include an SPDX or CycloneDX SBOM for each built image, provenance attestation
 for the build inputs, the committed license inventory and generated audit, release notes, known
@@ -68,9 +68,9 @@ deferred evidence. Platform records may be `unavailable` only with a concrete re
 release gate may not use `unavailable` as a substitute for execution.
 
 `pnpm run:release-gates` executes the bounded commands, Compose smoke, backup/restore drill, and
-the #26 scale oracle when that oracle exists, saving each command’s output and checksum under
-`RELEASE_ARTIFACT_DIR`. It records a blocked marker when #26 is not yet merged; the final verifier
-will reject that marker until scale evidence is supplied. Container vulnerability scanning, SBOM
+the #26 scale oracle, saving each command’s output and checksum under `RELEASE_ARTIFACT_DIR`.
+The final verifier requires the scale schema, baseline, and passing evidence. Container
+vulnerability scanning, SBOM
 generation, and provenance attestation are executed by the same script using pinned release-runner
 tools (`gitleaks`, `trivy`, `syft`, and `cosign`); their outputs must be added as checksummed
 artifacts and referenced by the corresponding gates before final mode. Missing tools or image refs
@@ -81,7 +81,7 @@ from an observed official registry digest and retain the version tag alongside t
 
 The release workflow must execute, rather than merely list, the dependency/license/secret scan,
 container vulnerability scan, migration and OpenAPI checks, browser/UI E2E, Compose smoke,
-backup/restore drill, and (after #26 merges) the scale oracle. It must save command output and
+backup/restore drill, and scale oracle. It must save command output and
 checksummed artifacts before invoking final mode. Use the pinned image digests in the Dockerfiles
 and Compose files; update them only after observing a digest from the official registry and
 recording the source/version in the release evidence.

@@ -1,12 +1,11 @@
 #!/bin/sh
 set -eu
-trap 'echo "restore drill failed at line $LINENO" >&2' ERR
 
 # End-to-end recovery oracle.  This deliberately uses two isolated Compose projects:
 # A is seeded and backed up, then destroyed; B restores the durable state into a new
 # database, starts every runtime service, and rebuilds the catalog from a read-only root.
 run_id=${DRILL_RUN_ID:-$(date -u +%Y%m%d%H%M%S)-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')}
-compose_build_flags=""
+compose_build_flags="--build"
 [ "${DRILL_NO_BUILD:-0}" = 1 ] && compose_build_flags="--no-build"
 case "$run_id" in *[!0-9a-f-]*|'') echo 'invalid drill run identity' >&2; exit 2;; esac
 project_a="gutter-issue27-drill-a-$run_id"
@@ -277,7 +276,10 @@ for table in catalog_libraries catalog_series catalog_publications catalog_relea
 done
 docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker node --import tsx src/scan.ts scan enqueue --root drill-root >/dev/null
 echo "scan enqueue submitted" >&2
-for attempt in 1 2 3 4 5 6 7 8 9 10; do
+attempt=1
+# The worker's durable reconciliation coordinator dispatches new requests every 30 seconds.
+# Allow two complete coordinator windows plus scan time instead of timing out before its first tick.
+while [ "$attempt" -le 45 ]; do
   scan_status=$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker node --import tsx src/scan.ts scan status --root drill-root | tr -d '\r')
   state=$(printf '%s\n' "$scan_status" | node --input-type=module -e "let input=''; for await (const chunk of process.stdin) input += chunk; const rows=JSON.parse(input); if (rows[0]?.state) process.stdout.write(String(rows[0].state));")
   echo "scan poll attempt=$attempt state=${state:-missing}" >&2
@@ -291,9 +293,14 @@ for attempt in 1 2 3 4 5 6 7 8 9 10; do
     exit 1
   fi
   sleep 2
+  attempt=$((attempt + 1))
 done
 echo "scan polling ended state=${state:-missing}" >&2
-[ "${state:-}" = completed ]
+if [ "${state:-}" != completed ]; then
+  docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T db psql -U gutter -d gutter -x -c "select id,root_id,trigger,state,scan_run_id,error_code,created_at,started_at,finished_at from scan_requests where root_id='drill-root' order by created_at desc limit 5; select id,name,state,retry_count,retry_limit,output from pgboss.job where name='catalog.reconciliation.v1' order by created_on desc limit 5" >&2 || true
+  docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" logs --tail=80 worker >&2 || true
+  exit 1
+fi
 validation_row=missing
 for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
   validation_row=$(drill_psql "$project_b" "select i.validation_generation || '|' || coalesce(v.state,'missing') || '|' || coalesce(v.valid_count,0) || '|' || coalesce((select count(*) from page_validation_results r where r.source_item_id=i.id and r.manifest_sha256=i.manifest_sha256 and r.generation=i.validation_generation and r.state='valid'),0) from source_items i left join lateral (select state,valid_count from page_validation_runs where source_item_id=i.id and manifest_sha256=i.manifest_sha256 and generation=i.validation_generation order by id desc limit 1) v on true where i.relative_path='visible' limit 1")
@@ -310,7 +317,9 @@ test "${validation_generation:-0}" -gt 0
 test "$validation_state" = completed
 test "$validation_valid" -gt 0
 test "$validation_result_valid" -ge "$validation_valid"
+echo "restore drill checkpoint: validation=$validation_state/$validation_valid" >&2
 release_id=$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T db psql -U gutter -d gutter -Atc "select r.id from catalog_releases r join source_items i on i.id=r.source_item_id where i.relative_path='visible' order by r.id limit 1" | tr -d '\r')
+test -n "$release_id"
 reader_path="/api/reader/releases/$release_id/pages/0"
 reader_token=$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker node --import tsx --input-type=module -e "import { readFileSync } from 'node:fs'; import { signReaderCapability } from '@gutter/reader-stream'; process.stdout.write(signReaderCapability(readFileSync('/run/secrets/reader_capability_secret','utf8').trim(),{userId:'drill-user',rootId:'drill-root',path:'$reader_path',aclRevision:7}));" | tr -d '\r')
 initial_cache=$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker sh -c 'find /cache/derived -type f -not -name .operator-status.json | wc -l' | tr -d '\r')
@@ -318,6 +327,7 @@ test "$initial_cache" -eq 0
 docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T -e "DRILL_READER_CAPABILITY=$reader_token" worker node --input-type=module -e "import { writeFile } from 'node:fs/promises'; try { const response = await fetch('http://127.0.0.1:3001$reader_path',{headers:{'x-gutter-reader-capability':process.env.DRILL_READER_CAPABILITY}}); if (!response.ok) process.exit(1); await writeFile('/tmp/drill-reader-page',Buffer.from(await response.arrayBuffer())); } catch { process.exit(1); }"
 reader_sha=$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker sha256sum /tmp/drill-reader-page | cut -d' ' -f1 | tr -d '\r')
 test "$reader_sha" = "$source_sha"
+echo "restore drill checkpoint: authorized reader source checksum matched" >&2
 cache_after=$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker sh -c 'find /cache/derived -type f -not -name .operator-status.json | wc -l' | tr -d '\r')
 [ "$cache_after" -gt 0 ]
 cache_sha=$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker sh -c 'find /cache/derived -type f -not -name .operator-status.json -print0 | sort -z | xargs -0 sha256sum | sha256sum' | tr -d '\r')
@@ -329,6 +339,7 @@ cache_regenerated=$(docker compose -p "$project_b" -f compose.yaml -f "$root/ove
 test "$cache_regenerated" -gt 0
 cache_sha_regenerated=$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker sh -c 'find /cache/derived -type f -not -name .operator-status.json -print0 | sort -z | xargs -0 sha256sum | sha256sum' | tr -d '\r')
 test -n "$cache_sha"; test -n "$cache_sha_regenerated"
+echo "restore drill checkpoint: derived cache regenerated" >&2
 test "$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T db psql -U gutter -d gutter -Atc "select count(*) from source_items where root_id='drill-root' and relative_path='title'")" -eq 1
 test "$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T db psql -U gutter -d gutter -Atc "select count(*) from global_source_suppressions s join source_items i on i.id=s.source_item_id where i.relative_path='title' and s.reason='drill-suppression'")" -eq 1
 test "$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T db psql -U gutter -d gutter -Atc "select count(*) from catalog_releases r join source_items i on i.id=r.source_item_id where i.relative_path='visible'")" -eq 1

@@ -11,6 +11,12 @@ const migration = await readFile(
   new URL('./migration-compatibility-oracle.sh', import.meta.url),
   'utf8',
 );
+const migrationFixture = await readFile(
+  new URL('./prepare-migration-compatibility-fixture.sh', import.meta.url),
+  'utf8',
+);
+const releaseGates = await readFile(new URL('./run-release-gates.sh', import.meta.url), 'utf8');
+const composeSmoke = await readFile(new URL('./compose-smoke-release.sh', import.meta.url), 'utf8');
 const required = [
   'gutter_queue_lag_seconds',
   'gutter_database_size_bytes',
@@ -36,6 +42,25 @@ if (
 )
   throw new Error('internal_network_definition_missing');
 if (!drill.includes('internal: !override')) throw new Error('drill_network_override_missing');
+if (!drill.includes('compose_build_flags="--build"'))
+  throw new Error('drill_exact_tree_build_missing');
+if (/trap[^\n]*\bERR\b|\$LINENO/.test(drill)) throw new Error('drill_uses_nonportable_err_trap');
+if (!drill.includes('chmod 644 "$root/secrets"/*'))
+  throw new Error('drill_secret_permissions_missing');
+if (!releaseGates.includes('chmod 0444 "$path"'))
+  throw new Error('release_secret_permissions_missing');
+if (!releaseGates.includes('./scripts/compose-smoke-release.sh'))
+  throw new Error('compose_smoke_wrapper_missing');
+if (
+  !/project="gutter-release-smoke-/.test(composeSmoke) ||
+  !composeSmoke.includes('docker compose -p "$project" up --build')
+)
+  throw new Error('compose_smoke_isolation_missing');
+if (
+  !composeSmoke.includes('down -v --remove-orphans') ||
+  !composeSmoke.includes('trap cleanup EXIT')
+)
+  throw new Error('compose_smoke_cleanup_missing');
 if (
   !drill.includes('merged_config=') ||
   !drill.includes('fixed network address or subnet detected')
@@ -51,4 +76,10 @@ if (!caddy.includes('handle /api/metrics') || !caddy.includes('respond 404'))
   throw new Error('public_metrics_not_denied');
 if (!migration.includes('pg_restore --list') || !migration.includes('roll forward'))
   throw new Error('migration_oracle_missing');
+if (
+  !migrationFixture.includes('prior_tag=0013_runtime_acl_bootstrap') ||
+  !migrationFixture.includes('meta/_journal.json') ||
+  !migrationFixture.includes('./scripts/migration-compatibility-oracle.sh')
+)
+  throw new Error('migration_fixture_missing');
 console.log(`operations runbook checks passed (${required.length} requirements)`);

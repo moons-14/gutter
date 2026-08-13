@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, symlink, readFile, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, rm, symlink, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFile } from 'node:child_process';
@@ -81,6 +81,68 @@ test('prepared release subjects use portable regular-file and symlink checks', a
     runner,
     /test -f \"\$\{RELEASE_PREPARED_SUBJECTS%\.json\}\.tsv\"\n\s+test ! -L \"\$\{RELEASE_PREPARED_SUBJECTS%\.json\}\.tsv\"/,
   );
+});
+
+test('release runtime gates use readable disposable secrets and isolated Compose state', async () => {
+  const runner = await readFile('scripts/run-release-gates.sh', 'utf8');
+  const smoke = await readFile('scripts/compose-smoke-release.sh', 'utf8');
+  const restore = await readFile('scripts/compose-restore-drill.sh', 'utf8');
+  const fixture = await readFile('scripts/prepare-migration-compatibility-fixture.sh', 'utf8');
+  const migration = await readFile('scripts/migration-compatibility-oracle.sh', 'utf8');
+  assert.match(runner, /chmod 0444 "\$path"/);
+  assert.match(
+    runner,
+    /run_gate migrations '\.\/scripts\/prepare-migration-compatibility-fixture\.sh' \.\/scripts\/prepare-migration-compatibility-fixture\.sh/,
+  );
+  assert.match(
+    runner,
+    /run_gate compose-smoke '\.\/scripts\/compose-smoke-release\.sh' \.\/scripts\/compose-smoke-release\.sh/,
+  );
+  assert.match(smoke, /project="gutter-release-smoke-/);
+  assert.match(
+    smoke,
+    /docker compose -p "\$project" up --build --abort-on-container-exit --exit-code-from test test/,
+  );
+  assert.match(smoke, /docker compose -p "\$project" down -v --remove-orphans/);
+  assert.doesNotMatch(smoke, /docker compose down/);
+  assert.doesNotMatch(restore, /trap[^\n]*\bERR\b|\$LINENO/);
+  assert.match(restore, /compose_build_flags="--build"/);
+  assert.match(restore, /while \[ "\$attempt" -le 45 \]/);
+  assert.match(restore, /pgboss\.job where name='catalog\.reconciliation\.v1'/);
+  assert.match(fixture, /prior_tag=0013_runtime_acl_bootstrap/);
+  assert.match(fixture, /meta\/_journal\.json/);
+  assert.match(fixture, /postgres:18\.1@sha256:[0-9a-f]{64}/);
+  assert.match(migration, /test ! -L "\$GUTTER_MIGRATION_DUMP"/);
+  assert.match(migration, /where version='\$current_version'/);
+});
+
+test('release Compose smoke preserves failure status and cleans only its random project', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'gutter-compose-smoke-'));
+  const docker = join(root, 'docker');
+  const log = join(root, 'docker.log');
+  try {
+    await writeFile(
+      docker,
+      `#!/bin/sh
+printf '%s\\n' "$*" >>"$GUTTER_DOCKER_LOG"
+case " $* " in *' up '*) exit 7 ;; esac
+`,
+    );
+    await chmod(docker, 0o755);
+    await assert.rejects(
+      exec('sh', ['scripts/compose-smoke-release.sh'], {
+        env: { ...process.env, PATH: `${root}:${process.env.PATH}`, GUTTER_DOCKER_LOG: log },
+      }),
+      (error) => error.code === 7,
+    );
+    const commands = (await readFile(log, 'utf8')).trim().split('\n');
+    assert.equal(commands.length, 2);
+    const project = commands[0]?.match(/^compose -p (gutter-release-smoke-[0-9a-f]+) up /)?.[1];
+    assert.ok(project);
+    assert.equal(commands[1], `compose -p ${project} down -v --remove-orphans`);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('custom Caddy build inputs are immutable and narrowly patched', async () => {

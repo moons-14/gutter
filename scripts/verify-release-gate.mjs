@@ -425,8 +425,8 @@ for (const platform of evidence.platforms) {
 }
 const scaleGate = evidence.gates.find((gate) => gate.id === 'scale-concurrency');
 const hasScaleSchema = Boolean(scaleSchema && scaleBaseline);
-if (manifest.deferredUntil['scale-concurrency'] && (!hasScaleSchema || scaleGate.status !== 'pass'))
-  throw new Error('scale-concurrency cannot pass until #26 schema, baseline, and evidence exist');
+if (!hasScaleSchema || scaleGate.status !== 'pass')
+  throw new Error('scale-concurrency requires #26 schema, baseline, and passing evidence');
 if (
   scaleGate.status === 'pass' &&
   (!scaleGate.artifacts.some((artifact) => artifact.role === 'scale-evidence') ||
