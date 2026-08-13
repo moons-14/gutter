@@ -8,6 +8,7 @@ run_id=$(date -u +%Y%m%d%H%M%S)-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
 case "$run_id" in *[!0-9a-f-]*|'') echo 'invalid drill run identity' >&2; exit 2;; esac
 project_a="gutter-issue27-drill-a-$run_id"
 project_b="gutter-issue27-drill-b-$run_id"
+web_port=$((18080 + ( $$ % 1000 )))
 case "${COMPOSE_PROJECT_NAME:-}" in gutter|gutter-issue27-drill-*) echo 'refusing shared/default Compose project' >&2; exit 2;; esac
 root=$(mktemp -d "${TMPDIR:-/tmp}/gutter-issue27-restore-drill.XXXXXX")
 mkdir -p "$root/secrets" "$root/source/title" "$root/source/visible" "$root/artifacts"
@@ -63,6 +64,7 @@ services:
       - $root/source:/drill-source:ro
   web:
     networks: [internal]
+    ports: ["$web_port:8080"]
 networks:
   internal: !override
     internal: true
@@ -244,7 +246,7 @@ post_digest=$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.
 test "$post_digest" = "$pre_digest"
 docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" up -d api worker web
 for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-  curl -fsS http://localhost:8080/ >/dev/null 2>&1 && docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker wget -q -O- http://127.0.0.1:9090/ready >/dev/null 2>&1 && break
+  curl -fsS "http://localhost:$web_port/" >/dev/null 2>&1 && docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker wget -q -O- http://127.0.0.1:9090/ready >/dev/null 2>&1 && break
   [ "$attempt" = 15 ] && exit 1
   sleep 2
 done
@@ -302,7 +304,7 @@ test "$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" 
 test "$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T db psql -U gutter -d gutter -Atc "select count(*) from user_target_state where target_key='retired' and hidden")" -eq 1
 test "$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker sh -c 'test -d /drill-source && test ! -w /drill-source && test -d /cache/derived')"
 test "$(sha256sum "$root/source/title/001.png" | cut -d' ' -f1)" = "$source_sha"
-curl -fsS http://localhost:8080/ >/dev/null
-test "$(curl -sS -o /dev/null -w '%{http_code}' http://localhost:8080/api/metrics)" = 404
+curl -fsS "http://localhost:$web_port/" >/dev/null
+test "$(curl -sS -o /dev/null -w '%{http_code}' "http://localhost:$web_port/api/metrics")" = 404
 docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker sh -c 'wget -q -O- http://127.0.0.1:9090/ready >/dev/null && wget -q -O- http://127.0.0.1:9090/metrics | grep -q gutter_worker_cache_used_bytes'
 echo "restore drill passed: project=$project_b durable_user=1 acl_audit=1 user_state=1 source_sha256=$source_sha cache_sha_before=$cache_sha cache_sha_after=$cache_sha_regenerated source=read-only validation=$validation_state/$validation_valid"
