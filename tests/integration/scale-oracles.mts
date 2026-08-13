@@ -84,6 +84,9 @@ const baselineSha256 = createHash('sha256')
   .digest('hex');
 assert.equal(baseline.portable.defaultBooks, 1_000);
 assert.equal(baseline.portable.defaultPages, 10_000);
+assert.equal(baseline.portable.fullBooks, 100_000);
+assert.equal(baseline.portable.fullPagesPerBook, 20);
+assert.equal(baseline.portable.fullPages, 2_000_000);
 assert.equal(baseline.portable.coldProducerCount, 1);
 const samples = (values: number[]) => {
   const sorted = [...values].sort((a, b) => a - b);
@@ -576,8 +579,9 @@ try {
       baseline: 'docs/scale-oracle-baseline.json',
       baselineSha256,
       portable:
-        books === baseline.portable.defaultBooks &&
-        books * pagesPerBook === baseline.portable.defaultPages &&
+        books === (full ? baseline.portable.fullBooks : baseline.portable.defaultBooks) &&
+        pagesPerBook === (full ? baseline.portable.fullPagesPerBook : 10) &&
+        books * pagesPerBook === (full ? baseline.portable.fullPages : baseline.portable.defaultPages) &&
         producers === baseline.portable.coldProducerCount &&
         Number(sparse.blocks) <= baseline.portable.sparseAllocatedBlocksMax
           ? 'pass'
