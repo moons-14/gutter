@@ -49,7 +49,12 @@ const common = () => ({
     pressure: { quotaBytes: 0, reclaimedBytes: 0, protectedLiveEntry: true },
   },
   worker: { queueCompletedRuns: 0, runs: {} },
-  sparse: { logicalBytes: 21990232555520, allocatedBlocks: 0 },
+  sparse: {
+    logicalBytes: 21990232555520,
+    allocatedBlocks: 0,
+    fileCount: 2,
+    maxFileLogicalBytes: 10995116277760,
+  },
   baselineComparison: {
     baseline: 'docs/scale-oracle-baseline.json',
     baselineSha256: '0'.repeat(64),

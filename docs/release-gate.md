@@ -118,6 +118,7 @@ source inventory. Auth/ACL/user state, overrides, audit, tombstone, and error re
 and must be present in the PostgreSQL archive.
 
 The release record must state hardware-dependent timing results separately from correctness and
-query-plan gates. NFS/SMB locking, Docker Desktop filesystem performance, and sparse-file support
+query-plan gates. The 20-TiB capacity probe uses two 10-TiB sparse files so a 16-TiB per-file
+filesystem limit does not reduce the tested aggregate capacity. NFS/SMB locking, Docker Desktop filesystem performance, and sparse-file support
 are platform limitations; if not tested, record `unavailable` with the reason and do not claim a
 passing result.

@@ -178,10 +178,12 @@
     },
     "sparse": {
       "type": "object",
-      "required": ["logicalBytes", "allocatedBlocks"],
+      "required": ["logicalBytes", "allocatedBlocks", "fileCount", "maxFileLogicalBytes"],
       "properties": {
         "logicalBytes": { "type": "integer", "minimum": 1 },
-        "allocatedBlocks": { "type": "integer", "minimum": 0 }
+        "allocatedBlocks": { "type": "integer", "minimum": 0 },
+        "fileCount": { "const": 2 },
+        "maxFileLogicalBytes": { "const": 10995116277760 }
       },
       "additionalProperties": false
     },
