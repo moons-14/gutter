@@ -68,7 +68,16 @@ const thresholds = {
 };
 const baseline = JSON.parse(
   await readFile(new URL('../../docs/scale-oracle-baseline.json', import.meta.url), 'utf8'),
-) as { portable: Record<string, number> };
+) as { schemaVersion: string; portable: Record<string, number>; advisoryHardware: Record<string, number> };
+assert.equal(baseline.schemaVersion, 'gutter.scale-oracle.v1');
+assert.equal(baseline.portable.sourceFixtureBooks, 1_000);
+assert.equal(baseline.portable.sourceFixturePages, 1_000);
+assert.equal(baseline.portable.readerCount, 5);
+assert.equal(baseline.portable.coldProducerCount, 1);
+assert.equal(baseline.portable.tinyCbzCount, 10_000);
+assert.equal(baseline.advisoryHardware.catalogP95Ms, thresholds.advisoryCatalogP95Ms);
+assert.equal(baseline.advisoryHardware.searchP95Ms, thresholds.advisorySearchP95Ms);
+assert.equal(baseline.advisoryHardware.scanP95Ms, thresholds.advisoryScanP95Ms);
 const baselineSha256 = createHash('sha256')
   .update(await readFile(new URL('../../docs/scale-oracle-baseline.json', import.meta.url)))
   .digest('hex');
