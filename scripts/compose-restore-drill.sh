@@ -1,5 +1,6 @@
 #!/bin/sh
 set -eu
+trap 'echo "restore drill failed at line $LINENO" >&2' ERR
 
 # End-to-end recovery oracle.  This deliberately uses two isolated Compose projects:
 # A is seeded and backed up, then destroyed; B restores the durable state into a new
