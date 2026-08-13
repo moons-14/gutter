@@ -21,20 +21,35 @@ const results = new Map(
     return [id, { id, command, commandHash, status: Number(status), log, logHash }];
   }),
 );
+for (const result of results.values()) {
+  if (!/^[0-9a-f]{64}$/.test(result.commandHash) || !/^[0-9a-f]{64}$/.test(result.logHash))
+    throw new Error(`malformed runner hash: ${result.id}`);
+  if (!/^(0|[1-9][0-9]*)$/.test(String(result.status)))
+    throw new Error(`malformed runner status: ${result.id}`);
+  if (
+    !result.log ||
+    result.log.includes('\\') ||
+    result.log.startsWith('/') ||
+    result.log.split('/').includes('..')
+  )
+    throw new Error(`unsafe runner log path: ${result.id}`);
+}
+if (lines.some((line) => line.split('\t').length !== 6))
+  throw new Error('malformed runner TSV field count');
+if (new Set(lines.map((line) => line.split('\t')[0])).size !== lines.length)
+  throw new Error('duplicate runner gate ID');
 for (const [id, command] of Object.entries(manifest.gateCommands)) {
   const result = results.get(id);
-  if (
-    !result ||
-    result.command !== command ||
-    result.commandHash !== sha(command)
-  )
+  if (!result || result.command !== command || result.commandHash !== sha(command))
     throw new Error(`runner result missing or failed: ${id}`);
 }
 const commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
 const lockfileSha256 = sha(await readFile(resolve(root, 'pnpm-lock.yaml')));
 const requiredArtifacts = await Promise.all(
-  manifest.requiredArtifacts.map(async (path) => ({
+  manifest.requiredArtifacts.map(async ({ path, role, gate }) => ({
     path,
+    role,
+    gate,
     sha256: sha(await readFile(resolve(root, path))),
   })),
 );
@@ -43,9 +58,10 @@ const gates = [...results.values()].map((result) => ({
   status: result.status === 0 ? 'pass' : result.status === 99 ? 'blocked' : 'fail',
   command: result.command,
   commandHash: result.commandHash,
-  artifacts: [{ path: result.log, sha256: result.logHash }],
+  artifacts: [{ path: result.log, role: 'runner-log', gate: result.id, sha256: result.logHash }],
 }));
-gates.find((gate) => gate.id === 'release-contract').artifacts.push(...requiredArtifacts);
+for (const artifact of requiredArtifacts)
+  gates.find((gate) => gate.id === artifact.gate).artifacts.push(artifact);
 const images = (process.env.RELEASE_IMAGE_REFS ?? '')
   .split(/\s+/)
   .filter(Boolean)

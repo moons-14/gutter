@@ -1,18 +1,38 @@
 {
   "schemaVersion": "gutter.release-gate.v1",
   "requiredArtifacts": [
-    "docs/license-audit.json",
-    "docs/license-inventory.md",
-    "docs/openapi-v1.baseline.json",
-    "docs/platform-evidence.schema.json",
-    "scripts/backup-table-manifest.v1",
-    "scripts/compose-restore-drill.sh",
-    "scripts/migration-compatibility-oracle.sh",
-    "scripts/run-release-gates.sh",
-    "scripts/nas-source-oracle.sh",
-    "docs/release-notes.md",
-    "docs/release-tool-refs.json",
-    ".github/workflows/release.yml"
+    { "path": "docs/license-audit.json", "role": "license-report", "gate": "licenses" },
+    { "path": "docs/license-inventory.md", "role": "license-notices", "gate": "licenses" },
+    { "path": "docs/openapi-v1.baseline.json", "role": "openapi-baseline", "gate": "openapi" },
+    {
+      "path": "docs/platform-evidence.schema.json",
+      "role": "evidence-schema",
+      "gate": "release-contract"
+    },
+    {
+      "path": "scripts/backup-table-manifest.v1",
+      "role": "backup-manifest",
+      "gate": "backup-restore"
+    },
+    {
+      "path": "scripts/compose-restore-drill.sh",
+      "role": "restore-drill",
+      "gate": "backup-restore"
+    },
+    {
+      "path": "scripts/migration-compatibility-oracle.sh",
+      "role": "migration-oracle",
+      "gate": "migrations"
+    },
+    { "path": "scripts/run-release-gates.sh", "role": "runner", "gate": "release-contract" },
+    { "path": "scripts/nas-source-oracle.sh", "role": "nas-oracle", "gate": "nas-source" },
+    { "path": "docs/release-notes.md", "role": "release-notes", "gate": "release-contract" },
+    { "path": "docs/release-tool-refs.json", "role": "tool-provenance", "gate": "containers" },
+    {
+      "path": ".github/workflows/release.yml",
+      "role": "release-workflow",
+      "gate": "release-contract"
+    }
   ],
   "requiredGateIds": [
     "dependencies",
@@ -40,7 +60,7 @@
   "requiredPlatformNames": ["linux", "macos-docker", "windows-docker"],
   "requiredImageNames": ["node", "postgres", "caddy"],
   "threatClaims": {
-    "archive-path-containment": "page-validation",
+    "archive-path-containment": "unit",
     "acl-pat": "operations",
     "proxy-boundary": "operations",
     "cache-redaction": "operations",

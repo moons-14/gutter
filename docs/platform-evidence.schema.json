@@ -2,7 +2,15 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Gutter release evidence",
   "type": "object",
-  "required": ["schemaVersion", "exactTree", "images", "gates", "platforms", "references"],
+  "required": [
+    "schemaVersion",
+    "exactTree",
+    "images",
+    "gates",
+    "platforms",
+    "references",
+    "threatClaims"
+  ],
   "properties": {
     "schemaVersion": { "const": "gutter.release-evidence.v1" },
     "exactTree": {
@@ -32,11 +40,12 @@
       "minItems": 1,
       "items": {
         "type": "object",
-        "required": ["id", "status", "command", "artifacts"],
+        "required": ["id", "status", "command", "commandHash", "artifacts"],
         "properties": {
           "id": { "type": "string", "minLength": 1 },
           "status": { "enum": ["pass", "fail", "blocked", "unavailable"] },
           "command": { "type": "string", "minLength": 1 },
+          "commandHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
           "artifacts": { "type": "array", "items": { "$ref": "#/$defs/artifact" } }
         },
         "additionalProperties": false
@@ -65,14 +74,21 @@
         "issue27": { "type": "string", "minLength": 1 }
       },
       "additionalProperties": false
+    },
+    "threatClaims": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": { "type": "string", "minLength": 1 }
     }
   },
   "$defs": {
     "artifact": {
       "type": "object",
-      "required": ["path", "sha256"],
+      "required": ["path", "role", "gate", "sha256"],
       "properties": {
         "path": { "type": "string", "pattern": "^(?!/)(?!.*\\.\\.).+" },
+        "role": { "type": "string", "minLength": 1 },
+        "gate": { "type": "string", "minLength": 1 },
         "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
       },
       "additionalProperties": false

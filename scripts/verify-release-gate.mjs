@@ -31,7 +31,7 @@ if (!['contract', 'final'].includes(mode))
 const manifest = JSON.parse(await read('docs/release-gate-manifest.json'));
 const toolRefs = JSON.parse(await read('docs/release-tool-refs.json'));
 assert.equal(manifest.schemaVersion, 'gutter.release-gate.v1');
-for (const file of manifest.requiredArtifacts) await read(file);
+for (const artifact of manifest.requiredArtifacts) await read(artifact.path);
 
 const compose = await read('compose.yaml');
 const production = await read('compose.production.example.yaml');
@@ -157,7 +157,7 @@ for (const gate of evidence.gates) {
   if (gate.status !== 'pass')
     throw new Error(`release gate is not pass: ${gate.id}=${gate.status}`);
   for (const artifact of gate.artifacts) {
-    assertKeys(artifact, ['path', 'sha256'], 'artifact');
+    assertKeys(artifact, ['path', 'role', 'gate', 'sha256'], 'artifact');
     const canonical = manifest.gateCommands[gate.id];
     assert.equal(gate.command, canonical, `non-canonical command: ${gate.id}`);
     assert.equal(gate.commandHash, sha256(gate.command), `command hash mismatch: ${gate.id}`);
@@ -171,19 +171,29 @@ assert.deepEqual(
   manifest.threatClaims,
   'threat claim mapping is incomplete or altered',
 );
+for (const [claim, gateId] of Object.entries(manifest.threatClaims)) {
+  if (!manifest.requiredGateIds.includes(gateId))
+    throw new Error(`threat claim targets unknown gate: ${claim}`);
+  if (
+    !evidence.gates.find((gate) => gate.id === gateId)?.artifacts.some((artifact) => artifact.role)
+  )
+    throw new Error(`threat claim has no artifact role: ${claim}`);
+}
 const represented = new Set(
   evidence.gates.flatMap((gate) => gate.artifacts.map((artifact) => artifact.path)),
 );
 for (const required of manifest.requiredArtifacts) {
-  if (!represented.has(required))
-    throw new Error(`required artifact is not represented: ${required}`);
+  if (!represented.has(required.path))
+    throw new Error(`required artifact is not represented: ${required.path}`);
   const artifact = evidence.gates
     .flatMap((gate) => gate.artifacts)
-    .find((entry) => entry.path === required);
+    .find((entry) => entry.path === required.path);
+  assert.equal(artifact.role, required.role, `artifact role mismatch: ${required.path}`);
+  assert.equal(artifact.gate, required.gate, `artifact owning gate mismatch: ${required.path}`);
   assert.equal(
-    sha256(await safeArtifact(required)),
+    sha256(await safeArtifact(required.path)),
     artifact.sha256,
-    `required artifact checksum mismatch: ${required}`,
+    `required artifact checksum mismatch: ${required.path}`,
   );
 }
 if (evidence.platforms.find((platform) => platform.name === 'linux')?.status !== 'pass')
