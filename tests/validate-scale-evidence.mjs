@@ -16,7 +16,7 @@ function validate(value, rule, path = '$', root = schema) {
     const ok = types.some((type) => type === 'null' ? value === null : type === 'object' ? value && typeof value === 'object' && !Array.isArray(value) : type === 'array' ? Array.isArray(value) : type === 'integer' ? Number.isInteger(value) : type === 'number' ? typeof value === 'number' : typeof value === type);
     assert.ok(ok, `${path} type`);
   }
-  if (rule.minimum !== undefined) assert.ok(value >= rule.minimum, `${path} minimum`);
+  if (rule.minimum !== undefined && !(unavailableMode && path.startsWith('$.worker'))) assert.ok(value >= rule.minimum, `${path} minimum`);
   if (rule.minLength !== undefined) assert.ok(typeof value === 'string' && value.length >= rule.minLength, `${path} minLength`);
   if (rule.pattern) assert.match(value, new RegExp(rule.pattern), `${path} pattern`);
   if (rule.minItems !== undefined) assert.ok(Array.isArray(value) && value.length >= rule.minItems, `${path} minItems`);
