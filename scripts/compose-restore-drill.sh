@@ -30,6 +30,8 @@ secrets:
   worker_db_password: { file: $root/secrets/worker_db_password }
   better_auth_secret: { file: $root/secrets/better_auth_secret }
   reader_capability_secret: { file: $root/secrets/reader_capability_secret }
+networks:
+  internal: !reset {}
 EOF
 cleanup() { docker compose -p "$project_a" -f compose.yaml -f "$root/override.yaml" down -v --remove-orphans >/dev/null 2>&1 || true; docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" down -v --remove-orphans >/dev/null 2>&1 || true; }
 trap cleanup EXIT INT TERM
