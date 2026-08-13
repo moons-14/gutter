@@ -55,14 +55,14 @@ try {
   assert.equal(scanned.summary.pages, count);
   assert.equal(scanned.summary.quarantined, 0);
   const { validateSourceItem } = await import('../packages/page-validator/src/index.ts');
-  for (let offset = 0; offset < scanned.items.length; offset += 32) {
-    const batch = scanned.items.slice(offset, offset + 32);
+  let validated = 0;
+  const concurrency = 4;
+  for (let offset = 0; offset < scanned.items.length; offset += concurrency) {
+    const batch = scanned.items.slice(offset, offset + concurrency);
     const results = await Promise.all(batch.map((item) => validateSourceItem(root, item)));
-    assert.equal(
-      results.reduce((sum, result) => sum + result.validCount, 0),
-      batch.length,
-    );
+    validated += results.reduce((sum, result) => sum + result.validCount, 0);
   }
+  assert.equal(validated, count, 'all 10,000 CBZ pages validated');
   const bytesPerFile = 30 + 5 + body.length + 46 + 5 + 22;
   console.log(
     `TINY_CBZ_RESULT ${JSON.stringify({ count, bytesPerFile, discovered: scanned.summary.discovered, pages: scanned.summary.pages, elapsedMs: performance.now() - started })}`,
