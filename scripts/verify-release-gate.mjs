@@ -186,6 +186,16 @@ for (const [name, ref] of Object.entries(toolRefs.images))
   if (!/@sha256:[0-9a-f]{64}$/.test(ref))
     throw new Error(`release tool is not digest pinned: ${name}`);
 assert.equal(
+  toolRefs.actions?.attest,
+  'actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6',
+  'actions/attest must be pinned to the reviewed immutable commit',
+);
+assert.match(
+  actionWorkflow,
+  /uses:\s*actions\/attest@1e69f48acb82d1966a394da916b4c1698aa569d6\b/,
+  'release workflow must attest with the tracked immutable action',
+);
+assert.equal(
   process.env.RELEASE_TRIVY_DB_REPOSITORY ??
     'ghcr.io/aquasecurity/trivy-db:2@sha256:182c8405cd03caefe80982cf39bf071c9176ca3b1d1018a6ac02706c4597c72e',
   toolRefs.images.trivyDb,

@@ -77,40 +77,56 @@ run_gate compose-smoke 'docker compose up --abort-on-container-exit --exit-code-
 run_gate operations 'node scripts/verify-operations.mjs' node scripts/verify-operations.mjs
 run_gate backup-restore './scripts/compose-restore-drill.sh' ./scripts/compose-restore-drill.sh
 run_gate nas-source './scripts/nas-source-oracle.sh' ./scripts/nas-source-oracle.sh
-docker compose build api worker web
 application_image_refs=''
 api_subject=''; worker_subject=''; web_subject=''
-if [ -n "${RELEASE_IMAGE_REGISTRY:-}" ]; then
-  : "${GITHUB_TOKEN:?GITHUB_TOKEN is required when publishing application subjects}"
-  printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io -u "${GITHUB_ACTOR:?GITHUB_ACTOR is required}" --password-stdin
-fi
-for service in api worker web; do
-  image_ref="gutter-release-$service:local"
-  image_id=$(docker image inspect --format '{{.Id}}' "$image_ref")
-  case "$image_id" in sha256:[0-9a-f][0-9a-f]*) ;; *) echo "missing immutable image ID for $service" >&2; exit 1 ;; esac
+if [ -n "${RELEASE_PREPARED_SUBJECTS:-}" ]; then
+  test -s "$RELEASE_PREPARED_SUBJECTS"
+  cp "$RELEASE_PREPARED_SUBJECTS" "$out/application-subjects.json"
+  test -s "${RELEASE_PREPARED_SUBJECTS%.json}.tsv"
+  cp "${RELEASE_PREPARED_SUBJECTS%.json}.tsv" "$out/application-subjects.tsv"
+  while IFS="	" read -r service local_tag subject; do
+    application_image_refs="$application_image_refs $subject"
+    case "$service" in api) api_subject="$subject" ;; worker) worker_subject="$subject" ;; web) web_subject="$subject" ;; esac
+  done <"$out/application-subjects.tsv"
+else
+  docker compose build api worker web
   if [ -n "${RELEASE_IMAGE_REGISTRY:-}" ]; then
-    published="$RELEASE_IMAGE_REGISTRY/$service:${GITHUB_SHA:?GITHUB_SHA is required}"
-    docker tag "$image_id" "$published"
-    docker push "$published" >/dev/null
-    digest=$(docker image inspect --format '{{index .RepoDigests 0}}' "$published")
-    case "$digest" in *@sha256:[0-9a-f][0-9a-f]*) subject="$digest" ;; *) echo "missing registry digest for $service" >&2; exit 1 ;; esac
-  else
-    subject="local/gutter-release-$service@$image_id"
+    : "${GITHUB_TOKEN:?GITHUB_TOKEN is required when publishing application subjects}"
+    printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io -u "${GITHUB_ACTOR:?GITHUB_ACTOR is required}" --password-stdin
   fi
-  application_image_refs="$application_image_refs $subject"
-  case "$service" in
+  for service in api worker web; do
+    image_ref="gutter-release-$service:local"
+    image_id=$(docker image inspect --format '{{.Id}}' "$image_ref")
+    case "$image_id" in sha256:[0-9a-f][0-9a-f]*) ;; *) echo "missing immutable image ID for $service" >&2; exit 1 ;; esac
+    if [ -n "${RELEASE_IMAGE_REGISTRY:-}" ]; then
+      published="$RELEASE_IMAGE_REGISTRY/$service:${GITHUB_SHA:?GITHUB_SHA is required}"
+      docker tag "$image_id" "$published"
+      docker push "$published" >/dev/null
+      digest=$(docker image inspect --format '{{index .RepoDigests 0}}' "$published")
+      case "$digest" in *@sha256:[0-9a-f][0-9a-f]*) subject="$digest" ;; *) echo "missing registry digest for $service" >&2; exit 1 ;; esac
+    else
+      subject="local/gutter-release-$service@$image_id"
+    fi
+    application_image_refs="$application_image_refs $subject"
+    case "$service" in
     api) api_subject="$subject" ;;
     worker) worker_subject="$subject" ;;
     web) web_subject="$subject" ;;
-  esac
-done
+    esac
+  done
+  mapping="$out/application-subjects.json"
+  printf '[{"service":"api","localTag":"gutter-release-api:local","subject":"%s"},{"service":"worker","localTag":"gutter-release-worker:local","subject":"%s"},{"service":"web","localTag":"gutter-release-web:local","subject":"%s"}]\n' "$api_subject" "$worker_subject" "$web_subject" >"$mapping"
+  printf 'api\tgutter-release-api:local\t%s\nworker\tgutter-release-worker:local\t%s\nweb\tgutter-release-web:local\t%s\n' "$api_subject" "$worker_subject" "$web_subject" >"$out/application-subjects.tsv"
+fi
 export RELEASE_IMAGE_REFS="$application_image_refs"
 mapping="$out/application-subjects.json"
-printf '[{"service":"api","localTag":"gutter-release-api:local","subject":"%s"},{"service":"worker","localTag":"gutter-release-worker:local","subject":"%s"},{"service":"web","localTag":"gutter-release-web:local","subject":"%s"}]\n' "$api_subject" "$worker_subject" "$web_subject" >"$mapping"
 export RELEASE_APPLICATION_SUBJECTS="$mapping"
-printf 'api\tgutter-release-api:local\t%s\nworker\tgutter-release-worker:local\t%s\nweb\tgutter-release-web:local\t%s\n' "$api_subject" "$worker_subject" "$web_subject" >"$out/application-subjects.tsv"
-run_gate containers 'trivy built application image subjects' sh -ec 'while IFS="	" read -r service local_tag subject; do scan_ref="$subject"; case "$subject" in local/*@sha256:*) scan_ref="$local_tag" ;; esac; docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "$RELEASE_TRIVY_IMAGE" image --db-repository "$RELEASE_TRIVY_DB_REPOSITORY" --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed "$scan_ref"; done <"$RELEASE_ARTIFACT_DIR/application-subjects.tsv"'
+run_gate containers 'trivy built application image subjects (docker archive input)' sh -ec 'while IFS="	" read -r service local_tag subject; do scan_ref="$subject"; case "$subject" in local/*@sha256:*) scan_ref="$local_tag" ;; esac; archive="$RELEASE_ARTIFACT_DIR/$service.image.tar"; docker save "$scan_ref" -o "$archive"; docker run --rm -v "$archive:/scan.tar:ro" "$RELEASE_TRIVY_IMAGE" image --db-repository "$RELEASE_TRIVY_DB_REPOSITORY" --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed --input /scan.tar; done <"$RELEASE_ARTIFACT_DIR/application-subjects.tsv"'
 run_gate sbom 'syft canonical application subjects cyclonedx' sh -ec 'while IFS="	" read -r service local_tag subject; do scan_ref="$subject"; case "$subject" in local/*@sha256:*) scan_ref="$local_tag" ;; esac; docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "$RELEASE_SYFT_IMAGE" "$scan_ref" -o cyclonedx-json >"$RELEASE_ARTIFACT_DIR/$service.sbom.json"; sha256sum "$RELEASE_ARTIFACT_DIR/$service.sbom.json" >"$RELEASE_ARTIFACT_DIR/$service.sbom.json.sha256"; done <"$RELEASE_ARTIFACT_DIR/application-subjects.tsv"'
+if [ "${RELEASE_PHASE:-final}" = prepare ]; then
+  printf 'prepare phase complete; attest subjects before final phase\n'
+  exit "$failed"
+fi
 run_gate provenance 'cosign built application image attestations' sh -ec 'while IFS="	" read -r service local_tag subject; do docker run --rm "$RELEASE_COSIGN_IMAGE" verify-attestation --type slsaprovenance --certificate-identity-regexp "$RELEASE_COSIGN_CERTIFICATE_IDENTITY_REGEXP" --certificate-oidc-issuer "$RELEASE_COSIGN_OIDC_ISSUER" "$subject" --output json >"$RELEASE_ARTIFACT_DIR/$service.provenance.json"; done <"$RELEASE_ARTIFACT_DIR/application-subjects.tsv"'
 if [ -f docs/scale-oracle-evidence.schema.json ]; then
   run_gate scale-concurrency 'SCALE_FULL=1 production Compose scale oracle' env SCALE_FULL=1 SCALE_EVIDENCE_PATH="$RELEASE_ARTIFACT_DIR/scale-evidence.json" ./scripts/run-scale-oracle.sh

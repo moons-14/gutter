@@ -38,6 +38,14 @@ test('workflow image refs normalize docker.io/library and contract passes', asyn
   assert.match(stdout, /contract structure passed/);
 });
 
+test('container scan preserves colon-tag local image input', async () => {
+  const runner = await readFile('scripts/run-release-gates.sh', 'utf8');
+  assert.match(runner, /docker save \"\$scan_ref\" -o \"\$archive\"/);
+  assert.match(runner, /--input \/scan\.tar/);
+  assert.match(runner, /gutter-release-\$service:local/);
+  assert.doesNotMatch(runner, /docker run[^\n]+\$scan_ref['\"];/);
+});
+
 test('workflow final reaches evidence validation after image membership', async () => {
   await assert.rejects(
     exec(process.execPath, ['scripts/verify-release-gate.mjs', 'final', 'missing-evidence.json']),

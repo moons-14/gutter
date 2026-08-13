@@ -13,9 +13,6 @@ COPY docs/openapi-v1.json /out/docs/openapi-v1.json
 FROM build AS worker-deploy
 RUN pnpm --filter @gutter/worker --prod deploy /out
 
-FROM build AS auth-test
-RUN pnpm exec playwright install --with-deps chromium
-
 FROM build AS migrate-deploy
 RUN pnpm --filter @gutter/db --prod deploy /out
 
