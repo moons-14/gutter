@@ -2,13 +2,25 @@
 	root * /srv
 	encode zstd gzip
 	handle /api/reader/* {
-		reverse_proxy api:3000
+		reverse_proxy api:3000 {
+			header_up X-Gutter-Proxy 1
+			header_up X-Forwarded-For {remote_host}
+		}
 	}
 	# Better Auth validates its configured /api/auth origin/path; do not strip this prefix.
 	# Caddy is the public ingress. Replace any client-supplied forwarding chain with the
 	# directly observed peer so the API's per-client rate limit cannot be spoofed.
 	handle /api/auth/* {
 		reverse_proxy api:3000 {
+			header_up X-Gutter-Proxy 1
+			header_up X-Forwarded-For {remote_host}
+		}
+	}
+	# Versioned public routes keep their prefix. Existing web calls use the legacy /api/*
+	# facade, whose prefix is stripped before reaching the Compose-internal API.
+	handle /api/v1/* {
+		reverse_proxy api:3000 {
+			header_up X-Gutter-Proxy 1
 			header_up X-Forwarded-For {remote_host}
 		}
 	}
@@ -17,7 +29,10 @@
 		respond 404
 	}
 	handle_path /api/* {
-		reverse_proxy api:3000
+		reverse_proxy api:3000 {
+			header_up X-Gutter-Proxy 1
+			header_up X-Forwarded-For {remote_host}
+		}
 	}
 	handle {
 		try_files {path} /index.html

@@ -20,7 +20,7 @@ export function startOperatorMetricsServer(options: {
     if (request.url === '/health') return void response.writeHead(200).end('ok\n');
     if (request.url === '/ready') {
       try {
-        await options.pool.query("select 1 from gutter_schema where version='0010_user_state'");
+        await options.pool.query("select 1 from gutter_schema where version='0013_runtime_acl_bootstrap'");
         await options.pool.query('select 1 from pgboss.job limit 1');
         await assertCacheReady(options.cacheRoot);
         const cache = await cacheStatus(options.cacheRoot, options.cacheQuotaBytes);

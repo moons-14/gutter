@@ -1,0 +1,723 @@
+{
+  'openapi': '3.1.0',
+  'info':
+    {
+      'title': 'Gutter local public API',
+      'version': '1.0.0',
+      'description': 'Selected versioned local-client surface; unlisted routes are internal.',
+    },
+  'servers': [{ 'url': '/' }],
+  'security': [{ 'bearerAuth': [] }],
+  'paths':
+    {
+      '/api/v1/catalog':
+        {
+          'get':
+            {
+              'operationId': 'listCatalog',
+              'parameters':
+                [
+                  { '$ref': '#/components/parameters/Limit' },
+                  { '$ref': '#/components/parameters/Cursor' },
+                  { '$ref': '#/components/parameters/OptionalQuery' },
+                ],
+              'responses':
+                {
+                  '200':
+                    {
+                      'description': 'Catalog page',
+                      'content':
+                        {
+                          'application/json':
+                            { 'schema': { '$ref': '#/components/schemas/CatalogPage' } },
+                        },
+                    },
+                  '400': { '$ref': '#/components/responses/BadRequest' },
+                  '401': { '$ref': '#/components/responses/Unauthorized' },
+                  '405': { '$ref': '#/components/responses/MethodNotAllowed' },
+                  '429': { '$ref': '#/components/responses/RateLimited' },
+                  '403': { '$ref': '#/components/responses/Forbidden' },
+                  '413': { '$ref': '#/components/responses/BodyTooLarge' },
+                },
+            },
+        },
+      '/api/v1/search':
+        {
+          'get':
+            {
+              'operationId': 'searchCatalog',
+              'parameters':
+                [
+                  {
+                    'name': 'q',
+                    'in': 'query',
+                    'required': true,
+                    'schema': { 'type': 'string', 'minLength': 1, 'maxLength': 256 },
+                  },
+                  { '$ref': '#/components/parameters/Limit' },
+                  { '$ref': '#/components/parameters/Cursor' },
+                ],
+              'responses':
+                {
+                  '200':
+                    {
+                      'description': 'Search page',
+                      'content':
+                        {
+                          'application/json':
+                            { 'schema': { '$ref': '#/components/schemas/CatalogPage' } },
+                        },
+                    },
+                  '400': { '$ref': '#/components/responses/BadRequest' },
+                  '401': { '$ref': '#/components/responses/Unauthorized' },
+                  '405': { '$ref': '#/components/responses/MethodNotAllowed' },
+                  '429': { '$ref': '#/components/responses/RateLimited' },
+                  '403': { '$ref': '#/components/responses/Forbidden' },
+                  '413': { '$ref': '#/components/responses/BodyTooLarge' },
+                },
+            },
+        },
+      '/api/v1/page/{publicationId}/{ordinal}':
+        {
+          'get':
+            {
+              'operationId': 'getPage',
+              'parameters':
+                [
+                  { '$ref': '#/components/parameters/PublicationId' },
+                  { '$ref': '#/components/parameters/Ordinal' },
+                ],
+              'responses':
+                {
+                  '200':
+                    {
+                      'description': 'Reader page bytes',
+                      'content':
+                        { 'image/*': { 'schema': { 'type': 'string', 'format': 'binary' } } },
+                    },
+                  '206':
+                    {
+                      'description': 'Partial reader page bytes',
+                      'content':
+                        { 'image/*': { 'schema': { 'type': 'string', 'format': 'binary' } } },
+                    },
+                  '401': { '$ref': '#/components/responses/Unauthorized' },
+                  '404': { '$ref': '#/components/responses/NotFound' },
+                  '405': { '$ref': '#/components/responses/MethodNotAllowed' },
+                  '429': { '$ref': '#/components/responses/RateLimited' },
+                  '403': { '$ref': '#/components/responses/Forbidden' },
+                  '413': { '$ref': '#/components/responses/BodyTooLarge' },
+                  '409': { '$ref': '#/components/responses/ReaderConflict' },
+                  '500': { '$ref': '#/components/responses/ReaderError' },
+                  '503': { '$ref': '#/components/responses/ReaderUnavailable' },
+                  '504': { '$ref': '#/components/responses/ReaderTimeout' },
+                  '304':
+                    {
+                      'description': 'Conditional request not modified; no body',
+                      'headers':
+                        {
+                          'ETag': { 'schema': { 'type': 'string' } },
+                          'Last-Modified': { 'schema': { 'type': 'string' } },
+                        },
+                    },
+                  '416': { '$ref': '#/components/responses/ReaderRange' },
+                  '499': { '$ref': '#/components/responses/ReaderCancelled' },
+                },
+            },
+        },
+      '/api/v1/progress':
+        {
+          'get':
+            {
+              'operationId': 'getProgress',
+              'parameters': [{ '$ref': '#/components/parameters/ProgressKey' }],
+              'responses':
+                {
+                  '200':
+                    {
+                      'description': 'Progress state',
+                      'content':
+                        {
+                          'application/json':
+                            { 'schema': { '$ref': '#/components/schemas/ProgressEnvelope' } },
+                        },
+                    },
+                  '400': { '$ref': '#/components/responses/BadRequest' },
+                  '401': { '$ref': '#/components/responses/Unauthorized' },
+                  '404': { '$ref': '#/components/responses/NotFound' },
+                  '429': { '$ref': '#/components/responses/RateLimited' },
+                  '403': { '$ref': '#/components/responses/Forbidden' },
+                  '413': { '$ref': '#/components/responses/BodyTooLarge' },
+                },
+            },
+          'put':
+            {
+              'operationId': 'putProgress',
+              'requestBody':
+                {
+                  'required': true,
+                  'content':
+                    {
+                      'application/json':
+                        { 'schema': { '$ref': '#/components/schemas/ProgressPut' } },
+                    },
+                },
+              'responses':
+                {
+                  '200':
+                    {
+                      'description': 'Updated progress',
+                      'content':
+                        {
+                          'application/json':
+                            { 'schema': { '$ref': '#/components/schemas/ProgressEnvelope' } },
+                        },
+                    },
+                  '400': { '$ref': '#/components/responses/BadRequest' },
+                  '401': { '$ref': '#/components/responses/Unauthorized' },
+                  '404': { '$ref': '#/components/responses/NotFound' },
+                  '409':
+                    {
+                      'description': 'Revision conflict',
+                      'content':
+                        {
+                          'application/json':
+                            { 'schema': { '$ref': '#/components/schemas/ProgressConflict' } },
+                        },
+                    },
+                  '429': { '$ref': '#/components/responses/RateLimited' },
+                  '403': { '$ref': '#/components/responses/Forbidden' },
+                  '413': { '$ref': '#/components/responses/BodyTooLarge' },
+                },
+            },
+        },
+      '/api/v1/favorites':
+        {
+          'get':
+            {
+              'operationId': 'listFavorites',
+              'parameters':
+                [
+                  { '$ref': '#/components/parameters/Limit' },
+                  { '$ref': '#/components/parameters/Cursor' },
+                ],
+              'responses':
+                {
+                  '200':
+                    {
+                      'description': 'Favorite page',
+                      'content':
+                        {
+                          'application/json':
+                            { 'schema': { '$ref': '#/components/schemas/FavoritePage' } },
+                        },
+                    },
+                  '401': { '$ref': '#/components/responses/Unauthorized' },
+                  '429': { '$ref': '#/components/responses/RateLimited' },
+                  '403': { '$ref': '#/components/responses/Forbidden' },
+                  '413': { '$ref': '#/components/responses/BodyTooLarge' },
+                },
+            },
+          'put':
+            {
+              'operationId': 'setFavorite',
+              'requestBody':
+                {
+                  'required': true,
+                  'content':
+                    {
+                      'application/json':
+                        { 'schema': { '$ref': '#/components/schemas/FavoritePut' } },
+                    },
+                },
+              'responses':
+                {
+                  '200':
+                    {
+                      'description': 'Updated favorite',
+                      'content':
+                        {
+                          'application/json':
+                            { 'schema': { '$ref': '#/components/schemas/Changed' } },
+                        },
+                    },
+                  '400': { '$ref': '#/components/responses/BadRequest' },
+                  '401': { '$ref': '#/components/responses/Unauthorized' },
+                  '404': { '$ref': '#/components/responses/NotFound' },
+                  '429': { '$ref': '#/components/responses/RateLimited' },
+                  '403': { '$ref': '#/components/responses/Forbidden' },
+                  '413': { '$ref': '#/components/responses/BodyTooLarge' },
+                },
+            },
+        },
+      '/api/v1/ratings':
+        {
+          'put':
+            {
+              'operationId': 'setRating',
+              'requestBody':
+                {
+                  'required': true,
+                  'content':
+                    {
+                      'application/json':
+                        { 'schema': { '$ref': '#/components/schemas/RatingPut' } },
+                    },
+                },
+              'responses':
+                {
+                  '200':
+                    {
+                      'description': 'Updated rating',
+                      'content':
+                        {
+                          'application/json':
+                            { 'schema': { '$ref': '#/components/schemas/Changed' } },
+                        },
+                    },
+                  '400': { '$ref': '#/components/responses/BadRequest' },
+                  '401': { '$ref': '#/components/responses/Unauthorized' },
+                  '404': { '$ref': '#/components/responses/NotFound' },
+                  '429': { '$ref': '#/components/responses/RateLimited' },
+                  '403': { '$ref': '#/components/responses/Forbidden' },
+                  '413': { '$ref': '#/components/responses/BodyTooLarge' },
+                },
+            },
+        },
+      '/api/v1/collections':
+        {
+          'get':
+            {
+              'operationId': 'listCollections',
+              'parameters':
+                [
+                  { '$ref': '#/components/parameters/Limit' },
+                  { '$ref': '#/components/parameters/Cursor' },
+                ],
+              'responses':
+                {
+                  '200':
+                    {
+                      'description': 'Collection page',
+                      'content':
+                        {
+                          'application/json':
+                            { 'schema': { '$ref': '#/components/schemas/CollectionPage' } },
+                        },
+                    },
+                  '401': { '$ref': '#/components/responses/Unauthorized' },
+                  '429': { '$ref': '#/components/responses/RateLimited' },
+                  '403': { '$ref': '#/components/responses/Forbidden' },
+                  '413': { '$ref': '#/components/responses/BodyTooLarge' },
+                },
+            },
+          'post':
+            {
+              'operationId': 'createCollection',
+              'requestBody':
+                {
+                  'required': true,
+                  'content':
+                    {
+                      'application/json':
+                        { 'schema': { '$ref': '#/components/schemas/CollectionPut' } },
+                    },
+                },
+              'responses':
+                {
+                  '201':
+                    {
+                      'description': 'Created collection',
+                      'content':
+                        {
+                          'application/json':
+                            { 'schema': { '$ref': '#/components/schemas/CollectionCreated' } },
+                        },
+                    },
+                  '400': { '$ref': '#/components/responses/BadRequest' },
+                  '401': { '$ref': '#/components/responses/Unauthorized' },
+                  '429': { '$ref': '#/components/responses/RateLimited' },
+                  '403': { '$ref': '#/components/responses/Forbidden' },
+                  '413': { '$ref': '#/components/responses/BodyTooLarge' },
+                  '409':
+                    {
+                      'description': 'Collection name already exists',
+                      'content':
+                        {
+                          'application/json':
+                            { 'schema': { '$ref': '#/components/schemas/CollectionConflict' } },
+                        },
+                    },
+                },
+            },
+        },
+    },
+  'components':
+    {
+      'securitySchemes':
+        { 'bearerAuth': { 'type': 'http', 'scheme': 'bearer', 'bearerFormat': 'gutter_pat' } },
+      'parameters':
+        {
+          'Limit':
+            {
+              'name': 'limit',
+              'in': 'query',
+              'schema': { 'type': 'integer', 'minimum': 1, 'maximum': 100, 'default': 30 },
+            },
+          'Cursor':
+            { 'name': 'cursor', 'in': 'query', 'schema': { 'type': 'string', 'maxLength': 4096 } },
+          'OptionalQuery':
+            {
+              'name': 'q',
+              'in': 'query',
+              'required': false,
+              'schema': { 'type': 'string', 'maxLength': 256 },
+            },
+          'ProgressKey':
+            {
+              'name': 'progressKey',
+              'in': 'query',
+              'required': true,
+              'schema': { 'type': 'string', 'pattern': '^source:[A-Za-z0-9_-]{1,128}$' },
+            },
+          'PublicationId':
+            {
+              'name': 'publicationId',
+              'in': 'path',
+              'required': true,
+              'schema': { 'type': 'string', 'pattern': '^[0-9a-f]{64}:[0-9a-f]{64}$' },
+            },
+          'Ordinal':
+            {
+              'name': 'ordinal',
+              'in': 'path',
+              'required': true,
+              'schema': { 'type': 'integer', 'minimum': 0, 'maximum': 1000000 },
+            },
+        },
+      'schemas':
+        {
+          'Error':
+            {
+              'type': 'object',
+              'required': ['error', 'requestId'],
+              'properties':
+                {
+                  'error':
+                    {
+                      'type': 'string',
+                      'enum':
+                        [
+                          'authentication_required',
+                          'insufficient_scope',
+                          'invalid_origin',
+                          'invalid_query',
+                          'invalid_request',
+                          'invalid_cursor',
+                          'invalid_pagination',
+                          'body_too_large',
+                          'not_found',
+                          'method_not_allowed',
+                          'rate_limited',
+                          'timeout',
+                          'reader_unavailable',
+                          'reader_conflict',
+                          'reader_error',
+                          'collection_conflict',
+                          'range_not_satisfiable',
+                          'reader_cancelled',
+                          'progress_conflict',
+                        ],
+                    },
+                  'requestId': { 'type': 'string', 'minLength': 1, 'maxLength': 128 },
+                },
+              'additionalProperties': false,
+            },
+          'CatalogItem':
+            {
+              'type': 'object',
+              'required': ['seriesId', 'displayName', 'publicationCount'],
+              'properties':
+                {
+                  'seriesId': { 'type': 'string', 'pattern': '^[0-9a-f]{64}$' },
+                  'displayName': { 'type': 'string' },
+                  'publicationCount': { 'type': 'integer', 'minimum': 0 },
+                },
+              'additionalProperties': false,
+            },
+          'CatalogPage':
+            {
+              'type': 'object',
+              'required': ['items', 'nextCursor'],
+              'properties':
+                {
+                  'items':
+                    {
+                      'type': 'array',
+                      'maxItems': 100,
+                      'items': { '$ref': '#/components/schemas/CatalogItem' },
+                    },
+                  'nextCursor': { 'type': ['string', 'null'], 'maxLength': 4096 },
+                },
+              'additionalProperties': false,
+            },
+          'Progress':
+            {
+              'type': 'object',
+              'required': ['progressKey', 'pageOrdinal', 'completed', 'revision', 'openCount'],
+              'properties':
+                {
+                  'progressKey': { 'type': 'string', 'pattern': '^source:[A-Za-z0-9_-]{1,128}$' },
+                  'pageOrdinal': { 'type': 'integer', 'minimum': 0, 'maximum': 1000000 },
+                  'completed': { 'type': 'boolean' },
+                  'revision': { 'type': 'integer', 'minimum': 0 },
+                  'openCount': { 'type': 'integer', 'minimum': 0 },
+                  'firstReadAt': { 'type': 'string', 'format': 'date-time' },
+                  'lastReadAt': { 'type': 'string', 'format': 'date-time' },
+                  'updatedAt': { 'type': 'string', 'format': 'date-time' },
+                },
+              'additionalProperties': false,
+            },
+          'ProgressEnvelope':
+            {
+              'type': 'object',
+              'required': ['progress'],
+              'properties':
+                {
+                  'progress':
+                    { 'anyOf': [{ '$ref': '#/components/schemas/Progress' }, { 'type': 'null' }] },
+                },
+              'additionalProperties': false,
+            },
+          'ProgressPut':
+            {
+              'type': 'object',
+              'required': ['progressKey', 'expectedRevision', 'pageOrdinal', 'completed'],
+              'properties':
+                {
+                  'progressKey': { 'type': 'string', 'pattern': '^source:[A-Za-z0-9_-]{1,128}$' },
+                  'expectedRevision': { 'type': 'integer', 'minimum': 0 },
+                  'pageOrdinal': { 'type': 'integer', 'minimum': 0, 'maximum': 1000000 },
+                  'completed': { 'type': 'boolean' },
+                },
+              'additionalProperties': false,
+              'maxProperties': 4,
+            },
+          'ProgressConflict':
+            {
+              'type': 'object',
+              'required': ['error', 'progress', 'requestId'],
+              'properties':
+                {
+                  'error': { 'const': 'progress_conflict' },
+                  'progress':
+                    { 'anyOf': [{ '$ref': '#/components/schemas/Progress' }, { 'type': 'null' }] },
+                  'requestId': { 'type': 'string', 'minLength': 1, 'maxLength': 128 },
+                },
+              'additionalProperties': false,
+            },
+          'FavoriteItem':
+            {
+              'type': 'object',
+              'required': ['targetKind', 'targetId', 'favorite'],
+              'properties':
+                {
+                  'targetKind': { 'type': 'string', 'enum': ['series', 'publication'] },
+                  'targetId': { 'type': 'string', 'pattern': '^[0-9a-f]{64}(:[0-9a-f]{64})?$' },
+                  'favorite': { 'type': 'boolean' },
+                  'updatedAt': { 'type': 'string', 'format': 'date-time' },
+                },
+              'additionalProperties': false,
+            },
+          'FavoritePage':
+            {
+              'type': 'object',
+              'required': ['items', 'nextCursor'],
+              'properties':
+                {
+                  'items':
+                    {
+                      'type': 'array',
+                      'maxItems': 100,
+                      'items': { '$ref': '#/components/schemas/FavoriteItem' },
+                    },
+                  'nextCursor': { 'type': ['string', 'null'], 'maxLength': 4096 },
+                },
+              'additionalProperties': false,
+            },
+          'FavoritePut':
+            {
+              'type': 'object',
+              'required': ['targetKind', 'targetId', 'favorite'],
+              'properties':
+                {
+                  'targetKind': { 'type': 'string', 'enum': ['series', 'publication'] },
+                  'targetId': { 'type': 'string', 'pattern': '^[0-9a-f]{64}(:[0-9a-f]{64})?$' },
+                  'favorite': { 'type': 'boolean' },
+                },
+              'additionalProperties': false,
+              'maxProperties': 3,
+            },
+          'RatingPut':
+            {
+              'type': 'object',
+              'required': ['targetKind', 'targetId', 'rating'],
+              'properties':
+                {
+                  'targetKind': { 'type': 'string', 'enum': ['series', 'publication'] },
+                  'targetId': { 'type': 'string', 'pattern': '^[0-9a-f]{64}(:[0-9a-f]{64})?$' },
+                  'rating': { 'type': ['integer', 'null'], 'minimum': 1, 'maximum': 5 },
+                },
+              'additionalProperties': false,
+              'maxProperties': 3,
+            },
+          'Collection':
+            {
+              'type': 'object',
+              'required': ['collectionId', 'name'],
+              'properties':
+                {
+                  'collectionId':
+                    { 'type': 'string', 'pattern': '^collection:[A-Za-z0-9_-]{1,128}$' },
+                  'name': { 'type': 'string' },
+                  'createdAt': { 'type': 'string', 'format': 'date-time' },
+                  'updatedAt': { 'type': 'string', 'format': 'date-time' },
+                },
+              'additionalProperties': false,
+            },
+          'CollectionPage':
+            {
+              'type': 'object',
+              'required': ['items', 'nextCursor'],
+              'properties':
+                {
+                  'items':
+                    {
+                      'type': 'array',
+                      'maxItems': 100,
+                      'items': { '$ref': '#/components/schemas/Collection' },
+                    },
+                  'nextCursor': { 'type': ['string', 'null'], 'maxLength': 4096 },
+                },
+              'additionalProperties': false,
+            },
+          'CollectionPut':
+            {
+              'type': 'object',
+              'required': ['name'],
+              'properties': { 'name': { 'type': 'string', 'minLength': 1, 'maxLength': 128 } },
+              'additionalProperties': false,
+              'maxProperties': 1,
+            },
+          'CollectionCreated':
+            {
+              'type': 'object',
+              'required': ['collection'],
+              'properties': { 'collection': { '$ref': '#/components/schemas/Collection' } },
+              'additionalProperties': false,
+            },
+          'CollectionConflict':
+            {
+              'type': 'object',
+              'required': ['error', 'requestId'],
+              'properties':
+                {
+                  'error': { 'const': 'collection_conflict' },
+                  'requestId': { 'type': 'string', 'minLength': 1, 'maxLength': 128 },
+                },
+              'additionalProperties': false,
+            },
+          'Changed':
+            {
+              'type': 'object',
+              'required': ['changed'],
+              'properties': { 'changed': { 'type': 'boolean' } },
+              'additionalProperties': false,
+            },
+        },
+      'responses':
+        {
+          'BadRequest':
+            {
+              'description': 'Invalid request',
+              'content':
+                { 'application/json': { 'schema': { '$ref': '#/components/schemas/Error' } } },
+            },
+          'Forbidden':
+            {
+              'description': 'Forbidden or insufficient scope',
+              'content':
+                { 'application/json': { 'schema': { '$ref': '#/components/schemas/Error' } } },
+            },
+          'BodyTooLarge':
+            {
+              'description': 'Request body exceeds the bounded public limit',
+              'content':
+                { 'application/json': { 'schema': { '$ref': '#/components/schemas/Error' } } },
+            },
+          'Unauthorized':
+            {
+              'description': 'Missing or revoked PAT',
+              'content':
+                { 'application/json': { 'schema': { '$ref': '#/components/schemas/Error' } } },
+            },
+          'NotFound':
+            {
+              'description': 'Not found',
+              'content':
+                { 'application/json': { 'schema': { '$ref': '#/components/schemas/Error' } } },
+            },
+          'MethodNotAllowed':
+            {
+              'description': 'Method not allowed',
+              'headers': { 'Allow': { 'schema': { 'type': 'string' } } },
+              'content':
+                { 'application/json': { 'schema': { '$ref': '#/components/schemas/Error' } } },
+            },
+          'RateLimited':
+            {
+              'description': 'Rate limited',
+              'headers': { 'Retry-After': { 'schema': { 'type': 'integer', 'minimum': 1 } } },
+              'content':
+                { 'application/json': { 'schema': { '$ref': '#/components/schemas/Error' } } },
+            },
+          'ReaderConflict':
+            {
+              'description': 'Reader delegated conflict',
+              'content':
+                { 'application/json': { 'schema': { '$ref': '#/components/schemas/Error' } } },
+            },
+          'ReaderUnavailable':
+            {
+              'description': 'Reader unavailable',
+              'content':
+                { 'application/json': { 'schema': { '$ref': '#/components/schemas/Error' } } },
+            },
+          'ReaderTimeout':
+            {
+              'description': 'Reader timeout',
+              'content':
+                { 'application/json': { 'schema': { '$ref': '#/components/schemas/Error' } } },
+            },
+          'ReaderError':
+            {
+              'description': 'Reader delegated error',
+              'content':
+                { 'application/json': { 'schema': { '$ref': '#/components/schemas/Error' } } },
+            },
+          'ReaderRange':
+            {
+              'description': 'Requested byte range is not satisfiable',
+              'headers': { 'Content-Range': { 'schema': { 'type': 'string' } } },
+              'content':
+                { 'application/json': { 'schema': { '$ref': '#/components/schemas/Error' } } },
+            },
+          'ReaderCancelled':
+            {
+              'description': 'Reader request was cancelled',
+              'content':
+                { 'application/json': { 'schema': { '$ref': '#/components/schemas/Error' } } },
+            },
+        },
+    },
+}

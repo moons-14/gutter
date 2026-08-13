@@ -563,16 +563,48 @@ test('successful collection and progress CAS responses expose required statuses 
   assert.equal((await success.json()).progress.revision, 2);
   const conflict = await request(app, '/user-state/progress', {
     method: 'PUT',
-    ...json({
-      rootId: 'root-a',
-      progressKey,
-      expectedRevision: 0,
-      pageOrdinal: 3,
-      completed: true,
-    }),
+    ...json(
+      {
+        rootId: 'root-a',
+        progressKey,
+        expectedRevision: 0,
+        pageOrdinal: 3,
+        completed: true,
+      },
+      { 'x-request-id': 'test-request' },
+    ),
   });
   assert.equal(conflict.status, 409);
-  assert.equal((await conflict.json()).progress.revision, 1);
+  const conflictBody = (await conflict.json()) as {
+    progress: { revision: number };
+    requestId: string;
+  };
+  assert.equal(conflictBody.progress.revision, 1);
+  assert.equal(conflictBody.requestId, 'test-request');
+});
+
+test('duplicate collections return a stable public conflict envelope instead of null', async () => {
+  const app = makeApp({
+    createUserCollection: async () => null,
+    authenticatePublicApiToken: async (token) =>
+      token === 'gtr_pat_v1_test'
+        ? { userId: user.id, tokenId: 'pat-test', scopes: ['collections:write'] }
+        : null,
+  });
+  const response = await app.fetch(
+    new Request('http://api/api/v1/collections', {
+      method: 'POST',
+      ...json(
+        { name: 'Favorites' },
+        { authorization: 'Bearer gtr_pat_v1_test', 'x-request-id': 'test-request' },
+      ),
+    }),
+  );
+  assert.equal(response.status, 409);
+  assert.deepEqual(await response.json(), {
+    error: 'collection_conflict',
+    requestId: 'test-request',
+  });
 });
 
 test('target accepts explicit null clears and rejects invalid scalars, kinds, and unknown keys', async () => {

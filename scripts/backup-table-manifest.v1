@@ -28,6 +28,7 @@ verification
 twoFactor
 passkey
 gutter_auth_bootstrap
+gutter_public_api_tokens
 library_access_grants
 gutter_acl_revisions
 gutter_acl_audit

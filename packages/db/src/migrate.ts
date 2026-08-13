@@ -12,7 +12,7 @@ await boss.start();
 // Reapply the canonical policy after pg-boss has created its queue schema. The same SQL file is
 // applied by Drizzle and by the post-restore bootstrap script.
 const runtimeAclPolicy = await readFile(
-  new URL('../drizzle/0011_runtime_acl_bootstrap.sql', import.meta.url),
+  new URL('../drizzle/0013_runtime_acl_bootstrap.sql', import.meta.url),
   'utf8',
 );
 await pool.query(runtimeAclPolicy);

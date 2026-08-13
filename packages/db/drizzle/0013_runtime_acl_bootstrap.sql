@@ -26,11 +26,13 @@ grant select on
   catalog_libraries, catalog_series, catalog_publications, catalog_releases, catalog_entities,
   catalog_credits, catalog_preferred_release_overrides, catalog_series_list_state,
   visible_source_items,
+  public_progress_source_items, public_reader_source_pages,
   "user", "session", account, verification, "twoFactor", passkey,
   gutter_auth_bootstrap, library_access_grants, gutter_acl_revisions,
-  gutter_user_state_revisions, user_progress, user_target_state, user_bookmarks,
+  gutter_public_api_tokens, gutter_user_state_revisions, user_progress, user_target_state, user_bookmarks,
   user_collections, user_collection_members
 to gutter_api;
+grant insert, update on gutter_public_api_tokens to gutter_api;
 grant insert, update, delete on "user", "session", account, verification, "twoFactor", passkey
 to gutter_api;
 grant update on gutter_auth_bootstrap to gutter_api;
@@ -81,4 +83,4 @@ begin
   end if;
 end $$;
 
-insert into gutter_schema (version) values ('0011_runtime_acl_bootstrap') on conflict (version) do nothing;
+insert into gutter_schema (version) values ('0013_runtime_acl_bootstrap') on conflict (version) do nothing;
