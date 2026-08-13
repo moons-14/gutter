@@ -254,7 +254,7 @@ for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
   mapped_port=$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" config --format json 2>/dev/null | node --input-type=module -e "let input=''; for await (const chunk of process.stdin) input += chunk; const config=JSON.parse(input); const published=config.services?.web?.ports?.find((port) => port.target === 8080)?.published; if (published) process.stdout.write(String(published));" | tr -d '\r')
   if [ "${DRILL_DEBUG:-0}" = 1 ]; then
     port_status=1
-    printf '%s\n' "$mapped_port" | grep -Eq ":$web_port$" && port_status=0
+    [ "$mapped_port" = "$web_port" ] && port_status=0
     web_status=0
     docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T web wget -q -O- http://127.0.0.1:8080/ >/dev/null 2>&1 || web_status=$?
     worker_status=0
@@ -262,7 +262,7 @@ for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
     echo "runtime probe attempt=$attempt mapped_port=$mapped_port expected_port=$web_port port_status=$port_status web_status=$web_status worker_status=$worker_status" >&2
     [ "$worker_status" -eq 0 ] || docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" logs --tail=30 worker >&2 || true
   fi
-  printf '%s\n' "$mapped_port" | grep -Eq ":$web_port$" && docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T web wget -q -O- http://127.0.0.1:8080/ >/dev/null 2>&1 && docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker node --input-type=module -e "try { const response = await fetch('http://127.0.0.1:9090/ready'); if (!response.ok) process.exit(1); } catch { process.exit(1); }" && break
+  [ "$mapped_port" = "$web_port" ] && docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T web wget -q -O- http://127.0.0.1:8080/ >/dev/null 2>&1 && docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker node --input-type=module -e "try { const response = await fetch('http://127.0.0.1:9090/ready'); if (!response.ok) process.exit(1); } catch { process.exit(1); }" && break
   [ "$attempt" = 15 ] && exit 1
   sleep 2
 done
