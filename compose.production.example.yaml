@@ -1,6 +1,7 @@
 # Copy and adapt this file outside version control. Docker secrets are mounted files.
 services:
   db:
+    image: postgres:18.1@sha256:1090bc3a8ccfb0b55f78a494d76f8d603434f7e4553543d6e807bc7bd6bbd17f
     environment:
       POSTGRES_PASSWORD: !reset null
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password

@@ -7,10 +7,31 @@
     "docs/platform-evidence.schema.json",
     "scripts/backup-table-manifest.v1",
     "scripts/compose-restore-drill.sh",
-    "scripts/migration-compatibility-oracle.sh"
+    "scripts/migration-compatibility-oracle.sh",
+    "scripts/run-release-gates.sh"
   ],
-  "deferredUntil": {
-    "scale": "#26 merge: attach SCALE evidence JSON and preserve unavailable status when unsupported"
-  },
-  "requiredStatuses": ["pass", "unavailable"]
+  "requiredGateIds": [
+    "dependencies",
+    "licenses",
+    "secrets",
+    "release-contract",
+    "format",
+    "lint",
+    "typecheck",
+    "unit",
+    "build",
+    "compose-config",
+    "containers",
+    "sbom",
+    "provenance",
+    "migrations",
+    "openapi",
+    "browser-e2e",
+    "compose-smoke",
+    "backup-restore",
+    "scale-concurrency"
+  ],
+  "requiredPlatformNames": ["linux", "macos-docker", "windows-docker"],
+  "requiredImageNames": ["node", "postgres", "caddy"],
+  "deferredUntil": { "scale-concurrency": "#26 merge" }
 }
