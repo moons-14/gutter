@@ -68,16 +68,20 @@ deferred evidence. Platform records may be `unavailable` only with a concrete re
 release gate may not use `unavailable` as a substitute for execution.
 
 `pnpm run:release-gates` executes the bounded commands, Compose smoke, backup/restore drill, and
-the #26 scale oracle, saving each command’s output and checksum under `RELEASE_ARTIFACT_DIR`.
-The final verifier requires the scale schema, baseline, and passing evidence. Container
-vulnerability scanning, SBOM
-generation, and provenance attestation are executed by the same script using pinned release-runner
-tools (`gitleaks`, `trivy`, `syft`, and `cosign`); their outputs must be added as checksummed
-artifacts and referenced by the corresponding gates before final mode. Missing tools or image refs
-fail the run rather than producing a partial release.
+the #26 scale oracle, saving each command's output and checksum under `RELEASE_ARTIFACT_DIR`. The
+`prepare` phase records the first 19 gates and publishes the three immutable application subjects.
+After those subjects are attested, the `final` phase preserves the prepared results and appends only
+provenance verification and the full scale oracle. The final verifier requires the scale schema,
+baseline, and passing evidence. Container vulnerability scanning, SBOM generation, and provenance
+verification are executed by the same script using pinned release-runner tools (`gitleaks`, `trivy`,
+`syft`, and the checksum-pinned GitHub CLI); their outputs must be added as checksummed artifacts and
+referenced by the corresponding gates before final mode. Missing tools or image refs fail the run
+rather than producing a partial release. A failed final phase is retried as a fresh workflow job so
+that its two append-only result rows can never be confused with an earlier attempt.
 
-The exact release-runner image refs are tracked in `docs/release-tool-refs.json`; update them only
-from an observed official registry digest and retain the version tag alongside the digest.
+The exact release-runner image refs and binary archive checksum are tracked in
+`docs/release-tool-refs.json`; update them only from an observed official registry or immutable
+release asset and retain the version alongside the digest.
 
 The release workflow must execute, rather than merely list, the dependency/license/secret scan,
 container vulnerability scan, migration and OpenAPI checks, browser/UI E2E, Compose smoke,

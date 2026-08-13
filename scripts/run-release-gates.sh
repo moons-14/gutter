@@ -9,19 +9,20 @@ case "$out" in /*) out_abs="$out" ;; *) out_abs="$(pwd)/$out" ;; esac
 mkdir -p "$out_abs"
 out=$(cd "$out_abs" && pwd)
 export RELEASE_ARTIFACT_DIR="$out"
-gitleaks_image=${RELEASE_GITLEAKS_IMAGE:?set RELEASE_GITLEAKS_IMAGE to the digest-pinned tool ref}
-trivy_image=${RELEASE_TRIVY_IMAGE:?set RELEASE_TRIVY_IMAGE to the digest-pinned tool ref}
-trivy_db_repository=${RELEASE_TRIVY_DB_REPOSITORY:?set RELEASE_TRIVY_DB_REPOSITORY to the immutable digest-pinned Trivy DB ref}
-case "$trivy_db_repository" in
-  ghcr.io/aquasecurity/trivy-db:2@sha256:[0-9a-f][0-9a-f]*) ;;
-  *) echo 'RELEASE_TRIVY_DB_REPOSITORY must be the pinned official trivy-db:2 digest' >&2; exit 2 ;;
-esac
-syft_image=${RELEASE_SYFT_IMAGE:?set RELEASE_SYFT_IMAGE to the digest-pinned tool ref}
-cosign_image=${RELEASE_COSIGN_IMAGE:?set RELEASE_COSIGN_IMAGE to the digest-pinned tool ref}
-cosign_identity=${RELEASE_COSIGN_CERTIFICATE_IDENTITY_REGEXP:?set RELEASE_COSIGN_CERTIFICATE_IDENTITY_REGEXP to the GitHub OIDC identity regexp}
-cosign_issuer=${RELEASE_COSIGN_OIDC_ISSUER:?set RELEASE_COSIGN_OIDC_ISSUER to the GitHub OIDC issuer}
+phase=${RELEASE_PHASE:-final}
+case "$phase" in prepare|final) ;; *) echo 'RELEASE_PHASE must be prepare or final' >&2; exit 2 ;; esac
 results="$out/runner-results.tsv"
-: >"$results"
+if [ "$phase" = prepare ]; then
+  : >"$results"
+else
+  test -s "$results"
+  test -f "$results"
+  test ! -L "$results"
+  if grep -Eq '^(provenance|scale-concurrency)[[:space:]]' "$results"; then
+    echo 'final release gate rows already exist in prepared runner results' >&2
+    exit 2
+  fi
+fi
 failed=0
 generated_secrets=''
 generated_postgres_password=0
@@ -64,23 +65,33 @@ run_gate() {
   return 0
 }
 
-run_gate dependencies 'corepack pnpm install --frozen-lockfile' corepack pnpm install --frozen-lockfile
-run_gate licenses 'corepack pnpm audit:licenses' corepack pnpm audit:licenses
-run_gate secrets 'gitleaks detect --source . --redact' docker run --rm -v "$PWD:/repo:ro" -w /repo "$gitleaks_image" detect --source . --redact
-run_gate release-contract 'node scripts/verify-release-gate.mjs contract' node scripts/verify-release-gate.mjs contract
-run_gate format 'corepack pnpm check' corepack pnpm check
-run_gate openapi 'corepack pnpm check:openapi-compat' corepack pnpm check:openapi-compat
-run_gate unit 'corepack pnpm unit' corepack pnpm unit
-run_gate lint 'corepack pnpm lint' corepack pnpm lint
-run_gate typecheck 'corepack pnpm typecheck' corepack pnpm typecheck
-run_gate build 'corepack pnpm build' corepack pnpm build
-run_gate browser-e2e 'corepack pnpm --filter @gutter/web test:e2e' corepack pnpm --filter @gutter/web test:e2e
-run_gate migrations './scripts/prepare-migration-compatibility-fixture.sh' ./scripts/prepare-migration-compatibility-fixture.sh
-run_gate compose-config 'docker compose config' docker compose config
-run_gate compose-smoke './scripts/compose-smoke-release.sh' ./scripts/compose-smoke-release.sh
-run_gate operations 'node scripts/verify-operations.mjs' node scripts/verify-operations.mjs
-run_gate backup-restore './scripts/compose-restore-drill.sh' ./scripts/compose-restore-drill.sh
-run_gate nas-source './scripts/nas-source-oracle.sh' ./scripts/nas-source-oracle.sh
+if [ "$phase" = prepare ]; then
+  gitleaks_image=${RELEASE_GITLEAKS_IMAGE:?set RELEASE_GITLEAKS_IMAGE to the digest-pinned tool ref}
+  trivy_image=${RELEASE_TRIVY_IMAGE:?set RELEASE_TRIVY_IMAGE to the digest-pinned tool ref}
+  trivy_db_repository=${RELEASE_TRIVY_DB_REPOSITORY:?set RELEASE_TRIVY_DB_REPOSITORY to the immutable digest-pinned Trivy DB ref}
+  case "$trivy_db_repository" in
+    ghcr.io/aquasecurity/trivy-db:2@sha256:[0-9a-f][0-9a-f]*) ;;
+    *) echo 'RELEASE_TRIVY_DB_REPOSITORY must be the pinned official trivy-db:2 digest' >&2; exit 2 ;;
+  esac
+  syft_image=${RELEASE_SYFT_IMAGE:?set RELEASE_SYFT_IMAGE to the digest-pinned tool ref}
+  run_gate dependencies 'corepack pnpm install --frozen-lockfile' corepack pnpm install --frozen-lockfile
+  run_gate licenses 'corepack pnpm audit:licenses' corepack pnpm audit:licenses
+  run_gate secrets 'gitleaks detect --source . --redact' docker run --rm -v "$PWD:/repo:ro" -w /repo "$gitleaks_image" detect --source . --redact
+  run_gate release-contract 'node scripts/verify-release-gate.mjs contract' node scripts/verify-release-gate.mjs contract
+  run_gate format 'corepack pnpm check' corepack pnpm check
+  run_gate openapi 'corepack pnpm check:openapi-compat' corepack pnpm check:openapi-compat
+  run_gate unit 'corepack pnpm unit' env -u RELEASE_ARTIFACT_DIR corepack pnpm unit
+  run_gate lint 'corepack pnpm lint' corepack pnpm lint
+  run_gate typecheck 'corepack pnpm typecheck' corepack pnpm typecheck
+  run_gate build 'corepack pnpm build' corepack pnpm build
+  run_gate browser-e2e 'corepack pnpm --filter @gutter/web test:e2e' corepack pnpm --filter @gutter/web test:e2e
+  run_gate migrations './scripts/prepare-migration-compatibility-fixture.sh' ./scripts/prepare-migration-compatibility-fixture.sh
+  run_gate compose-config 'docker compose config' docker compose config
+  run_gate compose-smoke './scripts/compose-smoke-release.sh' ./scripts/compose-smoke-release.sh
+  run_gate operations 'node scripts/verify-operations.mjs' node scripts/verify-operations.mjs
+  run_gate backup-restore './scripts/compose-restore-drill.sh' ./scripts/compose-restore-drill.sh
+  run_gate nas-source './scripts/nas-source-oracle.sh' ./scripts/nas-source-oracle.sh
+fi
 application_image_refs=''
 api_subject=''; worker_subject=''; web_subject=''
 if [ -n "${RELEASE_PREPARED_SUBJECTS:-}" ]; then
@@ -138,13 +149,25 @@ fi
 export RELEASE_IMAGE_REFS="$application_image_refs"
 mapping="$out/application-subjects.json"
 export RELEASE_APPLICATION_SUBJECTS="$mapping"
-run_gate containers 'trivy built application image subjects (docker archive input)' sh -ec 'while IFS="	" read -r service local_tag subject; do scan_ref="$subject"; case "$subject" in local/*@sha256:*) scan_ref="$local_tag" ;; esac; archive="$RELEASE_ARTIFACT_DIR/$service.image.tar"; docker save "$scan_ref" -o "$archive"; docker run --rm -v "$archive:/scan.tar:ro" "$RELEASE_TRIVY_IMAGE" image --db-repository "$RELEASE_TRIVY_DB_REPOSITORY" --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed --input /scan.tar; done <"$RELEASE_ARTIFACT_DIR/application-subjects.tsv"'
-run_gate sbom 'syft canonical application subjects cyclonedx' sh -ec 'while IFS="	" read -r service local_tag subject; do scan_ref="$subject"; case "$subject" in local/*@sha256:*) scan_ref="$local_tag" ;; esac; docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "$RELEASE_SYFT_IMAGE" "$scan_ref" -o cyclonedx-json >"$RELEASE_ARTIFACT_DIR/$service.sbom.json"; sha256sum "$RELEASE_ARTIFACT_DIR/$service.sbom.json" >"$RELEASE_ARTIFACT_DIR/$service.sbom.json.sha256"; done <"$RELEASE_ARTIFACT_DIR/application-subjects.tsv"'
-if [ "${RELEASE_PHASE:-final}" = prepare ]; then
+if [ "$phase" = prepare ]; then
+  run_gate containers 'trivy image pinned release refs' sh -ec 'while IFS="	" read -r service local_tag subject; do scan_ref="$subject"; case "$subject" in local/*@sha256:*) scan_ref="$local_tag" ;; esac; archive="$RELEASE_ARTIFACT_DIR/$service.image.tar"; docker save "$scan_ref" -o "$archive"; docker run --rm -v "$archive:/scan.tar:ro" "$RELEASE_TRIVY_IMAGE" image --db-repository "$RELEASE_TRIVY_DB_REPOSITORY" --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed --input /scan.tar; done <"$RELEASE_ARTIFACT_DIR/application-subjects.tsv"'
+  run_gate sbom 'syft pinned release refs cyclonedx' sh -ec 'while IFS="	" read -r service local_tag subject; do scan_ref="$subject"; case "$subject" in local/*@sha256:*) scan_ref="$local_tag" ;; esac; docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "$RELEASE_SYFT_IMAGE" "$scan_ref" -o cyclonedx-json >"$RELEASE_ARTIFACT_DIR/$service.sbom.json"; sha256sum "$RELEASE_ARTIFACT_DIR/$service.sbom.json" >"$RELEASE_ARTIFACT_DIR/$service.sbom.json.sha256"; done <"$RELEASE_ARTIFACT_DIR/application-subjects.tsv"'
   printf 'prepare phase complete; attest subjects before final phase\n'
   exit "$failed"
 fi
-run_gate provenance 'cosign built application image attestations' sh -ec 'while IFS="	" read -r service local_tag subject; do docker run --rm "$RELEASE_COSIGN_IMAGE" verify-attestation --type slsaprovenance --certificate-identity-regexp "$RELEASE_COSIGN_CERTIFICATE_IDENTITY_REGEXP" --certificate-oidc-issuer "$RELEASE_COSIGN_OIDC_ISSUER" "$subject" --output json >"$RELEASE_ARTIFACT_DIR/$service.provenance.json"; done <"$RELEASE_ARTIFACT_DIR/application-subjects.tsv"'
+gh_bin=${RELEASE_GH_BIN:?set RELEASE_GH_BIN to the checksum-verified GitHub CLI binary}
+gh_version=${RELEASE_GH_VERSION:?set RELEASE_GH_VERSION to the pinned GitHub CLI version}
+test -f "$gh_bin"
+test ! -L "$gh_bin"
+test -x "$gh_bin"
+"$gh_bin" version | grep -F "gh version $gh_version " >/dev/null
+: "${GITHUB_TOKEN:?GITHUB_TOKEN is required to verify GitHub attestations}"
+: "${GITHUB_SHA:?GITHUB_SHA is required to bind provenance to the release commit}"
+: "${GITHUB_REF:?GITHUB_REF is required to bind provenance to the release ref}"
+: "${RELEASE_ATTESTATION_REPOSITORY:?set RELEASE_ATTESTATION_REPOSITORY to owner/repository}"
+: "${RELEASE_ATTESTATION_CERTIFICATE_IDENTITY_REGEXP:?set RELEASE_ATTESTATION_CERTIFICATE_IDENTITY_REGEXP to the GitHub OIDC identity regexp}"
+: "${RELEASE_ATTESTATION_OIDC_ISSUER:?set RELEASE_ATTESTATION_OIDC_ISSUER to the GitHub OIDC issuer}"
+run_gate provenance 'gh attestation verify pinned application subjects slsaprovenance/v1' sh -ec 'GH_TOKEN=$GITHUB_TOKEN; export GH_TOKEN; while IFS="	" read -r service local_tag subject; do "$RELEASE_GH_BIN" attestation verify "oci://$subject" --repo "$RELEASE_ATTESTATION_REPOSITORY" --predicate-type https://slsa.dev/provenance/v1 --cert-identity-regex "$RELEASE_ATTESTATION_CERTIFICATE_IDENTITY_REGEXP" --cert-oidc-issuer "$RELEASE_ATTESTATION_OIDC_ISSUER" --source-digest "$GITHUB_SHA" --source-ref "$GITHUB_REF" --format json >"$RELEASE_ARTIFACT_DIR/$service.provenance.json"; done <"$RELEASE_ARTIFACT_DIR/application-subjects.tsv"'
 if [ -f docs/scale-oracle-evidence.schema.json ]; then
   run_gate scale-concurrency 'SCALE_FULL=1 production Compose scale oracle' env SCALE_FULL=1 SCALE_EVIDENCE_PATH="$RELEASE_ARTIFACT_DIR/scale-evidence.json" ./scripts/run-scale-oracle.sh
 else

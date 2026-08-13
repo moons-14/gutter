@@ -40,7 +40,9 @@ test('workflow image refs normalize docker.io/library and contract passes', asyn
 
 test('workflow attestation identity and trigger guard are exact', async () => {
   const workflow = await readFile('.github/workflows/release.yml', 'utf8');
-  const identity = workflow.match(/RELEASE_COSIGN_CERTIFICATE_IDENTITY_REGEXP: '([^']+)'/)?.[1];
+  const identity = workflow.match(
+    /RELEASE_ATTESTATION_CERTIFICATE_IDENTITY_REGEXP: '([^']+)'/,
+  )?.[1];
   assert.ok(identity);
   const regexp = new RegExp(identity);
   assert.match(
@@ -60,6 +62,10 @@ test('workflow attestation identity and trigger guard are exact', async () => {
   assert.match(workflow, /if:.*github\.event_name == 'workflow_dispatch'.*refs\/heads\/main/);
   assert.match(workflow, /Validate release trigger/);
   assert.match(workflow, /tags: \['v\*'\]/);
+  const runner = await readFile('scripts/run-release-gates.sh', 'utf8');
+  assert.match(runner, /--source-digest "\$GITHUB_SHA"/);
+  assert.match(runner, /--source-ref "\$GITHUB_REF"/);
+  assert.match(runner, /--predicate-type https:\/\/slsa\.dev\/provenance\/v1/);
 });
 
 test('container scan preserves colon-tag local image input', async () => {
