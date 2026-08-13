@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Gutter scale oracle evidence",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "status",
+    "seed",
+    "dataset",
+    "thresholds",
+    "environment",
+    "timingsMs",
+    "baselineComparison"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "gutter.scale-oracle.v1" },
+    "status": { "enum": ["pass", "fail", "unavailable"] },
+    "unavailablePlatformReason": { "type": ["string", "null"] },
+    "seed": { "type": "string", "minLength": 1 },
+    "dataset": {
+      "type": "object",
+      "required": ["books", "pages", "sourceFixtureBooks", "sourceFixturePages"],
+      "properties": {
+        "books": { "type": "integer", "minimum": 1 },
+        "pages": { "type": "integer", "minimum": 1 },
+        "sourceFixtureBooks": { "type": "integer", "minimum": 1 },
+        "sourceFixturePages": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "thresholds": { "type": "object", "additionalProperties": { "type": "number" } },
+    "environment": { "type": "object" },
+    "timingsMs": { "type": "object" },
+    "baselineComparison": { "type": "object" }
+  },
+  "additionalProperties": true
+}

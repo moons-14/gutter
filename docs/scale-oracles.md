@@ -16,13 +16,18 @@ producer coalescing, warm-cache hits, a successful quota-preserving GC result, n
 reconciliation outcomes (`updated=N`, then `unchanged=N`, then exactly one changed manifest), and
 a sparse 20-TB logical file whose allocated blocks remain negligible. Its 1,000-file Compose
 fixture writes valid one-page CBZs under the disposable `scale-source` volume, runs the real
-discovery scanner/reconciler, validates a page through `page-validator`, and reads bytes through
-`reader-stream` and `derived-cache`. It prints p50/p95 catalog/search/native-scan timings for
+discovery scanner/reconciler, starts the production worker entrypoint with its PgBoss
+reconciliation queue, verifies a queue-completed scan, validates a page through `page-validator`,
+and reads bytes through `reader-stream` and `derived-cache`. It prints p50/p95
+catalog/search/native-scan timings for
 diagnosis only; timing is not a correctness gate because CI hardware is variable. The portable
 regression baseline is exact counts, zero quarantines, one cold producer for five readers, a true
 within-quota GC result, required production joins in both plans, and fewer than 1,024 allocated
 filesystem blocks for the sparse probe. The report records Node/PostgreSQL versions, seed,
-dataset sizes, query shape, cache results, and sparse allocation. Run on isolated disposable
+run ID, dataset sizes, query shape, queue completion, cache pressure/reclamation, and sparse
+allocation. It is emitted as a JSON line and written to `SCALE_EVIDENCE_PATH` (or a temporary
+file); its committed schema and baseline are `docs/scale-oracle-evidence.schema.json` and
+`docs/scale-oracle-baseline.json`. Run on isolated disposable
 PostgreSQL storage; never point it at a user database.
 
 The 10k tiny-CBZ and hardware latency runs are intentionally opt-in. Correctness/plan assertions

@@ -5,12 +5,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { crc32 } from 'node:zlib';
-import { DerivedCache } from '../../packages/derived-cache/src/index.ts';
+import { spawn, type ChildProcess } from 'node:child_process';
+import { DerivedCache, cacheIdentity } from '../../packages/derived-cache/src/index.ts';
 import { openReaderStream } from '../../packages/reader-stream/src/index.ts';
 import { scanRootBatched, type ScanItem } from '../../packages/discovery-scanner/src/index.ts';
 import { validateSourceItem } from '../../packages/page-validator/src/index.ts';
 import {
   catalogSeriesListQuery,
+  listCatalogSeries,
   migrateSchema,
   pool,
   persistScanItems,
@@ -23,6 +25,7 @@ if (process.env.GUTTER_SCALE_ORACLE !== '1')
   throw new Error('scale oracle requires GUTTER_SCALE_ORACLE=1');
 
 const seed = process.env.SCALE_SEED ?? 'gutter-issue-26-v1';
+const runId = process.env.SCALE_RUN_ID ?? randomUUID().replaceAll('-', '').slice(0, 16);
 const full = process.env.SCALE_FULL === '1';
 if (full)
   assert.equal(
@@ -40,9 +43,19 @@ const books = Number(process.env.SCALE_BOOKS ?? (full ? 100_000 : 1_000));
 const pagesPerBook = Number(process.env.SCALE_PAGES_PER_BOOK ?? (full ? 20 : 10));
 assert.ok(Number.isInteger(books) && books >= 1 && books <= 100_000);
 assert.ok(Number.isInteger(pagesPerBook) && pagesPerBook >= 1 && pagesPerBook <= 100);
-const rootId = `scale-${createHash('sha256').update(`${seed}:${books}:${pagesPerBook}`).digest('hex').slice(0, 24)}`;
+const rootId = `scale-${createHash('sha256').update(`${seed}:${runId}:${books}:${pagesPerBook}`).digest('hex').slice(0, 24)}`;
 const scanRootId = `${rootId.slice(0, 25)}-scan`;
 const identity = (n: number) => createHash('sha256').update(`${seed}:${n}`).digest('hex');
+const thresholds = {
+  sourceFixtureBooks: 1_000,
+  sourceFixturePages: 1_000,
+  readerCount: 5,
+  coldProducerCount: 1,
+  sparseAllocatedBlocksMax: 1_024,
+  advisoryCatalogP95Ms: 1_000,
+  advisorySearchP95Ms: 1_000,
+  advisoryScanP95Ms: 30_000,
+};
 const samples = (values: number[]) => {
   const sorted = [...values].sort((a, b) => a - b);
   const percentile = (p: number) =>
@@ -86,7 +99,9 @@ function tinyCbz(payload: Buffer): Buffer {
 }
 
 let cacheRoot: string | undefined;
+let pressureRoot: string | undefined;
 let sourceRoot: string | undefined;
+let workerProcess: ChildProcess | undefined;
 try {
   await migrateSchema();
   const sourceBase = process.env.SCALE_SOURCE_ROOT ?? tmpdir();
@@ -130,10 +145,34 @@ try {
     [rootId, books],
   );
   await pool.query(
+    `insert into catalog_publications(series_id,identity_key,publication_identity_canonical_json,kind,display_name,search_key,sort_key,volume,number_text)
+     select s.id,md5(s.identity_key || ':publication') || md5(s.identity_key || ':publication:2'),
+            jsonb_build_array(2,s.identity_key),'volume',s.display_name,s.search_key,s.sort_key,1,null
+       from catalog_series s where s.library_id=$1`,
+    [rootId],
+  );
+  await pool.query(
+    `with ranked_series as (
+       select id, row_number() over (order by id) as n from catalog_series where library_id=$1
+     ), ranked_items as (
+       select id, row_number() over (order by id) as n from source_items where root_id=$1
+     )
+     insert into catalog_releases(publication_id,source_item_id,root_id,metadata_completeness)
+     select p.id,i.id,$1,1
+       from catalog_publications p
+       join ranked_series s on s.id=p.series_id
+       join ranked_items i on i.n=s.n`,
+    [rootId],
+  );
+  await pool.query(
     `insert into catalog_series_list_state(series_id,library_id,display_name,sort_key,search_document,
        visible_publication_count,source_updated_mtime_ms,discovered_at,metadata_updated_at)
      select id,library_id,display_name,sort_key,search_key,1,id,created_at,created_at
        from catalog_series where library_id=$1`,
+    [rootId],
+  );
+  await pool.query(
+    `update catalog_series_list_state set visible_publication_count=1 where library_id=$1`,
     [rootId],
   );
   await pool.query('commit');
@@ -158,6 +197,30 @@ try {
   };
   const firstOutcome = await scanAndPersist(firstScan.items);
   assert.equal(firstOutcome.updated, sourceCount);
+  workerProcess = spawn(process.execPath, ['--import', 'tsx', 'apps/worker/src/index.ts'], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      GUTTER_ALLOWED_ROOTS_JSON: JSON.stringify([{ id: scanRootId, path: sourceRoot }]),
+      GUTTER_READER_CAPABILITY_SECRET: 'scale-oracle-reader-secret-012345678901234567890123',
+      BETTER_AUTH_SECRET: 'scale-oracle-auth-secret-012345678901234567890123456789',
+      GUTTER_STABLE_GRACE_MS: '0',
+      GUTTER_WATCHER_HINTS_ENABLED: 'false',
+    },
+    stdio: ['ignore', 'inherit', 'inherit'],
+  });
+  const workerDeadline = Date.now() + 30_000;
+  let workerCompletedRuns = 0;
+  while (Date.now() < workerDeadline) {
+    const result = await pool.query<{ count: string }>(
+      "select count(*)::text as count from scan_runs where root_id=$1 and state='completed'",
+      [scanRootId],
+    );
+    workerCompletedRuns = Number(result.rows[0]?.count ?? 0);
+    if (workerCompletedRuns >= 2) break;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  assert.ok(workerCompletedRuns >= 2, 'production worker queue completed a reconciliation run');
   const noChangeTimes: number[] = [];
   const secondScan = await scanRootBatched(sourceRoot, { batchSize: 100 });
   const noChangeStarted = performance.now();
@@ -223,27 +286,27 @@ try {
   );
   assert.deepEqual(counts.rows[0], { books: String(books), pages: String(books * pagesPerBook) });
 
-  await pool.query('set enable_seqscan=off');
-  await pool.query('set enable_bitmapscan=off');
-  const productionQuery = catalogSeriesListQuery(
-    { libraryId: rootId, q: 'scale book 42', limit: 100 },
-    adminScope,
-  );
+  await pool.query('analyze catalog_series_list_state');
+  await pool.query('analyze catalog_series');
+  await pool.query('analyze catalog_publications');
+  await pool.query('analyze catalog_releases');
+  await pool.query('analyze source_items');
+  const productionQuery = catalogSeriesListQuery({ libraryId: rootId, limit: 10 }, adminScope);
   const listPlan = await pool.query(
     `explain (format json, costs false) ${productionQuery.text}`,
     productionQuery.values,
   );
-  await pool.query('reset enable_bitmapscan');
   const searchQuery = catalogSeriesListQuery(
-    { libraryId: rootId, q: 'scale book 42', limit: 100 },
+    { libraryId: rootId, q: 'zzzz-no-match', limit: 10 },
     adminScope,
   );
   const searchPlan = await pool.query(
     `explain (format json, costs false) ${searchQuery.text}`,
     searchQuery.values,
   );
-  await pool.query('reset enable_seqscan');
-  const plans = `${JSON.stringify(listPlan.rows)}${JSON.stringify(searchPlan.rows)}`;
+  const listPlans = JSON.stringify(listPlan.rows);
+  const searchPlans = JSON.stringify(searchPlan.rows);
+  const plans = `${listPlans}${searchPlans}`;
   assert.match(productionQuery.text, /catalog_series_list_state/);
   assert.match(productionQuery.text, /catalog_publications/);
   assert.match(productionQuery.text, /catalog_releases/);
@@ -251,6 +314,14 @@ try {
   assert.match(plans, /catalog_series_list_state/);
   assert.match(plans, /catalog_releases/);
   assert.match(plans, /source_items/);
+  assert.match(listPlans, /catalog_series_list_state_library_(name|metadata_updated)_idx/);
+  assert.match(searchPlans, /catalog_series_list_state_search_trgm_idx/);
+  const firstPage = await listCatalogSeries(
+    { libraryId: rootId, q: 'zzzz-no-match', limit: 10 },
+    adminScope,
+  );
+  assert.equal(firstPage.items.length, 0, 'search filter excludes non-matching results');
+  assert.equal(firstPage.nextCursor, null, 'empty search result has no cursor');
 
   const listTimes: number[] = [];
   const searchTimes: number[] = [];
@@ -289,6 +360,24 @@ try {
   assert.deepEqual(warm.body, sourcePayload);
   const gcOk = await cache.gc();
   assert.equal(gcOk, true, 'cache GC leaves usage within the configured quota');
+  pressureRoot = await mkdtemp(join(tmpdir(), 'gutter-scale-cache-pressure-'));
+  const pressureCache = new DerivedCache({
+    root: pressureRoot,
+    quotaBytes: sourcePayload.length * 2,
+  });
+  const pressurePath = (n: number) => {
+    const key = cacheIdentity(descriptor(n)).key;
+    return join(pressureRoot!, key.slice(0, 2), key);
+  };
+  await pressureCache.getOrCreate(descriptor(1), async () => sourcePayload);
+  const protectedEntry = await pressureCache.lease(descriptor(2), async () => sourcePayload);
+  await pressureCache.getOrCreate(descriptor(3), async () => sourcePayload);
+  const reclaimed = await pressureCache.gc();
+  assert.equal(reclaimed, true);
+  await assert.rejects(stat(pressurePath(1)), { code: 'ENOENT' });
+  await stat(pressurePath(2));
+  await stat(pressurePath(3));
+  protectedEntry.release();
 
   const sparseRoot = await mkdtemp(join(tmpdir(), 'gutter-scale-sparse-'));
   const sparsePath = join(sparseRoot, 'capacity.bin');
@@ -300,9 +389,18 @@ try {
   await rm(sparseRoot, { recursive: true, force: true });
 
   const report = {
+    schemaVersion: 'gutter.scale-oracle.v1',
+    status: 'pass',
+    unavailablePlatformReason: null,
     seed,
-    books,
-    pages: books * pagesPerBook,
+    runId,
+    dataset: {
+      books,
+      pages: books * pagesPerBook,
+      sourceFixtureBooks: sourceCount,
+      sourceFixturePages: sourceCount,
+    },
+    thresholds,
     environment: {
       node: process.version,
       postgres: (await pool.query('show server_version')).rows[0],
@@ -318,16 +416,56 @@ try {
       noChangeScan: samples(noChangeTimes),
       changedScan: samples(changedTimes),
     },
-    cache: { readers: 5, coldProducers: producers, warmHit: warm.hit, gc: gcOk },
+    cache: {
+      readers: 5,
+      coldProducers: producers,
+      warmHit: warm.hit,
+      gc: gcOk,
+      pressure: {
+        quotaBytes: sourcePayload.length * 2,
+        reclaimedBytes: sourcePayload.length,
+        protectedLiveEntry: true,
+      },
+    },
+    worker: { queueCompletedRuns: workerCompletedRuns },
     sparse: { logicalBytes: sparse.size, allocatedBlocks: sparse.blocks },
+    baselineComparison: {
+      baseline: 'docs/scale-oracle-baseline.json',
+      portable: 'pass',
+      hardwareAdvisory: {
+        catalogP95Ms:
+          samples(listTimes).p95 <= thresholds.advisoryCatalogP95Ms ? 'pass' : 'advisory-fail',
+        searchP95Ms:
+          samples(searchTimes).p95 <= thresholds.advisorySearchP95Ms ? 'pass' : 'advisory-fail',
+        scanP95Ms:
+          samples([...noChangeTimes, ...changedTimes]).p95 <= thresholds.advisoryScanP95Ms
+            ? 'pass'
+            : 'advisory-fail',
+      },
+    },
   };
+  const evidencePath =
+    process.env.SCALE_EVIDENCE_PATH ?? join(tmpdir(), 'gutter-scale-evidence.json');
+  await writeFile(evidencePath, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
+  console.log(`SCALE_ORACLE_EVIDENCE ${evidencePath}`);
   console.log(`SCALE_ORACLE_RESULT ${JSON.stringify(report)}`);
 } finally {
   if (cacheRoot) await rm(cacheRoot, { recursive: true, force: true }).catch(() => undefined);
+  if (pressureRoot) await rm(pressureRoot, { recursive: true, force: true }).catch(() => undefined);
   if (sourceRoot) await rm(sourceRoot, { recursive: true, force: true }).catch(() => undefined);
+  if (workerProcess && workerProcess.exitCode === null) workerProcess.kill('SIGTERM');
   await pool.query('rollback').catch(() => undefined);
   await pool
     .query('delete from catalog_series_list_state where library_id=$1', [rootId])
+    .catch(() => undefined);
+  await pool
+    .query('delete from catalog_releases where root_id=$1', [rootId])
+    .catch(() => undefined);
+  await pool
+    .query(
+      'delete from catalog_publications where series_id in (select id from catalog_series where library_id=$1)',
+      [rootId],
+    )
     .catch(() => undefined);
   await pool
     .query('delete from catalog_series where library_id=$1', [rootId])
