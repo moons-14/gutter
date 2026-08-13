@@ -29,7 +29,11 @@ test('tree references remain digest and commit pinned', async () => {
 
 test('evidence generator rejects missing runner results instead of inventing pass', async () => {
   await assert.rejects(
-    exec(process.execPath, ['scripts/generate-release-evidence.mjs', 'missing-runner.tsv', 'missing-evidence.json']),
+    exec(process.execPath, [
+      'scripts/generate-release-evidence.mjs',
+      'missing-runner.tsv',
+      'missing-evidence.json',
+    ]),
     /ENOENT|runner result missing/,
   );
 });
