@@ -1562,7 +1562,7 @@ export function catalogSeriesListQuery(
          and ${cursorPredicate}
        order by ${key} ${order},ls.series_id ${order} limit $9
      )
-     select s.id,s.display_name as "displayName",ls.library_id as "libraryId",(select count(distinct p.id)::int from catalog_publications p ${visibleJoins} where p.series_id=s.id and ${visiblePredicate}) as "publicationCount",
+     select s.id,s.identity_key as "identityKey",s.display_name as "displayName",ls.library_id as "libraryId",(select count(distinct p.id)::int from catalog_publications p ${visibleJoins} where p.series_id=s.id and ${visiblePredicate}) as "publicationCount",
        ${sort === 'discovered' || sort === 'metadata_updated' ? 'to_char(selected.cursor_key at time zone \'UTC\',\'YYYY-MM-DD"T"HH24:MI:SS.US"Z"\')' : 'selected.cursor_key::text'} as cursor_key
      from selected join catalog_series_list_state ls on ls.series_id=selected.series_id
        join catalog_series s on s.id=selected.series_id
@@ -1593,6 +1593,7 @@ export async function listCatalogSeries(
   const query = catalogSeriesListQuery(options, scope);
   const result = await pool.query<{
     id: string;
+    identityKey: string;
     cursor_key: string;
     displayName: string;
     libraryId: string;
@@ -2625,6 +2626,77 @@ export function readerProgressKey(rootId: string, relativePath: string): string 
   return `source:${createHash('sha256').update(`${rootId}\u0000${relativePath}`).digest('base64url')}`;
 }
 
+/** Resolve the opaque public progress identity without accepting a root or filesystem path. */
+export async function resolvePublicProgressTarget(
+  userId: string,
+  progressKey: string,
+): Promise<Readonly<{ rootId: string; sourceKey: string }> | null> {
+  if (!/^source:[A-Za-z0-9_-]{1,128}$/.test(progressKey)) return null;
+  const result = await pool.query<{ root_id: string; relative_path: string }>(
+    `select distinct i.root_id,i.relative_path
+       from visible_source_items i
+       join catalog_releases r on r.source_item_id=i.id
+       where gutter_user_can_read_release($1,r.id)`,
+    [userId],
+  );
+  const match = result.rows.find(
+    (row) => readerProgressKey(row.root_id, row.relative_path) === progressKey,
+  );
+  return match ? { rootId: match.root_id, sourceKey: match.relative_path } : null;
+}
+
+/** Resolve a public identity target to an internal root/key only after ACL filtering. */
+export async function resolvePublicTarget(
+  userId: string,
+  targetKind: 'source' | 'check' | 'series' | 'publication',
+  targetId: string,
+): Promise<Readonly<{ rootId: string; targetKey: string }> | null> {
+  if (targetKind === 'source' || targetKind === 'check') {
+    const progress = await resolvePublicProgressTarget(userId, targetId);
+    return progress ? { rootId: progress.rootId, targetKey: progress.sourceKey } : null;
+  }
+  if (
+    (targetKind === 'series' && !/^[0-9a-f]{64}$/.test(targetId)) ||
+    (targetKind === 'publication' && !/^[0-9a-f]{64}:[0-9a-f]{64}$/.test(targetId))
+  )
+    return null;
+  const result = await pool.query<{ root_id: string; target_key: string }>(
+    targetKind === 'series'
+      ? `select s.library_id as root_id,s.identity_key as target_key
+           from catalog_series s join catalog_publications p on p.series_id=s.id
+           join catalog_releases r on r.publication_id=p.id
+           join visible_source_items i on i.id=r.source_item_id
+          where s.identity_key=$2 and gutter_user_can_read_release($1,r.id) limit 1`
+      : `select s.library_id as root_id,s.identity_key || ':' || p.identity_key as target_key
+           from catalog_publications p join catalog_series s on s.id=p.series_id
+           join catalog_releases r on r.publication_id=p.id
+           join visible_source_items i on i.id=r.source_item_id
+          where s.identity_key=split_part($2,':',1) and p.identity_key=split_part($2,':',2)
+            and gutter_user_can_read_release($1,r.id) limit 1`,
+    [userId, targetId],
+  );
+  const row = result.rows[0];
+  return row ? { rootId: row.root_id, targetKey: row.target_key } : null;
+}
+
+/** Stable opaque per-user collection identity; the numeric storage id never crosses the API. */
+export function publicCollectionKey(userId: string, collectionId: string | number): string {
+  return `collection:${createHash('sha256').update(`${userId}\u0000${collectionId}`).digest('base64url')}`;
+}
+
+export async function resolvePublicCollectionId(
+  userId: string,
+  collectionKey: string,
+): Promise<number | null> {
+  if (!/^collection:[A-Za-z0-9_-]{1,128}$/.test(collectionKey)) return null;
+  const rows = await pool.query<{ id: string }>(
+    'select id::text as id from user_collections where user_id=$1 order by id limit 1000',
+    [userId],
+  );
+  const match = rows.rows.find((row) => publicCollectionKey(userId, row.id) === collectionKey);
+  return match ? Number(match.id) : null;
+}
+
 export async function readerRootForRequestPath(pathname: string): Promise<string | null> {
   const release = /^\/api\/reader\/releases\/([1-9][0-9]*)(?:\/pages\/[0-9]+)?$/.exec(pathname);
   if (release) {
@@ -2760,6 +2832,25 @@ export async function getReaderPublicationSession(
   if (!releaseId) return null;
   const release = await getReaderReleaseDescriptor(releaseId, userId);
   return release ? { releaseId, release } : null;
+}
+
+/** Resolve a stable series/publication identity pair for the public page route. */
+export async function getReaderPublicationSessionByIdentity(
+  publicationKey: string,
+  userId: string,
+): Promise<Readonly<{ releaseId: string; release: ReaderReleaseDescriptor }> | null> {
+  const match = /^([0-9a-f]{64}):([0-9a-f]{64})$/.exec(publicationKey);
+  if (!match) return null;
+  const result = await pool.query<{ id: string }>(
+    `select p.id::text as id
+       from catalog_publications p join catalog_series s on s.id=p.series_id
+       join catalog_releases r on r.publication_id=p.id
+      where s.identity_key=$1 and p.identity_key=$2 and gutter_user_can_read_release($3,r.id)
+      order by r.id limit 1`,
+    [match[1], match[2], userId],
+  );
+  const id = result.rows[0]?.id;
+  return id ? getReaderPublicationSession(id, userId) : null;
 }
 
 export async function getAuthorizedReaderPage(

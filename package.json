@@ -26,7 +26,7 @@
     "build": "turbo run build",
     "generate:pwa-icons": "node scripts/generate-pwa-icons.mjs",
     "audit:licenses": "node scripts/audit-licenses.mjs",
-    "check:openapi-compat": "node scripts/check-openapi-compat.mjs docs/openapi-v1.yaml docs/openapi-v1.yaml",
+    "check:openapi-compat": "node scripts/check-openapi-compat.mjs docs/openapi-v1.baseline.json docs/openapi-v1.yaml docs/openapi-v1.json",
     "dev": "docker compose up --build",
     "migrate": "pnpm --filter @gutter/db migrate"
   },
@@ -38,6 +38,7 @@
     "sharp": "0.35.3",
     "tsx": "4.23.11",
     "turbo": "2.10.7",
-    "typescript": "5.9.3"
+    "typescript": "5.9.3",
+    "yaml": "2.9.0"
   }
 }
