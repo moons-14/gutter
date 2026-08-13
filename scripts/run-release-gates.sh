@@ -38,6 +38,10 @@ for secret in api_db_password worker_db_password better_auth_secret reader_capab
   path="secrets/$secret"
   if [ ! -s "$path" ]; then
     od -An -N32 -tx1 /dev/urandom | tr -d ' \n' >"$path"
+    # Compose mounts local file secrets with their host mode. Runtime services run as
+    # uid 10001, so generated disposable gate secrets must be readable in-container.
+    # They stay confined to this checkout and the EXIT trap removes them.
+    chmod 0444 "$path"
     generated_secrets="$generated_secrets $path"
   fi
 done
@@ -71,9 +75,9 @@ run_gate lint 'corepack pnpm lint' corepack pnpm lint
 run_gate typecheck 'corepack pnpm typecheck' corepack pnpm typecheck
 run_gate build 'corepack pnpm build' corepack pnpm build
 run_gate browser-e2e 'corepack pnpm --filter @gutter/web test:e2e' corepack pnpm --filter @gutter/web test:e2e
-run_gate migrations './scripts/migration-compatibility-oracle.sh' ./scripts/migration-compatibility-oracle.sh
+run_gate migrations './scripts/prepare-migration-compatibility-fixture.sh' ./scripts/prepare-migration-compatibility-fixture.sh
 run_gate compose-config 'docker compose config' docker compose config
-run_gate compose-smoke 'docker compose up --abort-on-container-exit --exit-code-from test test' docker compose up --abort-on-container-exit --exit-code-from test test
+run_gate compose-smoke './scripts/compose-smoke-release.sh' ./scripts/compose-smoke-release.sh
 run_gate operations 'node scripts/verify-operations.mjs' node scripts/verify-operations.mjs
 run_gate backup-restore './scripts/compose-restore-drill.sh' ./scripts/compose-restore-drill.sh
 run_gate nas-source './scripts/nas-source-oracle.sh' ./scripts/nas-source-oracle.sh

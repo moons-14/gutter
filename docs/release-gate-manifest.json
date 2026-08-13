@@ -20,8 +20,18 @@
       "gate": "backup-restore"
     },
     {
+      "path": "scripts/compose-smoke-release.sh",
+      "role": "compose-smoke",
+      "gate": "compose-smoke"
+    },
+    {
       "path": "scripts/migration-compatibility-oracle.sh",
       "role": "migration-oracle",
+      "gate": "migrations"
+    },
+    {
+      "path": "scripts/prepare-migration-compatibility-fixture.sh",
+      "role": "migration-fixture",
       "gate": "migrations"
     },
     { "path": "scripts/run-release-gates.sh", "role": "runner", "gate": "release-contract" },
@@ -81,9 +91,9 @@
     "typecheck": "corepack pnpm typecheck",
     "build": "corepack pnpm build",
     "browser-e2e": "corepack pnpm --filter @gutter/web test:e2e",
-    "migrations": "./scripts/migration-compatibility-oracle.sh",
+    "migrations": "./scripts/prepare-migration-compatibility-fixture.sh",
     "compose-config": "docker compose config",
-    "compose-smoke": "docker compose up --abort-on-container-exit --exit-code-from test test",
+    "compose-smoke": "./scripts/compose-smoke-release.sh",
     "operations": "node scripts/verify-operations.mjs",
     "backup-restore": "./scripts/compose-restore-drill.sh",
     "nas-source": "./scripts/nas-source-oracle.sh",
@@ -91,6 +101,5 @@
     "sbom": "syft pinned release refs cyclonedx",
     "provenance": "cosign pinned release refs slsaprovenance",
     "scale-concurrency": "SCALE_FULL=1 production Compose scale oracle"
-  },
-  "deferredUntil": { "scale-concurrency": "#26 merge" }
+  }
 }
