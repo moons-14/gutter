@@ -35,8 +35,9 @@ services:
       GUTTER_READER_CAPABILITY_SECRET_FILE: /run/secrets/reader_capability_secret
       GUTTER_READER_SERVICE_URL: ${GUTTER_READER_SERVICE_URL:-http://worker:3001}
       GUTTER_AUTH_ORIGIN: ${GUTTER_AUTH_ORIGIN:-http://localhost:8080}
-      # Caddy is fixed at 172.30.0.20; API is otherwise unreachable from clients.
-      GUTTER_AUTH_TRUSTED_PROXIES_JSON: '["172.30.0.20"]'
+      # Docker assigns internal addresses; Better Auth ignores forwarded client IPs unless an
+      # operator explicitly supplies a verified proxy identity for the deployment.
+      GUTTER_AUTH_TRUSTED_PROXIES_JSON: '[]'
     depends_on: { migrate: { condition: service_completed_successfully } }
     healthcheck:
       test:
@@ -49,8 +50,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
-    networks:
-      internal: { ipv4_address: 172.30.0.10 }
+    networks: [internal]
     secrets: [api_db_password, better_auth_secret, reader_capability_secret]
   worker:
     build: { context: ., target: worker }
@@ -66,6 +66,7 @@ services:
       GUTTER_DERIVED_CACHE_QUOTA_BYTES: '10737418240'
     depends_on: { migrate: { condition: service_completed_successfully } }
     volumes: [cache-data:/cache]
+    expose: ['9090']
     networks: [internal]
     secrets: [worker_db_password, reader_capability_secret]
   web:
@@ -79,8 +80,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
-    networks:
-      internal: { ipv4_address: 172.30.0.20 }
+    networks: [internal]
   test:
     build: { context: ., target: api }
     profiles: [test]
@@ -128,8 +128,7 @@ services:
       AUTH_PUBLIC_ORIGIN: http://localhost:8080
       AUTH_PEER_LABEL: a
     profiles: [auth-test]
-    networks:
-      internal: { ipv4_address: 172.30.0.31 }
+    networks: [internal]
   auth-rate-peer-b:
     build: { context: ., target: auth-test }
     command: [node, tests/auth-rate-peer.mjs]
@@ -138,8 +137,7 @@ services:
       AUTH_PUBLIC_ORIGIN: http://localhost:8080
       AUTH_PEER_LABEL: b
     profiles: [auth-test]
-    networks:
-      internal: { ipv4_address: 172.30.0.32 }
+    networks: [internal]
   integration:
     build: { context: ., target: build }
     command: [sh, -ec, 'pnpm unit && pnpm integration']
