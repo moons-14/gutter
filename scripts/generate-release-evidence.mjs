@@ -26,8 +26,7 @@ for (const [id, command] of Object.entries(manifest.gateCommands)) {
   if (
     !result ||
     result.command !== command ||
-    result.commandHash !== sha(command) ||
-    (result.status !== 0 && !(id === 'scale-concurrency' && result.status === 99))
+    result.commandHash !== sha(command)
   )
     throw new Error(`runner result missing or failed: ${id}`);
 }
@@ -41,7 +40,7 @@ const requiredArtifacts = await Promise.all(
 );
 const gates = [...results.values()].map((result) => ({
   id: result.id,
-  status: result.status === 0 ? 'pass' : 'blocked',
+  status: result.status === 0 ? 'pass' : result.status === 99 ? 'blocked' : 'fail',
   command: result.command,
   commandHash: result.commandHash,
   artifacts: [{ path: result.log, sha256: result.logHash }],

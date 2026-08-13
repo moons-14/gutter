@@ -12,6 +12,7 @@ syft_image=${RELEASE_SYFT_IMAGE:?set RELEASE_SYFT_IMAGE to the digest-pinned too
 cosign_image=${RELEASE_COSIGN_IMAGE:?set RELEASE_COSIGN_IMAGE to the digest-pinned tool ref}
 results="$out/runner-results.tsv"
 : >"$results"
+failed=0
 run_gate() {
   id=$1
   shift
@@ -20,10 +21,10 @@ run_gate() {
   log="$out/$id.log"
   echo "== $id =="
   command_text="$canonical"
-  if "$@" >"$log" 2>&1; then status=0; else status=$?; fi
+  if "$@" >"$log" 2>&1; then status=0; else status=$?; failed=1; fi
   sha256sum "$log" >"$log.sha256"
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$command_text" "$(printf '%s' "$command_text" | sha256sum | cut -d' ' -f1)" "$status" "$log" "$(sha256sum "$log" | cut -d' ' -f1)" >>"$results"
-  return "$status"
+  return 0
 }
 
 run_gate dependencies 'corepack pnpm install --frozen-lockfile' corepack pnpm install --frozen-lockfile
@@ -56,3 +57,4 @@ else
 fi
 node scripts/generate-release-evidence.mjs "${results#./}" release-evidence.json
 echo "release gate command logs and release-evidence.json written to $out"
+[ "$failed" -eq 0 ]
