@@ -10,7 +10,8 @@ function validate(value, rule, path = '$', root = schema) {
   if (rule.const !== undefined) assert.deepEqual(value, rule.const, `${path} const`);
   if (rule.enum) assert.ok(rule.enum.includes(value), `${path} enum`);
   if (rule.type) {
-    const ok = rule.type === 'object' ? value && typeof value === 'object' && !Array.isArray(value) : rule.type === 'array' ? Array.isArray(value) : rule.type === 'integer' ? Number.isInteger(value) : rule.type === 'number' ? typeof value === 'number' : typeof value === rule.type;
+    const types = Array.isArray(rule.type) ? rule.type : [rule.type];
+    const ok = types.some((type) => type === 'null' ? value === null : type === 'object' ? value && typeof value === 'object' && !Array.isArray(value) : type === 'array' ? Array.isArray(value) : type === 'integer' ? Number.isInteger(value) : type === 'number' ? typeof value === 'number' : typeof value === type);
     assert.ok(ok, `${path} type`);
   }
   if (rule.minimum !== undefined) assert.ok(value >= rule.minimum, `${path} minimum`);
