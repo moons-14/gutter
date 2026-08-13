@@ -50,7 +50,7 @@ try {
   assert.equal(files.length, count);
   assert.equal((await stat(join(root, files[0]))).size, 30 + 5 + body.length + 46 + 5 + 22);
   const { scanRootBatched } = await import('../packages/discovery-scanner/src/index.ts');
-  const scanned = await scanRootBatched(root, { batchSize: 100 });
+  const scanned = await scanRootBatched(root, { batchSize: 100, stableGraceMs: 0 });
   assert.equal(scanned.summary.discovered, count);
   assert.equal(scanned.summary.pages, count);
   assert.equal(scanned.summary.quarantined, 0);
