@@ -42,9 +42,10 @@ For a fresh, isolated Compose project, provision a new database and secret, stop
 
 ```sh
 GUTTER_RESTORE_CONFIRM=YES GUTTER_RESTORE_CONFIRMATION=gutter-restore \
-  GUTTER_RESTORE_TARGET_IDENTITY=gutter-restore \
+  GUTTER_RESTORE_TARGET_IDENTITY=gutter-restore GUTTER_RESTORE_EXPECTED_DATABASE=gutter \
   GUTTER_BACKUP_ARCHIVE=/secure/gutter-backups/gutter-<stamp>.dump \
-  GUTTER_DATABASE_URL="$ISOLATED_DATABASE_URL" ./scripts/restore-postgres.sh
+  GUTTER_DATABASE_URL="$ISOLATED_DATABASE_URL" \
+  GUTTER_BACKUP_MANIFEST=./scripts/backup-table-manifest.v1 ./scripts/restore-postgres.sh
 pnpm migrate
 docker compose -p gutter-restore -f compose.yaml up -d db migrate api worker web
 curl -fsS http://localhost:8080/api/health

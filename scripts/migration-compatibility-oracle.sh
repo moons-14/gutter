@@ -11,7 +11,7 @@ pg_restore --list "$GUTTER_MIGRATION_DUMP" >/dev/null
 pg_restore --clean --if-exists --no-owner --no-privileges --dbname "$GUTTER_DATABASE_URL" "$GUTTER_MIGRATION_DUMP"
 legacy_roots=$(psql "$GUTTER_DATABASE_URL" -Atc 'select count(*) from library_roots')
 legacy_source_items=$(psql "$GUTTER_DATABASE_URL" -Atc 'select count(*) from source_items')
-corepack pnpm migrate
+DATABASE_URL="$GUTTER_DATABASE_URL" DB_URL= PGDATABASE= PGHOST= PGPORT= PGUSER= PGPASSWORD= corepack pnpm migrate
 test "$(psql "$GUTTER_DATABASE_URL" -Atc 'select count(*) from library_roots')" -eq "$legacy_roots"
 test "$(psql "$GUTTER_DATABASE_URL" -Atc 'select count(*) from source_items')" -eq "$legacy_source_items"
 psql "$GUTTER_DATABASE_URL" -v ON_ERROR_STOP=1 -c "select to_regclass('public.gutter_schema'), to_regclass('public.library_roots'), to_regclass('public.source_items');" >/dev/null
