@@ -1,22 +1,24 @@
 # Direct license and provenance inventory
 
-| Component                    | Exact version/tag         | License                       | Primary provenance                                           |
-| ---------------------------- | ------------------------- | ----------------------------- | ------------------------------------------------------------ |
-| Node                         | 24.19.0-bookworm-slim     | MIT                           | nodejs.org / Docker Official Image                           |
-| PostgreSQL                   | 18.1                      | PostgreSQL License            | PostgreSQL Docker Official Image                             |
-| Caddy                        | 2.10.2-alpine             | Apache-2.0                    | caddyserver.com / Docker Official Image                      |
-| pnpm                         | 11.20.0                   | MIT                           | pnpm.io                                                      |
-| yauzl / @types/yauzl         | 3.4.0 / 3.4.0             | MIT                           | npmjs.com/package/yauzl / npmjs.com/package/@types/yauzl     |
-| saxes                        | 6.0.0                     | ISC                           | npmjs.com/package/saxes                                      |
-| chokidar                     | 5.0.0                     | MIT                           | npmjs.com/package/chokidar                                   |
-| Turbo                        | 2.10.7                    | MIT                           | vercel/turborepo                                             |
-| TypeScript                   | 5.9.3                     | Apache-2.0                    | microsoft/TypeScript                                         |
-| SvelteKit/Svelte/Vite        | 2.59.1 / 5.56.8 / 7.3.6   | MIT                           | sveltejs / vitejs                                            |
-| @csstools/color-helpers      | 5.1.0                     | MIT-0                         | csstools/postcss-plugins (Svelte UI test dependency)         |
-| Hono/node-server/zod-openapi | 4.13.0 / 2.1.0 / 1.5.1    | MIT                           | honojs                                                       |
-| Zod                          | 4.4.3                     | MIT                           | colinhacks/zod                                               |
-| Drizzle/pg/pg-boss           | 0.45.2 / 8.22.0 / 12.27.0 | Apache-2.0 / MIT / MIT        | drizzle.team / brianc/node-postgres / tomekbuszewski/pg-boss |
-| Pino/prom-client/sharp       | 10.3.1 / 15.1.3 / 0.35.3  | MIT / Apache-2.0 / Apache-2.0 | pinojs / siimon/prom-client / lovell/sharp                   |
+| Component                    | Exact version/tag                          | License                                  | Primary provenance                                                                                                      |
+| ---------------------------- | ------------------------------------------ | ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| Node                         | 24.19.0-bookworm-slim                      | MIT                                      | nodejs.org / Docker Official Image                                                                                      |
+| PostgreSQL                   | 18.1                                       | PostgreSQL License                       | PostgreSQL Docker Official Image                                                                                        |
+| Caddy                        | v2.11.4 custom build                       | Apache-2.0                               | caddyserver/caddy peeled commit `e2eee6a7fce366321294c9c2a79f3146891dcbdf`; official runtime digest in `Dockerfile.web` |
+| Go builder                   | 1.26.5-alpine3.23                          | BSD-3-Clause                             | Docker Official Image; immutable digest in `Dockerfile.web`                                                             |
+| Caddy modules                | x/net 0.56.0 / x/text 0.39.0 / grpc 1.82.1 | BSD-3-Clause / BSD-3-Clause / Apache-2.0 | exact `go.mod` requirements applied in the constrained Caddy build                                                      |
+| pnpm                         | 11.20.0                                    | MIT                                      | pnpm.io                                                                                                                 |
+| yauzl / @types/yauzl         | 3.4.0 / 3.4.0                              | MIT                                      | npmjs.com/package/yauzl / npmjs.com/package/@types/yauzl                                                                |
+| saxes                        | 6.0.0                                      | ISC                                      | npmjs.com/package/saxes                                                                                                 |
+| chokidar                     | 5.0.0                                      | MIT                                      | npmjs.com/package/chokidar                                                                                              |
+| Turbo                        | 2.10.7                                     | MIT                                      | vercel/turborepo                                                                                                        |
+| TypeScript                   | 5.9.3                                      | Apache-2.0                               | microsoft/TypeScript                                                                                                    |
+| SvelteKit/Svelte/Vite        | 2.59.1 / 5.56.8 / 7.3.6                    | MIT                                      | sveltejs / vitejs                                                                                                       |
+| @csstools/color-helpers      | 5.1.0                                      | MIT-0                                    | csstools/postcss-plugins (Svelte UI test dependency)                                                                    |
+| Hono/node-server/zod-openapi | 4.13.0 / 2.1.0 / 1.5.1                     | MIT                                      | honojs                                                                                                                  |
+| Zod                          | 4.4.3                                      | MIT                                      | colinhacks/zod                                                                                                          |
+| Drizzle/pg/pg-boss           | 0.45.2 / 8.22.0 / 12.27.0                  | Apache-2.0 / MIT / MIT                   | drizzle.team / brianc/node-postgres / tomekbuszewski/pg-boss                                                            |
+| Pino/prom-client/sharp       | 10.3.1 / 15.1.3 / 0.35.3                   | MIT / Apache-2.0 / Apache-2.0            | pinojs / siimon/prom-client / lovell/sharp                                                                              |
 
 ## Local PWA icon provenance
 

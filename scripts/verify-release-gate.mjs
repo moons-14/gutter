@@ -153,7 +153,9 @@ const fromRefs = [...`${dockerfile}\n${webDockerfile}`.matchAll(/^FROM\s+([^\s]+
 );
 const allImages = [
   ...imageRefs.filter((image) => !image.startsWith('gutter-release-')),
-  ...fromRefs.filter((image) => image.includes(':')),
+  ...fromRefs.filter(
+    (image) => image.includes(':') && image !== toolRefs.caddySource?.builderImage,
+  ),
 ];
 for (const image of allImages)
   if (!/@sha256:[0-9a-f]{64}$/.test(image)) throw new Error(`image is not digest pinned: ${image}`);
@@ -194,6 +196,34 @@ assert.match(
   actionWorkflow,
   /uses:\s*actions\/attest@1e69f48acb82d1966a394da916b4c1698aa569d6\b/,
   'release workflow must attest with the tracked immutable action',
+);
+assert.equal(toolRefs.caddySource?.version, 'v2.11.4');
+assert.equal(toolRefs.caddySource?.commit, 'e2eee6a7fce366321294c9c2a79f3146891dcbdf');
+assert.equal(
+  toolRefs.caddySource?.archiveSha256,
+  '2c3d02078286a6282cdb4d1d8744077788d556659dac0b64d8ed5886a7e5aeb9',
+);
+assert.equal(
+  toolRefs.caddySource?.builderImage,
+  'golang:1.26.5-alpine3.23@sha256:622e56dbc11a8cfe87cafa2331e9a201877271cbff918af53d3be315f3da88cc',
+);
+assert.deepEqual(toolRefs.caddySource?.moduleRequirements, {
+  'golang.org/x/net': 'v0.56.0',
+  'golang.org/x/text': 'v0.39.0',
+  'google.golang.org/grpc': 'v1.82.1',
+});
+assert.match(webDockerfile, /FROM golang:1\.26\.5-alpine3\.23@sha256:[0-9a-f]{64} AS caddy-build/);
+assert.match(
+  webDockerfile,
+  new RegExp(
+    `ADD --checksum=sha256:${toolRefs.caddySource.archiveSha256} https://github\\.com/caddyserver/caddy/archive/refs/tags/v2\\.11\\.4\\.tar\\.gz`,
+  ),
+);
+assert.match(webDockerfile, /go mod tidy/);
+assert.match(webDockerfile, /go mod verify/);
+assert.match(
+  webDockerfile,
+  /-trimpath -mod=readonly -ldflags='-s -w' -tags='nobadger nomysql nopgx'/,
 );
 assert.equal(
   process.env.RELEASE_TRIVY_DB_REPOSITORY ??

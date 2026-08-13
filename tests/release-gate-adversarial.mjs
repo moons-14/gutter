@@ -46,6 +46,24 @@ test('container scan preserves colon-tag local image input', async () => {
   assert.doesNotMatch(runner, /docker run[^\n]+\$scan_ref['\"];/);
 });
 
+test('custom Caddy build inputs are immutable and narrowly patched', async () => {
+  const dockerfile = await readFile('Dockerfile.web', 'utf8');
+  const refs = JSON.parse(await readFile('docs/release-tool-refs.json', 'utf8'));
+  assert.match(dockerfile, /golang:1\.26\.5-alpine3\.23@sha256:[0-9a-f]{64}/);
+  assert.match(
+    dockerfile,
+    /ADD --checksum=sha256:[0-9a-f]{64} https:\/\/github\.com\/caddyserver\/caddy\/archive\/refs\/tags\/v2\.11\.4\.tar\.gz/,
+  );
+  assert.match(dockerfile, /go mod verify/);
+  assert.match(dockerfile, /-tags='nobadger nomysql nopgx'/);
+  assert.deepEqual(refs.caddySource.moduleRequirements, {
+    'golang.org/x/net': 'v0.56.0',
+    'golang.org/x/text': 'v0.39.0',
+    'google.golang.org/grpc': 'v1.82.1',
+  });
+  assert.match(refs.caddySource.builderImage, /^golang:1\.26\.5-alpine3\.23@sha256:[0-9a-f]{64}$/);
+});
+
 test('workflow final reaches evidence validation after image membership', async () => {
   await assert.rejects(
     exec(process.execPath, ['scripts/verify-release-gate.mjs', 'final', 'missing-evidence.json']),
