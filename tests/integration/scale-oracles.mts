@@ -376,7 +376,7 @@ try {
     productionQuery.values,
   );
   const searchQuery = catalogSeriesListQuery(
-    { libraryId: rootId, q: 'zzzz-no-match', limit: 10 },
+    { libraryId: rootId, q: 'Scale book 1', limit: 10 },
     adminScope,
   );
   const searchPlan = await pool.query(
@@ -396,11 +396,11 @@ try {
   assert.match(listPlans, /catalog_series_list_state_library_name_idx/);
   assert.match(searchPlans, /catalog_series_list_state_search_trgm_idx/);
   const firstPage = await listCatalogSeries(
-    { libraryId: rootId, q: 'zzzz-no-match', limit: 10 },
+    { libraryId: rootId, q: 'Scale book 1', limit: 10 },
     adminScope,
   );
-  assert.equal(firstPage.items.length, 0, 'search filter excludes non-matching results');
-  assert.equal(firstPage.nextCursor, null, 'empty search result has no cursor');
+  assert.ok(firstPage.items.length > 0, 'positive search returns matching results');
+  assert.ok(firstPage.items.every((item) => String(item.displayName).toLowerCase().includes('scale book 1')));
   const pageOne = await listCatalogSeries({ libraryId: rootId, limit: 10 }, adminScope);
   assert.equal(pageOne.items.length, 10);
   assert.ok(pageOne.nextCursor, 'production list returns a cursor for the next page');
