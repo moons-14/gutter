@@ -13,7 +13,7 @@ case "${COMPOSE_PROJECT_NAME:-}" in gutter|gutter-issue27-drill-*) echo 'refusin
 root=$(mktemp -d "${TMPDIR:-/tmp}/gutter-issue27-restore-drill.XXXXXX")
 mkdir -p "$root/secrets" "$root/source/title" "$root/source/visible" "$root/artifacts"
 chmod 0770 "$root/artifacts"
-cleanup() { if [ "${DRILL_DEBUG:-0}" = 1 ]; then docker compose -p "$project_a" -f compose.yaml -f "$root/override.yaml" logs migrate || true; docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" logs migrate || true; fi; docker compose -p "$project_a" -f compose.yaml -f "$root/override.yaml" down -v --remove-orphans >/dev/null 2>&1 || true; docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" down -v --remove-orphans >/dev/null 2>&1 || true; rm -rf "$root"; }
+cleanup() { if [ "${DRILL_DEBUG:-0}" = 1 ]; then docker compose -p "$project_a" -f compose.yaml -f "$root/override.yaml" logs migrate || true; docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" logs migrate api worker web || true; fi; docker compose -p "$project_a" -f compose.yaml -f "$root/override.yaml" down -v --remove-orphans >/dev/null 2>&1 || true; docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" down -v --remove-orphans >/dev/null 2>&1 || true; rm -rf "$root"; }
 trap cleanup EXIT INT TERM
 test -z "$(docker ps -aq --filter "label=com.docker.compose.project=$project_a")" || { echo 'project A resources already exist; refusing stale cleanup' >&2; exit 2; }
 test -z "$(docker ps -aq --filter "label=com.docker.compose.project=$project_b")" || { echo 'project B resources already exist; refusing stale cleanup' >&2; exit 2; }
@@ -245,6 +245,7 @@ SQL
 post_digest=$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T db psql -U gutter -d gutter -Atc "select concat_ws('|',(select count(*) from library_roots),(select count(*) from \"user\"),(select count(*) from session),(select count(*) from account),(select count(*) from library_access_grants),(select count(*) from gutter_acl_revisions),(select count(*) from gutter_acl_audit),(select count(*) from gutter_user_state_revisions),(select count(*) from user_progress),(select count(*) from user_target_state),(select count(*) from user_bookmarks),(select count(*) from user_collections),(select count(*) from user_collection_members),(select count(*) from gutter_user_state_audit),(select count(*) from catalog_preferred_release_overrides),(select count(*) from global_source_suppressions),(select count(*) from source_items where not active),(select count(*) from source_metadata_issues))")
 test "$post_digest" = "$pre_digest"
 docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" up -d api worker web
+echo "restore drill checkpoint: runtime started web_port=$web_port" >&2
 for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
   curl -fsS "http://localhost:$web_port/" >/dev/null 2>&1 && docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker wget -q -O- http://127.0.0.1:9090/ready >/dev/null 2>&1 && break
   [ "$attempt" = 15 ] && exit 1
