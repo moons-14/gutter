@@ -54,8 +54,6 @@
           "429": {
             "$ref": "#/components/responses/RateLimited"
           },
-          "413": { "$ref": "#/components/responses/BodyTooLarge" },
-          "403": { "$ref": "#/components/responses/Forbidden" },
           "413": { "$ref": "#/components/responses/BodyTooLarge" }
         }
       }

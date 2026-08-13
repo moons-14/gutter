@@ -127,6 +127,17 @@ const PUBLIC_RATE_LIMIT = 60;
 const PUBLIC_RATE_WINDOW_MS = 60_000;
 const PUBLIC_CURSOR_TTL_MS = 24 * 60 * 60 * 1000;
 const PUBLIC_TIMEOUT = Symbol('public_timeout');
+const PUBLIC_DEPENDENCY_ERROR = Symbol('public_dependency_error');
+
+const isAbortLike = (error: unknown): boolean => {
+  if (!(error instanceof Error)) return false;
+  return (
+    error.name === 'AbortError' ||
+    error.name === 'TimeoutError' ||
+    (error as NodeJS.ErrnoException).code === 'ABORT_ERR' ||
+    error.message === 'public_timeout'
+  );
+};
 
 const publicRateBuckets = new Map<string, number[]>();
 const publicSeriesId = (value: unknown): string =>
@@ -194,6 +205,7 @@ export type ApiDeps = Readonly<{
   canAccessLibrary?: typeof canAccessLibrary;
   readerRootForRequestPath?: typeof readerRootForRequestPath;
   fetchReader?: typeof fetch;
+  readerServiceUrl?: string;
   resolvePublicProgressTarget?: typeof resolvePublicProgressTarget;
   resolvePublicTarget?: typeof resolvePublicTarget;
   resolvePublicCollectionId?: typeof resolvePublicCollectionId;
@@ -230,6 +242,7 @@ export const productionDeps: Required<ApiDeps> = {
   canAccessLibrary,
   readerRootForRequestPath,
   fetchReader: fetch,
+  readerServiceUrl: process.env.GUTTER_READER_SERVICE_URL ?? 'http://worker:3001',
   resolvePublicProgressTarget,
   resolvePublicTarget,
   resolvePublicCollectionId,
@@ -269,6 +282,7 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
     canAccessLibrary,
     readerRootForRequestPath,
     fetchReader,
+    readerServiceUrl,
     resolvePublicProgressTarget,
     resolvePublicTarget,
     resolvePublicCollectionId,
@@ -318,16 +332,23 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
     }
   };
   const app = new OpenAPIHono();
-  // Delegated public requests must retain the already-authenticated principal. A new Request
-  // object is required for the internal alias, so a private in-process map carries authority
-  // without trusting spoofable client headers.
-  const delegatedPrincipals = new WeakMap<Request, PublicPrincipal | null>();
+  // Delegated public requests must retain the already-authenticated principal. Hono may wrap a
+  // nested Request before dispatching it, so identity-based WeakMap lookup is not sufficient.
+  // Instead use a short-lived random in-process context id. The id is generated here, accepted
+  // only while it is present in this map, and never leaves the private API boundary as authority.
+  const delegatedPrincipals = new Map<string, PublicPrincipal>();
+  const delegatedPrincipalFor = (request: Request): PublicPrincipal | undefined => {
+    const id =
+      request.headers.get('x-gutter-delegation') ??
+      new URL(request.url).searchParams.get('__gutter_delegation');
+    return id ? delegatedPrincipals.get(id) : undefined;
+  };
   const requestPrincipal = async (
     request: Request,
     allowBearer = false,
   ): Promise<PublicPrincipal | null> => {
-    const delegated = delegatedPrincipals.get(request);
-    if (delegated !== undefined) return delegated;
+    const delegated = delegatedPrincipalFor(request);
+    if (delegated) return delegated;
     const authorization = request.headers.get('authorization')?.trim();
     if (authorization) {
       // Direct internal routes can only use the browser session. A public bearer is accepted
@@ -377,6 +398,15 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
       ]);
     } finally {
       if (timer) clearTimeout(timer);
+    }
+  };
+  const withPublicDependency = async <T>(
+    operation: Promise<T>,
+  ): Promise<T | typeof PUBLIC_TIMEOUT | typeof PUBLIC_DEPENDENCY_ERROR> => {
+    try {
+      return await withPublicTimeout(operation);
+    } catch (error) {
+      return isAbortLike(error) ? PUBLIC_TIMEOUT : PUBLIC_DEPENDENCY_ERROR;
     }
   };
   const normalizePublicResponse = async (
@@ -429,9 +459,96 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
           headers: new Headers({ 'content-type': 'application/json; charset=utf-8' }),
         });
       }
+      if (response.status < 200 || response.status >= 300 || ![200, 206].includes(response.status))
+        return new Response(JSON.stringify({ error: 'reader_error', requestId }), {
+          status: 500,
+          headers: new Headers({ 'content-type': 'application/json; charset=utf-8' }),
+        });
+      // Do not let a zero-byte success masquerade as a usable page.  The
+      // reader response is bounded by the reader service; buffering here also
+      // makes the public contract deterministic for the published proxy.
+      if (response.status === 200 || response.status === 206) {
+        const bytes = new Uint8Array(await response.arrayBuffer());
+        if (bytes.byteLength === 0)
+          return new Response(JSON.stringify({ error: 'reader_unavailable', requestId }), {
+            status: 503,
+            headers: new Headers({ 'content-type': 'application/json; charset=utf-8' }),
+          });
+        const headers = new Headers(response.headers);
+        headers.set('content-length', String(bytes.byteLength));
+        return new Response(bytes, { status: response.status, headers });
+      }
       return response;
     }
-    if (!response.headers.get('content-type')?.includes('application/json')) return response;
+    const requestId = c.res.headers.get('x-request-id') ?? c.req.header('x-request-id') ?? '';
+    if (!response.ok) {
+      let delegatedBody: Record<string, unknown> | null = null;
+      if (
+        response.headers.get('content-type')?.split(';', 1)[0]?.toLowerCase() === 'application/json'
+      ) {
+        const parsed = await response
+          .clone()
+          .json()
+          .catch(() => null);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed))
+          delegatedBody = parsed as Record<string, unknown>;
+      }
+      const status = [401, 403, 404, 405, 409, 413, 429, 499, 500, 503, 504].includes(
+        response.status,
+      )
+        ? response.status
+        : response.status >= 500
+          ? 503
+          : 500;
+      const error =
+        status === 401
+          ? 'authentication_required'
+          : status === 403
+            ? 'insufficient_scope'
+            : status === 404
+              ? 'not_found'
+              : status === 405
+                ? 'method_not_allowed'
+                : status === 409
+                  ? 'collection_conflict'
+                  : status === 413
+                    ? 'body_too_large'
+                    : status === 429
+                      ? 'rate_limited'
+                      : status === 499
+                        ? 'reader_cancelled'
+                        : status === 504
+                          ? 'timeout'
+                          : status === 503
+                            ? 'reader_unavailable'
+                            : 'reader_error';
+      if (
+        publicPath === '/api/v1/progress' &&
+        status === 409 &&
+        delegatedBody?.error === 'progress_conflict'
+      ) {
+        const rawProgress = delegatedBody.progress;
+        const progress =
+          rawProgress && typeof rawProgress === 'object' && !Array.isArray(rawProgress)
+            ? rawProgress
+            : null;
+        return new Response(JSON.stringify({ error: 'progress_conflict', progress, requestId }), {
+          status,
+          headers: new Headers({ 'content-type': 'application/json; charset=utf-8' }),
+        });
+      }
+      return new Response(JSON.stringify({ error, requestId }), {
+        status,
+        headers: new Headers({ 'content-type': 'application/json; charset=utf-8' }),
+      });
+    }
+    if (
+      response.headers.get('content-type')?.split(';', 1)[0]?.toLowerCase() !== 'application/json'
+    )
+      return new Response(JSON.stringify({ error: 'reader_error', requestId }), {
+        status: 500,
+        headers: new Headers({ 'content-type': 'application/json; charset=utf-8' }),
+      });
     const text = await response.text();
     const body = (() => {
       try {
@@ -440,8 +557,11 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
         return null;
       }
     })();
-    if (!body || typeof body !== 'object' || Array.isArray(body))
-      return new Response(text, { status: response.status, headers: response.headers });
+    if (!body || typeof body !== 'object' || Array.isArray(body) || 'error' in body)
+      return new Response(JSON.stringify({ error: 'reader_error', requestId }), {
+        status: 500,
+        headers: new Headers({ 'content-type': 'application/json; charset=utf-8' }),
+      });
     let projected: Record<string, unknown> = body as Record<string, unknown>;
     if (response.ok && (publicPath === '/api/v1/catalog' || publicPath === '/api/v1/search')) {
       const page = body as {
@@ -528,6 +648,71 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
       status: response.status,
       headers,
     });
+  };
+  const readerKey = resolved.readerCapabilityKey || null;
+  const fetchReaderForPrincipal = async (
+    request: Request,
+    user: PublicPrincipal,
+    pathname: string,
+  ): Promise<Response> => {
+    const scope = await libraryAccessScope(user.id);
+    const rootId = await readerRootForRequestPath(pathname);
+    const hasLibraryAccess = rootId ? canAccessLibrary(scope, rootId) : false;
+    const visible = rootId ? await isReaderPathVisible(user.id, pathname) : false;
+    if (!rootId || !hasLibraryAccess || !visible)
+      return new Response(JSON.stringify({ error: 'not_found' }), {
+        status: 404,
+        headers: new Headers({ 'content-type': 'application/json; charset=utf-8' }),
+      });
+    const headers = new Headers();
+    for (const name of ['range', 'if-none-match', 'if-modified-since']) {
+      const value = request.headers.get(name);
+      if (value) headers.set(name, value);
+    }
+    headers.set(
+      'x-gutter-reader-capability',
+      signReaderCapability(readerKey ?? (await readerCapabilitySecret()), {
+        userId: user.id,
+        rootId,
+        path: pathname,
+        aclRevision: scope.revision,
+      }),
+    );
+    const upstream = await withPublicTimeout(
+      fetchReader(`${readerServiceUrl}${pathname}`, {
+        method: request.method,
+        headers,
+        signal: request.signal,
+      }),
+    ).catch((error) => {
+      if (request.signal.aborted || isAbortLike(error)) return PUBLIC_TIMEOUT;
+      return PUBLIC_DEPENDENCY_ERROR;
+    });
+    const requestId = request.headers.get('x-request-id') ?? '';
+    if (upstream === PUBLIC_TIMEOUT)
+      return new Response(JSON.stringify({ error: 'timeout', requestId }), {
+        status: 504,
+        headers: new Headers({ 'content-type': 'application/json; charset=utf-8' }),
+      });
+    if (upstream === PUBLIC_DEPENDENCY_ERROR)
+      return new Response(JSON.stringify({ error: 'reader_unavailable', requestId }), {
+        status: 503,
+        headers: new Headers({ 'content-type': 'application/json; charset=utf-8' }),
+      });
+    const responseHeaders = new Headers();
+    for (const name of [
+      'accept-ranges',
+      'content-length',
+      'content-range',
+      'content-type',
+      'etag',
+      'last-modified',
+    ]) {
+      const value = upstream.headers.get(name);
+      if (value) responseHeaders.set(name, value);
+    }
+    responseHeaders.set('cache-control', 'no-store');
+    return new Response(upstream.body, { status: upstream.status, headers: responseHeaders });
   };
   const requiredScope: Record<string, PublicApiScope> = {
     '/api/v1/catalog': 'catalog:read',
@@ -656,26 +841,26 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
     if (path.startsWith('/api/v1/page/')) {
       const match = /^\/api\/v1\/page\/([0-9a-f]{64}:[0-9a-f]{64})\/([0-9]+)$/.exec(path);
       if (!match || Number(match[2]) > 1000000) return publicError(c, 'not_found', 404);
-      const publication = await withPublicTimeout(
-        getReaderPublicationSessionByIdentity(match[1], principal.id),
-      ).catch((error) => {
-        if (error instanceof Error && error.message === 'public_timeout') return null;
-        throw error;
-      });
+      const publication = await withPublicDependency(
+        Promise.resolve().then(() => getReaderPublicationSessionByIdentity(match[1], principal.id)),
+      );
+      if (publication === PUBLIC_TIMEOUT) return publicError(c, 'timeout', 504);
+      if (publication === PUBLIC_DEPENDENCY_ERROR) return publicError(c, 'reader_error', 500);
       if (!publication || !publication.release.validOrdinals.includes(Number(match[2])))
         return publicError(c, 'not_found', 404);
       url.pathname = `/api/reader/releases/${publication.releaseId}/pages/${match[2]}`;
-      const delegated = new Request(url, {
+      const delegatedHeaders = new Headers(c.req.raw.headers);
+      const delegatedWithContext = new Request(url, {
         method,
-        headers: c.req.raw.headers,
+        headers: delegatedHeaders,
         signal: AbortSignal.timeout(PUBLIC_TIMEOUT_MS),
       });
-      delegatedPrincipals.set(delegated, principal);
-      return withPublicTimeout(Promise.resolve(app.fetch(delegated)))
+      return withPublicTimeout(
+        fetchReaderForPrincipal(delegatedWithContext, principal, url.pathname),
+      )
         .then((response) => normalizePublicResponse(c, response, path, principal))
         .catch((error) => {
-          if (error instanceof Error && error.message === 'public_timeout')
-            return publicError(c, 'timeout', 504);
+          if (isAbortLike(error)) return publicError(c, 'timeout', 504);
           return publicError(c, 'reader_unavailable', 503);
         });
     }
@@ -722,12 +907,13 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
     if (internalCursor) rewrittenParams.set('cursor', internalCursor);
     if (path === '/api/v1/progress' && method === 'GET') {
       if (!url.searchParams.get('progressKey')) return publicError(c, 'invalid_request', 400);
-      const progressTarget = await withPublicTimeout(
-        resolvePublicProgressTarget(principal.id, url.searchParams.get('progressKey') ?? ''),
-      ).catch((error) => {
-        if (error instanceof Error && error.message === 'public_timeout') return null;
-        throw error;
-      });
+      const progressTarget = await withPublicDependency(
+        Promise.resolve().then(() =>
+          resolvePublicProgressTarget(principal.id, url.searchParams.get('progressKey') ?? ''),
+        ),
+      );
+      if (progressTarget === PUBLIC_TIMEOUT) return publicError(c, 'timeout', 504);
+      if (progressTarget === PUBLIC_DEPENDENCY_ERROR) return publicError(c, 'reader_error', 500);
       if (!progressTarget) return publicError(c, 'not_found', 404);
       rewrittenParams.set('rootId', progressTarget.rootId);
       rewrittenParams.set('progressKey', url.searchParams.get('progressKey')!);
@@ -764,16 +950,16 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
             typeof parsed.completed !== 'boolean'
           )
             return publicError(c, 'invalid_request', 400);
-          const progressTarget = await withPublicTimeout(
-            resolvePublicProgressTarget(principal.id, parsed.progressKey),
-          ).catch((error) => {
-            if (error instanceof Error && error.message === 'public_timeout') return PUBLIC_TIMEOUT;
-            throw error;
-          });
+          const progressTarget = await withPublicDependency(
+            Promise.resolve().then(() =>
+              resolvePublicProgressTarget(principal.id, parsed.progressKey as string),
+            ),
+          );
           if (progressTarget === PUBLIC_TIMEOUT) return publicError(c, 'timeout', 504);
+          if (progressTarget === PUBLIC_DEPENDENCY_ERROR)
+            return publicError(c, 'reader_error', 500);
           if (!progressTarget) return publicError(c, 'not_found', 404);
-          const resolvedProgressTarget = progressTarget as { rootId: string; sourceKey: string };
-          adapted = { ...parsed, rootId: resolvedProgressTarget.rootId };
+          adapted = { ...parsed, rootId: progressTarget.rootId };
         } else if (path === '/api/v1/favorites' || path === '/api/v1/ratings') {
           const allowed =
             path === '/api/v1/favorites'
@@ -801,23 +987,22 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
             return publicError(c, 'invalid_request', 400);
           if (!['series', 'publication'].includes(parsed.targetKind))
             return publicError(c, 'invalid_request', 400);
-          const target = await withPublicTimeout(
-            resolvePublicTarget(
-              principal.id,
-              parsed.targetKind as 'series' | 'publication',
-              parsed.targetId,
+          const target = await withPublicDependency(
+            Promise.resolve().then(() =>
+              resolvePublicTarget(
+                principal.id,
+                parsed.targetKind as 'series' | 'publication',
+                parsed.targetId as string,
+              ),
             ),
-          ).catch((error) => {
-            if (error instanceof Error && error.message === 'public_timeout') return PUBLIC_TIMEOUT;
-            throw error;
-          });
+          );
           if (target === PUBLIC_TIMEOUT) return publicError(c, 'timeout', 504);
+          if (target === PUBLIC_DEPENDENCY_ERROR) return publicError(c, 'reader_error', 500);
           if (!target) return publicError(c, 'not_found', 404);
-          const resolvedTarget = target as { rootId: string; targetKey: string };
           adapted = {
             ...parsed,
-            rootId: resolvedTarget.rootId,
-            targetKey: resolvedTarget.targetKey,
+            rootId: target.rootId,
+            targetKey: target.targetKey,
           };
           delete adapted.targetId;
         } else if (path === '/api/v1/collections') {
@@ -837,28 +1022,28 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
     const delegatedHeaders = new Headers(c.req.raw.headers);
     delegatedHeaders.delete('content-length');
     delegatedHeaders.delete('host');
+    const delegationId = crypto.randomUUID();
+    delegatedHeaders.set('x-gutter-delegation', delegationId);
     const delegated = new Request(url, {
       method,
       headers: delegatedHeaders,
       body,
       signal: AbortSignal.timeout(PUBLIC_TIMEOUT_MS),
     });
-    delegatedPrincipals.set(delegated, principal);
+    delegatedPrincipals.set(delegationId, principal);
     return withPublicTimeout(Promise.resolve(app.fetch(delegated)))
       .then((response) => normalizePublicResponse(c, response, path, principal))
       .catch((error) => {
-        if (error instanceof Error && error.message === 'public_timeout')
-          return publicError(c, 'timeout', 504);
+        if (isAbortLike(error)) return publicError(c, 'timeout', 504);
         return publicError(c, 'reader_unavailable', 503);
-      });
+      })
+      .finally(() => delegatedPrincipals.delete(delegationId));
   });
   app.get('/api/v1/openapi.json', async (c) => {
     const document = await readFile(resolve(process.cwd(), 'docs/openapi-v1.json'), 'utf8');
     c.header('content-type', 'application/json; charset=utf-8');
     return c.body(document, 200);
   });
-  const readerKey = resolved.readerCapabilityKey || null;
-
   app.use('*', async (c, next) => {
     const requestId = c.req.header('x-request-id')!;
     const started = performance.now();
@@ -935,56 +1120,7 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
     if (!['GET', 'HEAD'].includes(c.req.method)) return c.body(null, 404);
     const user = await requestPrincipal(c.req.raw);
     if (!user) return c.json({ error: 'not_found' }, 404);
-    const scope = await libraryAccessScope(user.id);
-    const pathname = new URL(c.req.url).pathname;
-    const rootId = await readerRootForRequestPath(pathname);
-    if (
-      !rootId ||
-      !canAccessLibrary(scope, rootId) ||
-      !(await isReaderPathVisible(user.id, pathname))
-    )
-      return c.json({ error: 'not_found' }, 404);
-    const headers = new Headers();
-    for (const name of ['range', 'if-none-match', 'if-modified-since']) {
-      const value = c.req.header(name);
-      if (value) headers.set(name, value);
-    }
-    headers.set(
-      'x-gutter-reader-capability',
-      signReaderCapability(readerKey ?? (await readerCapabilitySecret()), {
-        userId: user.id,
-        rootId,
-        path: pathname,
-        aclRevision: scope.revision,
-      }),
-    );
-    const upstream = await fetchReader(`http://worker:3001${pathname}`, {
-      method: c.req.method,
-      headers,
-      signal: c.req.raw.signal,
-    }).catch(() => null);
-    if (!upstream)
-      return c.json(
-        {
-          error: 'reader_unavailable',
-          requestId: c.res.headers.get('x-request-id') ?? c.req.header('x-request-id') ?? '',
-        },
-        503,
-      );
-    const responseHeaders = new Headers();
-    for (const name of [
-      'accept-ranges',
-      'content-length',
-      'content-range',
-      'content-type',
-      'etag',
-      'last-modified',
-    ]) {
-      const value = upstream.headers.get(name);
-      if (value) responseHeaders.set(name, value);
-    }
-    responseHeaders.set('cache-control', 'no-store');
-    return new Response(upstream.body, { status: upstream.status, headers: responseHeaders });
+    return fetchReaderForPrincipal(c.req.raw, user, new URL(c.req.url).pathname);
   });
   const userStateUser = async (request: Request) => requestPrincipal(request);
   const userStateBody = async (c: any): Promise<Record<string, unknown> | null> => {
@@ -1030,7 +1166,7 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
     nextCursor: page.nextCursor,
   });
   app.use('/user-state/*', async (c, next) => {
-    const delegated = delegatedPrincipals.get(c.req.raw);
+    const delegated = delegatedPrincipalFor(c.req.raw);
     if (
       !['GET', 'HEAD'].includes(c.req.method) &&
       !delegated?.patId &&

@@ -33,7 +33,7 @@ jobs:
       - run: docker compose wait migrate
       - run: docker compose up -d api worker web
       - run: docker compose --profile test run --rm test
-      - run: docker compose --profile public-api run --rm public-api-test
+      - run: GUTTER_READER_SERVICE_URL=http://reader-fixture:3001 docker compose --profile public-api run --rm public-api-test
       - run: docker compose run --rm --no-deps migrate
       - if: failure()
         run: |

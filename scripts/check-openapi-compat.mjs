@@ -28,10 +28,21 @@ const pointer = (document, ref) => {
   return value;
 };
 const deref = (document, value) => {
-  if (!value?.$ref) return value;
-  return pointer(document, value.$ref) ?? value;
+  let current = value;
+  const seen = new Set();
+  while (current?.$ref) {
+    if (seen.has(current.$ref)) return current;
+    seen.add(current.$ref);
+    const resolved = pointer(document, current.$ref);
+    if (resolved === undefined) return current;
+    current = resolved;
+  }
+  return current;
 };
-const identity = (parameter) => parameter.$ref ?? `${parameter.in ?? ''}:${parameter.name ?? ''}`;
+const identity = (document, parameter) => {
+  const resolved = deref(document, parameter);
+  return `${resolved?.in ?? ''}:${resolved?.name ?? ''}`;
+};
 const keys = new Set([
   'type',
   'minimum',
@@ -46,7 +57,6 @@ const keys = new Set([
   'maxProperties',
   'pattern',
 ]);
-const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const canonical = (value) =>
   value && typeof value === 'object'
     ? Array.isArray(value)
@@ -57,6 +67,7 @@ const canonical = (value) =>
             .map((key) => [key, canonical(value[key])]),
         )
     : value;
+const equal = (a, b) => JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
 const compareSchema = (beforeRaw, afterRaw, path) => {
   const before = deref(base, beforeRaw);
   const after = deref(candidate, afterRaw);
@@ -105,18 +116,35 @@ const compareContent = (before, after, path) => {
     else compareSchema(content.schema, after[media].schema, `${path} ${media}`);
   }
 };
+const compareHeaders = (before, after, path) => {
+  for (const [name, header] of Object.entries(before ?? {})) {
+    const candidateHeader = after?.[name];
+    if (!candidateHeader) {
+      failures.push(`removed response header ${path} ${name}`);
+      continue;
+    }
+    const resolvedHeader = deref(base, header);
+    const resolvedCandidateHeader = deref(candidate, candidateHeader);
+    if (Boolean(resolvedHeader.required) !== Boolean(resolvedCandidateHeader.required))
+      failures.push(`changed response header requiredness ${path} ${name}`);
+    compareSchema(resolvedHeader.schema, resolvedCandidateHeader.schema, `${path} header ${name}`);
+  }
+};
 const compareOperation = (before, after, path) => {
   if (!after) {
     failures.push(`removed operation ${path}`);
     return;
   }
-  const bp = new Map((before.parameters ?? []).map((p) => [identity(p), p]));
-  const ap = new Map((after.parameters ?? []).map((p) => [identity(p), p]));
+  const bp = new Map((before.parameters ?? []).map((p) => [identity(base, p), p]));
+  const ap = new Map((after.parameters ?? []).map((p) => [identity(candidate, p), p]));
   for (const [key, parameter] of bp) {
     const candidateParameter = ap.get(key);
     if (!candidateParameter) failures.push(`removed parameter ${path} ${key}`);
     else {
-      if (parameter.required !== undefined && parameter.required !== candidateParameter.required)
+      if (
+        Boolean(deref(base, parameter).required) !==
+        Boolean(deref(candidate, candidateParameter).required)
+      )
         failures.push(`changed required parameter ${path} ${key}`);
       compareSchema(
         deref(base, parameter).schema,
@@ -142,6 +170,8 @@ const compareOperation = (before, after, path) => {
         `${path} request body`,
       );
     }
+  } else if (after.requestBody && deref(candidate, after.requestBody).required) {
+    failures.push(`added required request body ${path}`);
   }
   for (const [status, response] of Object.entries(before.responses ?? {})) {
     const candidateResponse = after.responses?.[status];
@@ -152,12 +182,11 @@ const compareOperation = (before, after, path) => {
         deref(candidate, candidateResponse).content,
         `${path} response ${status}`,
       );
-      for (const [name, header] of Object.entries(deref(base, response).headers ?? {})) {
-        const candidateHeader = deref(candidate, candidateResponse).headers?.[name];
-        if (!candidateHeader) failures.push(`removed response header ${path} ${status} ${name}`);
-        else if (header.required && !candidateHeader.required)
-          failures.push(`response header became optional ${path} ${status} ${name}`);
-      }
+      compareHeaders(
+        deref(base, response).headers,
+        deref(candidate, candidateResponse).headers,
+        `${path} ${status}`,
+      );
     }
   }
 };
@@ -171,7 +200,10 @@ for (const [name, parameter] of Object.entries(base.components?.parameters ?? {}
   const candidateParameter = candidate.components?.parameters?.[name];
   if (!candidateParameter) failures.push(`removed components.parameters.${name}`);
   else {
-    if (parameter.required !== undefined && parameter.required !== candidateParameter.required)
+    if (
+      Boolean(deref(base, parameter).required) !==
+      Boolean(deref(candidate, candidateParameter).required)
+    )
       failures.push(`changed required components.parameters.${name}`);
     compareSchema(
       deref(base, parameter).schema,
@@ -180,15 +212,39 @@ for (const [name, parameter] of Object.entries(base.components?.parameters ?? {}
     );
   }
 }
+for (const [name, body] of Object.entries(base.components?.requestBodies ?? {})) {
+  const candidateBody = candidate.components?.requestBodies?.[name];
+  if (!candidateBody) failures.push(`removed components.requestBodies.${name}`);
+  else {
+    if (Boolean(deref(base, body).required) !== Boolean(deref(candidate, candidateBody).required))
+      failures.push(`changed required components.requestBodies.${name}`);
+    compareContent(
+      deref(base, body).content,
+      deref(candidate, candidateBody).content,
+      `components.requestBodies.${name}`,
+    );
+  }
+}
+for (const [name, header] of Object.entries(base.components?.headers ?? {})) {
+  const candidateHeader = candidate.components?.headers?.[name];
+  if (!candidateHeader) failures.push(`removed components.headers.${name}`);
+  else compareHeaders({ [name]: header }, { [name]: candidateHeader }, 'components.headers');
+}
 for (const [name, response] of Object.entries(base.components?.responses ?? {})) {
   const candidateResponse = candidate.components?.responses?.[name];
   if (!candidateResponse) failures.push(`removed components.responses.${name}`);
-  else
+  else {
     compareContent(
       deref(base, response).content,
       deref(candidate, candidateResponse).content,
       `components.responses.${name}`,
     );
+    compareHeaders(
+      deref(base, response).headers,
+      deref(candidate, candidateResponse).headers,
+      `components.responses.${name}`,
+    );
+  }
 }
 for (const section of ['securitySchemes'])
   for (const [name, value] of Object.entries(base.components?.[section] ?? {}))

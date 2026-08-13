@@ -38,7 +38,7 @@ const post = (jar: CookieJar, path: string, body: unknown) =>
     body: JSON.stringify(body),
   });
 test(
-  'PAT lifecycle, scopes, expiry, owner isolation, aliases, Caddy routing, and lookup/page ACLs',
+  'PAT lifecycle, scopes, expiry, owner isolation, Caddy routing, public lookup, and page proxy semantics',
   runtimeOptions,
   async () => {
     assert.ok(base && databaseUrl);
@@ -340,14 +340,57 @@ test(
         200,
         'public progress lookup resolves through the migrated bounded query',
       );
-      const page = await fetch(`${base}/api/v1/page/${seriesKey}:${publicationKey}/0`, {
-        headers: { authorization: `Bearer ${lookupToken.token}`, 'x-request-id': 'page-acl' },
+      const pagePath = `${base}/api/v1/page/${seriesKey}:${publicationKey}/0`;
+      const pageHeaders = (requestId: string, extra: Record<string, string> = {}) => ({
+        authorization: `Bearer ${lookupToken.token}`,
+        'x-request-id': requestId,
+        ...extra,
       });
-      assert.equal(
-        page.status,
-        404,
-        'page ACL/worker visibility remains non-enumerable through Caddy',
-      );
+      const page = await fetch(pagePath, { headers: pageHeaders('page-200') });
+      assert.equal(page.status, 200);
+      assert.equal(page.headers.get('content-type'), 'image/png');
+      assert.equal(await page.text(), 'fixture-page-bytes');
+
+      const partial = await fetch(pagePath, {
+        headers: pageHeaders('page-206', { range: 'bytes=0-6' }),
+      });
+      assert.equal(partial.status, 206);
+      assert.equal(partial.headers.get('content-range'), 'bytes 0-6/18');
+      assert.equal(await partial.text(), 'fixture');
+
+      const notModified = await fetch(pagePath, {
+        headers: pageHeaders('page-304', { 'if-none-match': 'W/"public-fixture"' }),
+      });
+      assert.equal(notModified.status, 304);
+      assert.equal(await notModified.text(), '');
+
+      const range = await fetch(pagePath, {
+        headers: pageHeaders('page-416', { range: 'bytes=999-1000' }),
+      });
+      assert.equal(range.status, 416);
+      assert.equal(range.headers.get('content-range'), 'bytes */18');
+      assert.deepEqual(await range.json(), {
+        error: 'range_not_satisfiable',
+        requestId: 'page-416',
+      });
+
+      const nonBinary = await fetch(pagePath, {
+        headers: pageHeaders('page-nonbinary', { 'if-none-match': 'nonbinary' }),
+      });
+      assert.equal(nonBinary.status, 503);
+      assert.deepEqual(await nonBinary.json(), {
+        error: 'reader_unavailable',
+        requestId: 'page-nonbinary',
+      });
+
+      const timeout = await fetch(pagePath, {
+        headers: pageHeaders('page-timeout', { 'if-none-match': 'timeout' }),
+      });
+      assert.equal(timeout.status, 504);
+      assert.deepEqual(await timeout.json(), {
+        error: 'timeout',
+        requestId: 'page-timeout',
+      });
     } finally {
       if (rootId) {
         await database.query(

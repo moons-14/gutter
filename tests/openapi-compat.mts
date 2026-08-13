@@ -4,9 +4,10 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
+import { parse } from 'yaml';
 
 const root = new URL('..', import.meta.url).pathname;
-const run = (candidate: string) =>
+const run = (candidate: string, served?: string) =>
   new Promise<number>((resolve) => {
     const child = spawn(
       process.execPath,
@@ -14,7 +15,7 @@ const run = (candidate: string) =>
         'scripts/check-openapi-compat.mjs',
         'docs/openapi-v1.baseline.json',
         candidate,
-        'docs/openapi-v1.json',
+        ...(served ? [served] : []),
       ],
       { cwd: root },
     );
@@ -22,7 +23,9 @@ const run = (candidate: string) =>
   });
 
 test('committed OpenAPI contract is compatible and served JSON is exact', async () => {
-  assert.equal(await run('docs/openapi-v1.yaml'), 0);
+  const servedText = await readFile(join(root, 'docs/openapi-v1.json'), 'utf8');
+  assert.doesNotThrow(() => parse(servedText, { uniqueKeys: true }));
+  assert.equal(await run('docs/openapi-v1.yaml', 'docs/openapi-v1.json'), 0);
 });
 
 test('compatibility rejects method, parameter, response, schema, and bound removals', async () => {
@@ -60,10 +63,36 @@ test('compatibility rejects each requiredness and header regression independentl
         d.components.schemas.Progress.required.pop();
       },
       (d: any) => {
-        delete d.paths['/api/v1/page/{publicationId}/{ordinal}'].get.responses['304'].headers.ETag;
+        d.paths['/api/v1/catalog'].get.responses['405'] = {
+          description: 'method',
+          content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
+          headers: {},
+        };
       },
       (d: any) => {
         d.components.parameters.Limit.schema.maximum = 101;
+      },
+      (d: any) => {
+        d.components.parameters.OptionalQuery.required = true;
+      },
+      (d: any) => {
+        d.paths['/api/v1/catalog'].get.responses['405'] = {
+          description: 'method',
+          content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
+          headers: { Allow: { schema: { type: 'string' }, required: true } },
+        };
+      },
+      (d: any) => {
+        d.components.schemas.Progress.properties.pageOrdinal.type = 'string';
+      },
+      (d: any) => {
+        d.components.responses.MethodNotAllowed.headers.Allow.required = true;
+      },
+      (d: any) => {
+        d.paths['/api/v1/catalog'].get.requestBody = {
+          required: true,
+          content: { 'application/json': { schema: { type: 'object' } } },
+        };
       },
     ];
     for (const [index, mutate] of mutations.entries()) {

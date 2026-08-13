@@ -30,3 +30,7 @@ candidate as part of an ordinary CI run.
 The focused runtime oracle is `pnpm test:public`. In CI it runs hermetic contract/proxy tests; the
 Compose `public-api` profile runs the same suite against real PostgreSQL, the migrated API, and
 Caddy (`docker compose --profile public-api run --rm public-api-test`).
+For the published-path reader contract cases, point the API at the committed deterministic fixture:
+`GUTTER_READER_SERVICE_URL=http://reader-fixture:3001 docker compose --profile public-api run --rm public-api-test`.
+The fixture drives binary `200`/`206`, conditional `304`, range `416`, non-binary, and timeout cases
+through Caddy; the normal default remains the private worker at `http://worker:3001`.

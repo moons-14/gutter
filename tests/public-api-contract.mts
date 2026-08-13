@@ -20,6 +20,19 @@ test('public contract and adapter enforce the v1 trust boundary', async () => {
     ['#/components/parameters/PublicationId', '#/components/parameters/Ordinal'],
   );
   assert.equal(document.components.schemas.Error.required.includes('requestId'), true);
+  for (const item of Object.values(document.paths) as any[])
+    for (const operation of Object.values(item) as any[]) {
+      if (!operation.responses) continue;
+      assert.ok(operation.responses['403'], 'every public operation declares 403');
+      assert.ok(operation.responses['413'], 'every public operation declares 413');
+    }
+  const pageResponses = document.paths['/api/v1/page/{publicationId}/{ordinal}'].get.responses;
+  assert.ok(pageResponses['206'], 'page declares partial binary success');
+  for (const status of ['200', '206']) {
+    const media = Object.keys(pageResponses[status].content);
+    assert.deepEqual(media, ['image/*']);
+    assert.equal(pageResponses[status].content['image/*'].schema.format, 'binary');
+  }
   assert.match(adapter, /createCipheriv\('aes-256-gcm'/);
   assert.match(adapter, /reader_unavailable/);
   assert.match(adapter, /PUBLIC_CURSOR_TTL_MS/);
