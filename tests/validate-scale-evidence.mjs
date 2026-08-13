@@ -8,6 +8,7 @@ const report = JSON.parse(await readFile(path, 'utf8'));
 const schema = JSON.parse(await readFile(new URL('../docs/scale-oracle-evidence.schema.json', import.meta.url), 'utf8'));
 const unavailableMode = report.status === 'unavailable';
 function validate(value, rule, path = '$', root = schema) {
+  if (rule.oneOf) assert.ok(rule.oneOf.some((candidate) => { try { validate(value, candidate, path, root); return true; } catch { return false; } }), `${path} oneOf`);
   if (rule.$ref) return validate(value, root.$defs[rule.$ref.split('/').pop()], path, root);
   if (rule.const !== undefined) assert.deepEqual(value, rule.const, `${path} const`);
   if (rule.enum) assert.ok(rule.enum.includes(value), `${path} enum`);

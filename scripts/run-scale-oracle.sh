@@ -8,6 +8,11 @@ case "$target" in /*.json) ;; *) echo 'SCALE_EVIDENCE_PATH must be a safe absolu
 case "$target" in /|/etc/*|/var/*|/usr/*) echo 'SCALE_EVIDENCE_PATH targets a protected path' >&2; exit 2 ;; esac
 staging="/tmp/gutter-scale-evidence-${run_id}"
 mkdir -p "$staging"
+cleanup() {
+  docker compose -p "$project" --profile scale down -v --remove-orphans >/dev/null 2>&1 || true
+  rm -rf "$staging"
+}
+trap cleanup EXIT INT TERM
 if [ "${SCALE_DOCKER_PROBE:-}" = mock-fail ]; then
   echo 'Docker preflight failed unexpectedly' >&2
   exit 1
@@ -22,11 +27,6 @@ EOF
     exit 0
   fi
 fi
-cleanup() {
-  docker compose -p "$project" --profile scale down -v --remove-orphans >/dev/null 2>&1 || true
-  rm -rf "$staging"
-}
-trap cleanup EXIT INT TERM
 export POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-issue26-postgres-test}"
 export SCALE_RUN_ID="$run_id" SCALE_ROOT_ID="$root_id" SCALE_EVIDENCE_DIR="$staging"
 docker compose -p "$project" --profile scale run --rm scale-oracles

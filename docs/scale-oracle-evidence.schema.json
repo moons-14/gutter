@@ -2,6 +2,10 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Gutter scale oracle evidence",
   "type": "object",
+  "oneOf": [
+    { "properties": { "status": { "const": "pass" }, "worker": { "properties": { "queueCompletedRuns": { "const": 3 } } } } },
+    { "properties": { "status": { "const": "unavailable" }, "unavailablePlatformReason": { "type": "string", "minLength": 1 }, "worker": { "properties": { "queueCompletedRuns": { "const": 0 }, "runs": { "type": "object", "additionalProperties": false } } } } }
+  ],
   "required": [
     "schemaVersion",
     "status",
@@ -71,7 +75,7 @@
   },
   "$defs": {
     "run": { "type": "object", "required": ["id", "requestId", "pgBossJobId", "state", "summary"], "properties": { "id": { "type": "string", "minLength": 1 }, "requestId": { "type": "string", "minLength": 1 }, "pgBossJobId": { "type": "string", "minLength": 1 }, "state": { "const": "completed" }, "summary": { "type": "object", "required": ["updated", "unchanged", "discovered", "pages"], "properties": { "updated": { "type": "integer", "minimum": 0 }, "unchanged": { "type": "integer", "minimum": 0 }, "discovered": { "type": "integer", "minimum": 0 }, "pages": { "type": "integer", "minimum": 0 } }, "additionalProperties": true } }, "additionalProperties": false },
-    "planRow": { "type": "object", "required": ["QUERY PLAN"], "properties": { "QUERY PLAN": { "type": "array", "minItems": 1 } }, "additionalProperties": false },
+    "planRow": { "type": "object", "required": ["QUERY PLAN"], "properties": { "QUERY PLAN": { "type": "array", "minItems": 1, "items": { "type": "object", "required": ["Plan"], "properties": { "Plan": { "type": "object", "required": ["Node Type"], "properties": { "Node Type": { "type": "string", "minLength": 1 } }, "additionalProperties": true } }, "additionalProperties": true } } }, "additionalProperties": false },
     "samples": { "type": "object", "required": ["p50", "p95", "count"], "properties": { "p50": { "type": "number", "minimum": 0 }, "p95": { "type": "number", "minimum": 0 }, "count": { "type": "integer", "minimum": 1 } }, "additionalProperties": false }
   },
   "additionalProperties": false
