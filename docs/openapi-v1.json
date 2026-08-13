@@ -47,12 +47,16 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "403": { "$ref": "#/components/responses/Forbidden" },
           "405": {
             "$ref": "#/components/responses/MethodNotAllowed"
           },
           "429": {
             "$ref": "#/components/responses/RateLimited"
-          }
+          },
+          "413": { "$ref": "#/components/responses/BodyTooLarge" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "413": { "$ref": "#/components/responses/BodyTooLarge" }
         }
       }
     },
@@ -99,7 +103,9 @@
           },
           "429": {
             "$ref": "#/components/responses/RateLimited"
-          }
+          },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "413": { "$ref": "#/components/responses/BodyTooLarge" }
         }
       }
     },
@@ -126,9 +132,14 @@
               }
             }
           },
+          "206": {
+            "description": "Partial reader page bytes",
+            "content": { "image/*": { "schema": { "type": "string", "format": "binary" } } }
+          },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "403": { "$ref": "#/components/responses/Forbidden" },
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
@@ -138,6 +149,7 @@
           "429": {
             "$ref": "#/components/responses/RateLimited"
           },
+          "413": { "$ref": "#/components/responses/BodyTooLarge" },
           "409": {
             "$ref": "#/components/responses/ReaderConflict"
           },
@@ -196,7 +208,9 @@
           },
           "429": {
             "$ref": "#/components/responses/RateLimited"
-          }
+          },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "413": { "$ref": "#/components/responses/BodyTooLarge" }
         }
       },
       "put": {
@@ -243,7 +257,9 @@
           },
           "429": {
             "$ref": "#/components/responses/RateLimited"
-          }
+          },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "413": { "$ref": "#/components/responses/BodyTooLarge" }
         }
       }
     },
@@ -274,7 +290,9 @@
           },
           "429": {
             "$ref": "#/components/responses/RateLimited"
-          }
+          },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "413": { "$ref": "#/components/responses/BodyTooLarge" }
         }
       },
       "put": {
@@ -311,7 +329,9 @@
           },
           "429": {
             "$ref": "#/components/responses/RateLimited"
-          }
+          },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "413": { "$ref": "#/components/responses/BodyTooLarge" }
         }
       }
     },
@@ -350,7 +370,9 @@
           },
           "429": {
             "$ref": "#/components/responses/RateLimited"
-          }
+          },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "413": { "$ref": "#/components/responses/BodyTooLarge" }
         }
       }
     },
@@ -381,7 +403,9 @@
           },
           "429": {
             "$ref": "#/components/responses/RateLimited"
-          }
+          },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "413": { "$ref": "#/components/responses/BodyTooLarge" }
         }
       },
       "post": {
@@ -416,6 +440,8 @@
           "429": {
             "$ref": "#/components/responses/RateLimited"
           },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "413": { "$ref": "#/components/responses/BodyTooLarge" },
           "409": {
             "description": "Collection name already exists",
             "content": {
@@ -846,6 +872,14 @@
             }
           }
         }
+      },
+      "Forbidden": {
+        "description": "Forbidden or insufficient scope",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+      },
+      "BodyTooLarge": {
+        "description": "Request body exceeds the bounded public limit",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
       },
       "Unauthorized": {
         "description": "Missing or revoked PAT",

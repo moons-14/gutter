@@ -41,3 +41,39 @@ test('compatibility rejects method, parameter, response, schema, and bound remov
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('compatibility rejects each requiredness and header regression independently', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'gutter-openapi-required-'));
+  try {
+    const source = JSON.parse(await readFile(join(root, 'docs/openapi-v1.json'), 'utf8')) as any;
+    const mutations = [
+      (d: any) => {
+        d.paths['/api/v1/search'].get.parameters[0].required = false;
+      },
+      (d: any) => {
+        delete d.paths['/api/v1/search'].get.parameters[0].required;
+      },
+      (d: any) => {
+        d.paths['/api/v1/progress'].put.requestBody.required = false;
+      },
+      (d: any) => {
+        d.components.schemas.Progress.required.pop();
+      },
+      (d: any) => {
+        delete d.paths['/api/v1/page/{publicationId}/{ordinal}'].get.responses['304'].headers.ETag;
+      },
+      (d: any) => {
+        d.components.parameters.Limit.schema.maximum = 101;
+      },
+    ];
+    for (const [index, mutate] of mutations.entries()) {
+      const candidate = join(dir, `candidate-${index}.json`);
+      const document = structuredClone(source);
+      mutate(document);
+      await writeFile(candidate, JSON.stringify(document));
+      assert.notEqual(await run(candidate), 0, `mutation ${index} must fail compatibility`);
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

@@ -47,6 +47,16 @@ const keys = new Set([
   'pattern',
 ]);
 const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const canonical = (value) =>
+  value && typeof value === 'object'
+    ? Array.isArray(value)
+      ? value.map(canonical)
+      : Object.fromEntries(
+          Object.keys(value)
+            .sort()
+            .map((key) => [key, canonical(value[key])]),
+        )
+    : value;
 const compareSchema = (beforeRaw, afterRaw, path) => {
   const before = deref(base, beforeRaw);
   const after = deref(candidate, afterRaw);
@@ -60,6 +70,9 @@ const compareSchema = (beforeRaw, afterRaw, path) => {
   }
   for (const name of before.required ?? [])
     if (!after.required?.includes(name)) failures.push(`removed required field ${path}.${name}`);
+  for (const name of after.required ?? [])
+    if (!(before.required ?? []).includes(name) && before.properties?.[name])
+      failures.push(`optional field became required ${path}.${name}`);
   if (before.enum)
     for (const value of before.enum)
       if (!after.enum?.some((v) => equal(v, value)))
@@ -121,6 +134,8 @@ const compareOperation = (before, after, path) => {
     else {
       if (deref(base, before.requestBody).required && !deref(candidate, after.requestBody).required)
         failures.push(`request body became optional ${path}`);
+      if (!deref(base, before.requestBody).required && deref(candidate, after.requestBody).required)
+        failures.push(`request body became required ${path}`);
       compareContent(
         deref(base, before.requestBody).content,
         deref(candidate, after.requestBody).content,
@@ -181,7 +196,8 @@ for (const section of ['securitySchemes'])
       failures.push(`removed components.${section}.${name}`);
 if (servedPath) {
   const served = await load(servedPath);
-  if (!equal(candidate, served)) failures.push('served OpenAPI JSON differs from source contract');
+  if (JSON.stringify(canonical(candidate)) !== JSON.stringify(canonical(served)))
+    failures.push('served OpenAPI JSON differs from source contract');
 }
 if (failures.length) {
   console.error(`Breaking public API change:\n- ${failures.join('\n- ')}`);

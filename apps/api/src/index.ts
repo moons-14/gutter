@@ -126,6 +126,7 @@ const PUBLIC_TIMEOUT_MS = 10_000;
 const PUBLIC_RATE_LIMIT = 60;
 const PUBLIC_RATE_WINDOW_MS = 60_000;
 const PUBLIC_CURSOR_TTL_MS = 24 * 60 * 60 * 1000;
+const PUBLIC_TIMEOUT = Symbol('public_timeout');
 
 const publicRateBuckets = new Map<string, number[]>();
 const publicSeriesId = (value: unknown): string =>
@@ -412,13 +413,17 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
         if (contentRange) headers.set('content-range', contentRange);
         return new Response(JSON.stringify({ error, requestId }), { status, headers });
       }
-      if (response.headers.get('content-type')?.includes('application/json')) {
+      const contentType = response.headers.get('content-type')?.split(';', 1)[0]?.toLowerCase();
+      if (contentType === 'application/json') {
         return new Response(JSON.stringify({ error: 'reader_error', requestId }), {
           status: 500,
           headers: new Headers({ 'content-type': 'application/json; charset=utf-8' }),
         });
       }
-      if ((response.status === 200 || response.status === 206) && !response.body) {
+      if (
+        (response.status === 200 || response.status === 206) &&
+        (!response.body || !contentType?.startsWith('image/'))
+      ) {
         return new Response(JSON.stringify({ error: 'reader_unavailable', requestId }), {
           status: 503,
           headers: new Headers({ 'content-type': 'application/json; charset=utf-8' }),
@@ -762,11 +767,13 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
           const progressTarget = await withPublicTimeout(
             resolvePublicProgressTarget(principal.id, parsed.progressKey),
           ).catch((error) => {
-            if (error instanceof Error && error.message === 'public_timeout') return null;
+            if (error instanceof Error && error.message === 'public_timeout') return PUBLIC_TIMEOUT;
             throw error;
           });
+          if (progressTarget === PUBLIC_TIMEOUT) return publicError(c, 'timeout', 504);
           if (!progressTarget) return publicError(c, 'not_found', 404);
-          adapted = { ...parsed, rootId: progressTarget.rootId };
+          const resolvedProgressTarget = progressTarget as { rootId: string; sourceKey: string };
+          adapted = { ...parsed, rootId: resolvedProgressTarget.rootId };
         } else if (path === '/api/v1/favorites' || path === '/api/v1/ratings') {
           const allowed =
             path === '/api/v1/favorites'
@@ -801,11 +808,17 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
               parsed.targetId,
             ),
           ).catch((error) => {
-            if (error instanceof Error && error.message === 'public_timeout') return null;
+            if (error instanceof Error && error.message === 'public_timeout') return PUBLIC_TIMEOUT;
             throw error;
           });
+          if (target === PUBLIC_TIMEOUT) return publicError(c, 'timeout', 504);
           if (!target) return publicError(c, 'not_found', 404);
-          adapted = { ...parsed, rootId: target.rootId, targetKey: target.targetKey };
+          const resolvedTarget = target as { rootId: string; targetKey: string };
+          adapted = {
+            ...parsed,
+            rootId: resolvedTarget.rootId,
+            targetKey: resolvedTarget.targetKey,
+          };
           delete adapted.targetId;
         } else if (path === '/api/v1/collections') {
           if (
