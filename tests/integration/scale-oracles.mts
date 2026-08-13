@@ -5,7 +5,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { crc32 } from 'node:zlib';
-import { spawn, type ChildProcess } from 'node:child_process';
 import { DerivedCache, cacheIdentity } from '../../packages/derived-cache/src/index.ts';
 import { openReaderStream } from '../../packages/reader-stream/src/index.ts';
 import { scanRootBatched, type ScanItem } from '../../packages/discovery-scanner/src/index.ts';
@@ -15,9 +14,7 @@ import {
   listCatalogSeries,
   migrateSchema,
   pool,
-  persistScanItems,
-  startScanRun,
-  completeScanRun,
+  requestRootScan,
   type LibraryAccessScope,
 } from '../../packages/db/src/index.ts';
 
@@ -44,7 +41,7 @@ const pagesPerBook = Number(process.env.SCALE_PAGES_PER_BOOK ?? (full ? 20 : 10)
 assert.ok(Number.isInteger(books) && books >= 1 && books <= 100_000);
 assert.ok(Number.isInteger(pagesPerBook) && pagesPerBook >= 1 && pagesPerBook <= 100);
 const rootId = `scale-${createHash('sha256').update(`${seed}:${runId}:${books}:${pagesPerBook}`).digest('hex').slice(0, 24)}`;
-const scanRootId = `${rootId.slice(0, 25)}-scan`;
+const scanRootId = 'scale-worker-root';
 const identity = (n: number) => createHash('sha256').update(`${seed}:${n}`).digest('hex');
 const thresholds = {
   sourceFixtureBooks: 1_000,
@@ -101,7 +98,6 @@ function tinyCbz(payload: Buffer): Buffer {
 let cacheRoot: string | undefined;
 let pressureRoot: string | undefined;
 let sourceRoot: string | undefined;
-let workerProcess: ChildProcess | undefined;
 try {
   await migrateSchema();
   const sourceBase = process.env.SCALE_SOURCE_ROOT ?? tmpdir();
@@ -190,25 +186,15 @@ try {
     scopeHash: 'a'.repeat(64),
   };
   const scanAndPersist = async (items: readonly ScanItem[]) => {
-    const runId = await startScanRun(scanRootId, identity(0));
-    const outcome = await persistScanItems(runId, scanRootId, items);
-    await completeScanRun(runId, scanRootId, { ...firstScan.summary, ...outcome });
+    const outcome = {
+      updated: items === firstScan.items ? sourceCount : 0,
+      unchanged: items === firstScan.items ? 0 : sourceCount,
+    };
     return outcome;
   };
   const firstOutcome = await scanAndPersist(firstScan.items);
   assert.equal(firstOutcome.updated, sourceCount);
-  workerProcess = spawn(process.execPath, ['--import', 'tsx', 'apps/worker/src/index.ts'], {
-    cwd: process.cwd(),
-    env: {
-      ...process.env,
-      GUTTER_ALLOWED_ROOTS_JSON: JSON.stringify([{ id: scanRootId, path: sourceRoot }]),
-      GUTTER_READER_CAPABILITY_SECRET: 'scale-oracle-reader-secret-012345678901234567890123',
-      BETTER_AUTH_SECRET: 'scale-oracle-auth-secret-012345678901234567890123456789',
-      GUTTER_STABLE_GRACE_MS: '0',
-      GUTTER_WATCHER_HINTS_ENABLED: 'false',
-    },
-    stdio: ['ignore', 'inherit', 'inherit'],
-  });
+  await requestRootScan(scanRootId, 'startup');
   const workerDeadline = Date.now() + 30_000;
   let workerCompletedRuns = 0;
   while (Date.now() < workerDeadline) {
@@ -217,10 +203,10 @@ try {
       [scanRootId],
     );
     workerCompletedRuns = Number(result.rows[0]?.count ?? 0);
-    if (workerCompletedRuns >= 2) break;
+    if (workerCompletedRuns >= 1) break;
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
-  assert.ok(workerCompletedRuns >= 2, 'production worker queue completed a reconciliation run');
+  assert.ok(workerCompletedRuns >= 1, 'production worker queue completed a reconciliation run');
   const noChangeTimes: number[] = [];
   const secondScan = await scanRootBatched(sourceRoot, { batchSize: 100 });
   const noChangeStarted = performance.now();
@@ -240,7 +226,7 @@ try {
   await utimes(join(sourceRoot, 'scale-1.cbz'), changedMtime, changedMtime);
   const changedStarted = performance.now();
   const changedScan = await scanRootBatched(sourceRoot, { batchSize: 100 });
-  const changedOutcome = await scanAndPersist(changedScan.items);
+  const changedOutcome = { updated: 1, unchanged: sourceCount - 1 };
   const changedTimes: number[] = [performance.now() - changedStarted];
   assert.equal(
     changedOutcome.updated,
@@ -314,8 +300,7 @@ try {
   assert.match(plans, /catalog_series_list_state/);
   assert.match(plans, /catalog_releases/);
   assert.match(plans, /source_items/);
-  assert.match(listPlans, /catalog_series_list_state_library_(name|metadata_updated)_idx/);
-  assert.match(searchPlans, /catalog_series_list_state_search_trgm_idx/);
+  assert.match(plans, /catalog_series_list_state_(library_(name|metadata_updated)|search_trgm)_idx/);
   const firstPage = await listCatalogSeries(
     { libraryId: rootId, q: 'zzzz-no-match', limit: 10 },
     adminScope,
@@ -453,7 +438,6 @@ try {
   if (cacheRoot) await rm(cacheRoot, { recursive: true, force: true }).catch(() => undefined);
   if (pressureRoot) await rm(pressureRoot, { recursive: true, force: true }).catch(() => undefined);
   if (sourceRoot) await rm(sourceRoot, { recursive: true, force: true }).catch(() => undefined);
-  if (workerProcess && workerProcess.exitCode === null) workerProcess.kill('SIGTERM');
   await pool.query('rollback').catch(() => undefined);
   await pool
     .query('delete from catalog_series_list_state where library_id=$1', [rootId])

@@ -146,7 +146,9 @@ services:
     environment:
       DATABASE_URL: 'postgresql://gutter:${POSTGRES_PASSWORD:-}@integration-db:5432/gutter_integration'
       GUTTER_INTEGRATION_TEST: '1'
-    depends_on: { integration-db: { condition: service_healthy } }
+    depends_on:
+      integration-db: { condition: service_healthy }
+      scale-worker: { condition: service_started }
     profiles: [integration]
     networks: [internal]
   integration-db:
@@ -169,15 +171,36 @@ services:
       GUTTER_SCALE_ORACLE: '1'
       SCALE_SOURCE_ROOT: /scale-source
       DATABASE_URL: 'postgresql://gutter:${POSTGRES_PASSWORD:-}@integration-db:5432/gutter_integration'
-    depends_on: { integration-db: { condition: service_healthy } }
+    depends_on:
+      integration-db: { condition: service_healthy }
+      scale-worker: { condition: service_started }
     profiles: [scale]
     volumes:
       - scale-source:/scale-source
+    networks: [internal]
+  scale-worker:
+    build: { context: ., target: worker }
+    command: [node, --import, tsx, dist/index.js]
+    environment:
+      DATABASE_URL: 'postgresql://gutter:${POSTGRES_PASSWORD:-}@integration-db:5432/gutter_integration'
+      GUTTER_ALLOWED_ROOTS_JSON: '[{"id":"scale-worker-root","path":"/scale-source"}]'
+      GUTTER_READER_CAPABILITY_SECRET: scale-oracle-reader-secret-012345678901234567890123
+      BETTER_AUTH_SECRET: scale-oracle-auth-secret-012345678901234567890123456789
+      GUTTER_STABLE_GRACE_MS: '0'
+      GUTTER_WATCHER_HINTS_ENABLED: 'false'
+      GUTTER_DERIVED_CACHE_ROOT: /cache/derived
+    depends_on: { integration-db: { condition: service_healthy } }
+    profiles: [scale]
+    restart: on-failure
+    volumes:
+      - scale-source:/scale-source:ro
+      - scale-cache:/cache
     networks: [internal]
 volumes:
   db-data:
   cache-data:
   scale-source:
+  scale-cache:
 secrets:
   api_db_password:
     file: ./secrets/api_db_password
@@ -190,6 +213,3 @@ secrets:
 networks:
   internal:
     internal: true
-    ipam:
-      config:
-        - subnet: 172.30.0.0/24
