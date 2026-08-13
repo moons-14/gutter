@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 
 const path = process.argv[2];
 assert.ok(path, 'usage: node tests/validate-scale-evidence.mjs evidence.json');
@@ -15,7 +16,9 @@ function validate(value, rule, path = '$', root = schema) {
     assert.ok(ok, `${path} type`);
   }
   if (rule.minimum !== undefined) assert.ok(value >= rule.minimum, `${path} minimum`);
+  if (rule.minLength !== undefined) assert.ok(typeof value === 'string' && value.length >= rule.minLength, `${path} minLength`);
   if (rule.pattern) assert.match(value, new RegExp(rule.pattern), `${path} pattern`);
+  if (rule.minItems !== undefined) assert.ok(Array.isArray(value) && value.length >= rule.minItems, `${path} minItems`);
   if (rule.required) for (const key of rule.required) assert.ok(Object.hasOwn(value, key), `${path}.${key} required`);
   if (rule.type === 'object' && rule.properties) {
     if (rule.additionalProperties === false) for (const key of Object.keys(value)) assert.ok(Object.hasOwn(rule.properties, key), `${path}.${key} unknown`);
@@ -36,6 +39,7 @@ assert.equal(report.dataset.sourceFixturePages, 1000);
 assert.equal(report.thresholds.readerCount, 5);
 assert.equal(report.thresholds.coldProducerCount, 1);
 assert.equal(report.worker.queueCompletedRuns, 3);
+assert.equal(new Set(['first', 'noChange', 'changed'].map((name) => report.worker.runs[name].pgBossJobId)).size, 3);
 for (const name of ['first', 'noChange', 'changed']) {
   const run = report.worker.runs[name];
   assert.equal(run.state, 'completed');
@@ -45,4 +49,6 @@ for (const name of ['first', 'noChange', 'changed']) {
 assert.equal(report.sparse.logicalBytes, 20 * 1024 ** 4);
 assert.ok(report.sparse.allocatedBlocks <= report.thresholds.sparseAllocatedBlocksMax);
 assert.match(report.baselineComparison.baselineSha256, /^[0-9a-f]{64}$/);
+const baselineBytes = await readFile(new URL('../docs/scale-oracle-baseline.json', import.meta.url));
+assert.equal(report.baselineComparison.baselineSha256, createHash('sha256').update(baselineBytes).digest('hex'));
 console.log('SCALE_EVIDENCE_SCHEMA_RESULT pass');

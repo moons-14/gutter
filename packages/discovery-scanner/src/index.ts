@@ -206,6 +206,7 @@ export async function inspectCbz(
       comicInfo: null,
       scanIssues: [],
       quarantinedReason: archiveErrorReason(error as Error),
+      source: expected ? { size: Number(expected.size), mtimeMs: Number(expected.mtimeNs) / 1_000_000 } : undefined,
     };
   }
   let initial: BigIntStats;
