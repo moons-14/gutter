@@ -1,0 +1,33 @@
+name: Release evidence
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+jobs:
+  release-evidence:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with: { node-version: 24.19.0, package-manager-cache: false }
+      - run: corepack enable && corepack prepare pnpm@11.20.0 --activate
+      - run: pnpm install --frozen-lockfile
+      - name: Execute release gates
+        env:
+          RELEASE_ARTIFACT_DIR: release-artifacts
+          RELEASE_IMAGE_REFS: docker.io/library/node:24.19.0-bookworm-slim@sha256:3638d9a6fe4030bd716be989438248074489337ba3275657f93595428be4fc03 docker.io/library/postgres:18.1@sha256:1090bc3a8ccfb0b55f78a494d76f8d603434f7e4553543d6e807bc7bd6bbd17f docker.io/library/caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
+        run: pnpm run:release-gates
+      - name: Validate final evidence
+        run: test -s release-evidence.json && node scripts/verify-release-gate.mjs final release-evidence.json
+      - if: always()
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4
+        with:
+          name: gutter-release-evidence
+          path: |
+            release-artifacts
+            release-evidence.json
+          if-no-files-found: error

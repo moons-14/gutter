@@ -81,7 +81,7 @@ assert.deepEqual(
   [...manifest.requiredImageNames].sort(),
   'image set is incomplete or mutable',
 );
-const actionWorkflow = await read('.github/workflows/ci.yml');
+const actionWorkflow = `${await read('.github/workflows/ci.yml')}\n${await read('.github/workflows/release.yml')}`;
 for (const ref of actionWorkflow.matchAll(/uses:\s*([^\s]+)/g))
   if (!/@[0-9a-f]{40}$/.test(ref[1]))
     throw new Error(`GitHub Action is not commit pinned: ${ref[1]}`);
