@@ -1,0 +1,16 @@
+{
+  "openapi": "3.1.0",
+  "info": { "title": "Gutter local public API", "version": "1.0.0", "description": "Selected versioned local-client surface; unlisted routes are internal." },
+  "servers": [{ "url": "/" }],
+  "security": [{ "bearerAuth": [] }],
+  "paths": {
+    "/api/v1/catalog": { "get": { "operationId": "listCatalog", "responses": { "200": { "description": "Catalog page" }, "400": { "$ref": "#/components/responses/BadRequest" } } } },
+    "/api/v1/search": { "get": { "operationId": "searchCatalog", "responses": { "200": { "description": "Search page" }, "400": { "$ref": "#/components/responses/BadRequest" } } } },
+    "/api/v1/page/{publicationId}/{ordinal}": { "get": { "operationId": "getPage", "responses": { "200": { "description": "Reader page" }, "404": { "$ref": "#/components/responses/NotFound" } } } },
+    "/api/v1/progress": { "get": { "operationId": "getProgress", "responses": { "200": { "description": "Progress state" }, "401": { "$ref": "#/components/responses/Unauthorized" } } }, "put": { "operationId": "putProgress", "responses": { "200": { "description": "Updated progress" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "409": { "description": "Revision conflict" } } } },
+    "/api/v1/favorites": { "get": { "operationId": "listFavorites", "responses": { "200": { "description": "Favorite page" }, "401": { "$ref": "#/components/responses/Unauthorized" } } }, "put": { "operationId": "setFavorite", "responses": { "200": { "description": "Updated favorite" }, "401": { "$ref": "#/components/responses/Unauthorized" } } } },
+    "/api/v1/ratings": { "put": { "operationId": "setRating", "responses": { "200": { "description": "Updated rating" }, "401": { "$ref": "#/components/responses/Unauthorized" } } } },
+    "/api/v1/collections": { "get": { "operationId": "listCollections", "responses": { "200": { "description": "Collection page" }, "401": { "$ref": "#/components/responses/Unauthorized" } } }, "post": { "operationId": "createCollection", "responses": { "201": { "description": "Created collection" }, "401": { "$ref": "#/components/responses/Unauthorized" } } } }
+  },
+  "components": { "securitySchemes": { "bearerAuth": { "type": "http", "scheme": "bearer", "bearerFormat": "gutter_pat" } }, "responses": { "BadRequest": { "description": "Invalid request" }, "Unauthorized": { "description": "Missing or revoked PAT" }, "NotFound": { "description": "Not found" } } }
+}

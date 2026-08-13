@@ -60,6 +60,7 @@ import {
   pool,
   putUserProgress,
   readerRootForRequestPath,
+  getReaderPublicationSession,
   setUserCollectionMembership,
   setUserTargetState,
   type LibraryAccessScope,
@@ -185,6 +186,16 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
     listAdminUsers,
   } = resolved;
   const app = new OpenAPIHono();
+  // Delegated public requests must retain the already-authenticated principal. A new Request
+  // object is required for the internal alias, so a private in-process map carries authority
+  // without trusting spoofable client headers.
+  const delegatedPrincipals = new WeakMap<Request, { id: string; role: string | null; patScope: string | null } | null>();
+  // Establish the request identifier before any public routing or validation can return an error.
+  app.use('*', async (c, next) => {
+    const requestId = c.req.header('x-request-id') ?? crypto.randomUUID();
+    c.header('x-request-id', requestId);
+    await next();
+  });
   app.get('/user-state/pats', async (c) => {
     const user = await authenticatedUser(c.req.raw);
     if (!user) return c.json({ error: 'authentication_required' as const }, 401);
@@ -219,46 +230,51 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
       '/api/v1/ratings': '/user-state/targets',
       '/api/v1/collections': '/user-state/collections',
     };
-    if (path === '/api/v1/openapi.json' || path.startsWith('/api/v1/page/')) return next();
+    if (path === '/api/v1/openapi.json') return next();
+    const authorization = c.req.header('authorization');
+    const principal = await requestPrincipal(c.req.raw);
+    if (path.startsWith('/api/v1/page/')) {
+      if (authorization ? !principal : !principal)
+        return c.json({ error: 'authentication_required', requestId: c.req.header('x-request-id') ?? '' }, 401);
+      const match = /^\/api\/v1\/page\/([1-9][0-9]*)\/([0-9]+)$/.exec(path);
+      if (!match || Number(match[2]) > 1000000)
+        return c.json({ error: 'not_found', requestId: c.req.header('x-request-id') ?? '' }, 404);
+      const publication = await getReaderPublicationSession(match[1], principal!.id);
+      if (!publication || !publication.release.validOrdinals.includes(Number(match[2])))
+        return c.json({ error: 'not_found', requestId: c.req.header('x-request-id') ?? '' }, 404);
+      const url = new URL(c.req.url);
+      url.pathname = `/api/reader/releases/${publication.releaseId}/pages/${match[2]}`;
+      const delegated = new Request(url, c.req.raw);
+      delegatedPrincipals.set(delegated, principal);
+      return app.fetch(delegated);
+    }
     const target = aliases[path];
     if (!target)
       return c.json({ error: 'not_found', requestId: c.req.header('x-request-id') ?? '' }, 404);
-    const authorization = c.req.header('authorization');
-    const pat = await authenticatePublicApiToken(authorization?.replace(/^Bearer\s+/i, ''));
-    if (authorization ? !pat : !(await authenticatedUser(c.req.raw)))
+    if (!principal)
       return c.json(
         { error: 'authentication_required', requestId: c.req.header('x-request-id') ?? '' },
         401,
       );
     const url = new URL(c.req.url);
     url.pathname = target;
-    return app.fetch(new Request(url, c.req.raw));
+    const delegated = new Request(url, c.req.raw);
+    delegatedPrincipals.set(delegated, principal);
+    return app.fetch(delegated);
   });
   app.get('/api/v1/openapi.json', async (c) => {
-    const document = await readFile(
-      new URL('../../../docs/openapi-v1.yaml', import.meta.url),
-      'utf8',
-    );
-    c.header('content-type', 'text/yaml; charset=utf-8');
+    const document = await readFile(resolve(process.cwd(), 'docs/openapi-v1.json'), 'utf8');
+    c.header('content-type', 'application/json; charset=utf-8');
     return c.body(document, 200);
   });
   const readerKey = resolved.readerCapabilityKey || null;
 
   app.use('*', async (c, next) => {
-    const requestId = c.req.header('x-request-id') ?? crypto.randomUUID();
-    c.header('x-request-id', requestId);
+    const requestId = c.req.header('x-request-id')!;
     const started = performance.now();
     await next();
-    log.info(
-      {
-        requestId,
-        method: c.req.method,
-        path: c.req.path,
-        status: c.res.status,
-        durationMs: performance.now() - started,
-      },
-      'request',
-    );
+    log.info({ requestId, method: c.req.method, path: c.req.path, status: c.res.status,
+      durationMs: performance.now() - started }, 'request');
   });
   app.openapi(adminUsersRoute, async (c) => {
     const actor = await authenticatedUser(c.req.raw);
@@ -319,7 +335,7 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
   app.all('/api/auth/*', (c) => authHandler(c.req.raw));
   app.all('/api/reader/*', async (c) => {
     if (!['GET', 'HEAD'].includes(c.req.method)) return c.body(null, 404);
-    const user = await authenticatedUser(c.req.raw);
+    const user = await requestPrincipal(c.req.raw);
     if (!user) return c.json({ error: 'not_found' }, 404);
     const scope = await libraryAccessScope(user.id);
     const pathname = new URL(c.req.url).pathname;
@@ -367,6 +383,8 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
   // Bearer PAT is authoritative whenever present. Never fall back to a browser session when a
   // PAT was supplied: doing so would permit a confused-deputy cross-user request.
   const requestPrincipal = async (request: Request) => {
+    const delegated = delegatedPrincipals.get(request);
+    if (delegated !== undefined) return delegated;
     const authorization = request.headers.get('authorization');
     if (authorization?.trim()) {
       const pat = await authenticatePublicApiToken(authorization.replace(/^Bearer\s+/i, ''));
@@ -774,7 +792,7 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
   });
   const requestAccess = new WeakMap<Request, LibraryAccessScope>();
   app.use('/catalog/*', async (c, next) => {
-    const user = await authenticatedUser(c.req.raw);
+    const user = await requestPrincipal(c.req.raw);
     if (!user) return c.json({ error: 'authentication_required' }, 401);
     requestAccess.set(c.req.raw, await libraryAccessScope(user.id));
     await next();

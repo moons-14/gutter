@@ -6,6 +6,9 @@ RUN pnpm install --frozen-lockfile && pnpm build
 
 FROM build AS api-deploy
 RUN pnpm --filter @gutter/api --prod deploy /out
+RUN mkdir -p /out/docs
+COPY docs/openapi-v1.yaml /out/docs/openapi-v1.yaml
+COPY docs/openapi-v1.json /out/docs/openapi-v1.json
 
 FROM build AS worker-deploy
 RUN pnpm --filter @gutter/worker --prod deploy /out
