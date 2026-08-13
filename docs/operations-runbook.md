@@ -79,8 +79,11 @@ process defaults. States/triggers are allow-listed; no user, root path, source p
 email, request payload, host path, or secret is a label. Queue lag is the age of the oldest queued
 request; scan state is bounded to running/completed/failed/cancelled. Alert on readiness failure,
 queue lag above the local SLO, failed scans, and database size approaching the database volume
-limit. The worker's `scan status` and `cache.ts status` are the authoritative detailed operator
-views for scan and cache state; cache status reports filesystem bytes/quota and advisory counters.
+limit. The cache-owning worker exposes internal-only `:9090/health`, `:9090/ready`, and
+`:9090/metrics` endpoints (`expose`, never a published port). Its bounded metrics report cache
+used/quota/free bytes and scan requests by allow-listed state. The worker's `scan status` and
+`cache.ts status` remain the detailed operator views; cache status reports filesystem bytes/quota
+and advisory counters.
 
 Logs are structured and redact authorization, cookies, passwords, tokens, and secrets. Do not add
 source paths, host paths, email addresses, archive contents, or request bodies to logs or metrics.
@@ -92,17 +95,17 @@ by deleting audit rows.
 
 ## Incident diagnostics
 
-* **NAS unavailable:** do not mark sources deleted or delete projections. Check host mount and
+- **NAS unavailable:** do not mark sources deleted or delete projections. Check host mount and
   `scan status`; the root should become `unavailable`. Restore NAS connectivity, verify the mount
   is read-only, then enqueue a root reconciliation.
-* **Corrupt archive:** preserve the source and inspect the bounded scan error code. Replace the
+- **Corrupt archive:** preserve the source and inspect the bounded scan error code. Replace the
   source externally, then enqueue a new scan; never quarantine by writing into the library.
-* **Stuck jobs:** inspect queue lag, `scan status`, and worker logs for bounded error codes. Cancel
+- **Stuck jobs:** inspect queue lag, `scan status`, and worker logs for bounded error codes. Cancel
   only the request/run ID, then enqueue one bounded retry after confirming the source and DB are up.
-* **Database exhaustion:** stop workers first, capture `pg_database_size` and PostgreSQL logs,
+- **Database exhaustion:** stop workers first, capture `pg_database_size` and PostgreSQL logs,
   ensure backups are current, expand storage, and restart through `migrate`; do not delete audit,
   tombstone, ACL, or user-state rows as an emergency shortcut.
-* **Full cache disk:** stop the worker or run its bounded cache GC, inspect `cache.ts status`,
+- **Full cache disk:** stop the worker or run its bounded cache GC, inspect `cache.ts status`,
   and expand/replace the disposable cache volume. Never delete source files or database data to
   make cache space. A completely empty cache is safe; the next read regenerates it.
 

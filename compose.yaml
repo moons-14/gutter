@@ -65,6 +65,7 @@ services:
       GUTTER_DERIVED_CACHE_QUOTA_BYTES: '10737418240'
     depends_on: { migrate: { condition: service_completed_successfully } }
     volumes: [cache-data:/cache]
+    expose: ['9090']
     networks: [internal]
     secrets: [worker_db_password, reader_capability_secret]
   web:
