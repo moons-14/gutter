@@ -110,5 +110,9 @@ by deleting audit rows.
   make cache space. A completely empty cache is safe; the next read regenerates it.
 
 Run `node scripts/verify-operations.mjs` in CI to ensure this contract and metric names remain
-present. The focused API typecheck and unit suite are the minimum pre-release checks; the isolated
-Compose restore/rebuild drill above is required before declaring an operational release.
+present. A synthetic, guarded oracle is available as `scripts/compose-restore-drill.sh`; it uses
+only uniquely named projects, fresh volumes, generated test secrets, and a temporary source
+fixture, and prints the durable-row count and source checksum. Run it in a Docker-enabled CI lane
+before declaring an operational release. The focused API typecheck and unit suite are the minimum
+pre-release checks; the isolated Compose restore/rebuild drill above is required before declaring
+an operational release.

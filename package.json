@@ -13,7 +13,7 @@
     "check": "prettier --check .",
     "lint": "turbo run lint",
     "typecheck": "turbo run typecheck",
-    "unit": "tsx --test tests/unit.mjs tests/page-validation.mts tests/reader-stream.mts tests/reader-http.mts tests/derived-cache.test.mts tests/metadata-provider.mts tests/pwa-icons.mjs tests/user-state-api.mts && pnpm --filter @gutter/web test:ui",
+    "unit": "tsx --test tests/unit.mjs tests/page-validation.mts tests/reader-stream.mts tests/reader-http.mts tests/derived-cache.test.mts tests/metadata-provider.mts tests/pwa-icons.mjs tests/user-state-api.mts && corepack pnpm --filter @gutter/web test:ui",
     "integration:library-roots": "pnpm --filter @gutter/db exec tsx ../../tests/integration/library-roots.mts",
     "integration:page-validation": "pnpm --filter @gutter/db exec tsx ../../tests/integration/page-validation.mts",
     "integration:reconciliation": "pnpm --filter @gutter/db exec tsx ../../tests/integration/reconciliation.mts",
