@@ -42,6 +42,8 @@ const keys = new Set([
   'maxItems',
   'format',
   'additionalProperties',
+  'minProperties',
+  'maxProperties',
   'pattern',
 ]);
 const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -71,7 +73,7 @@ const compareSchema = (beforeRaw, afterRaw, path) => {
     const match = (after.anyOf ?? []).find((value) =>
       branch.$ref && value.$ref
         ? branch.$ref === value.$ref
-        : equal(deref(base, value), deref(base, branch)),
+        : equal(deref(candidate, value), deref(base, branch)),
     );
     compareSchema(branch, match, `${path}.anyOf`);
   }
@@ -79,7 +81,7 @@ const compareSchema = (beforeRaw, afterRaw, path) => {
     const match = (after.oneOf ?? []).find((value) =>
       branch.$ref && value.$ref
         ? branch.$ref === value.$ref
-        : equal(deref(base, value), deref(base, branch)),
+        : equal(deref(candidate, value), deref(base, branch)),
     );
     compareSchema(branch, match, `${path}.oneOf`);
   }
@@ -116,22 +118,32 @@ const compareOperation = (before, after, path) => {
   }
   if (before.requestBody) {
     if (!after.requestBody) failures.push(`removed request body ${path}`);
-    else
+    else {
+      if (deref(base, before.requestBody).required && !deref(candidate, after.requestBody).required)
+        failures.push(`request body became optional ${path}`);
       compareContent(
         deref(base, before.requestBody).content,
         deref(candidate, after.requestBody).content,
         `${path} request body`,
       );
+    }
   }
   for (const [status, response] of Object.entries(before.responses ?? {})) {
     const candidateResponse = after.responses?.[status];
     if (!candidateResponse) failures.push(`removed response ${path} ${status}`);
-    else
+    else {
       compareContent(
         deref(base, response).content,
         deref(candidate, candidateResponse).content,
         `${path} response ${status}`,
       );
+      for (const [name, header] of Object.entries(deref(base, response).headers ?? {})) {
+        const candidateHeader = deref(candidate, candidateResponse).headers?.[name];
+        if (!candidateHeader) failures.push(`removed response header ${path} ${status} ${name}`);
+        else if (header.required && !candidateHeader.required)
+          failures.push(`response header became optional ${path} ${status} ${name}`);
+      }
+    }
   }
 };
 for (const [path, item] of Object.entries(base.paths ?? {}))

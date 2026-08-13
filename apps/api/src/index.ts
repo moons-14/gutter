@@ -418,6 +418,12 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
           headers: new Headers({ 'content-type': 'application/json; charset=utf-8' }),
         });
       }
+      if ((response.status === 200 || response.status === 206) && !response.body) {
+        return new Response(JSON.stringify({ error: 'reader_unavailable', requestId }), {
+          status: 503,
+          headers: new Headers({ 'content-type': 'application/json; charset=utf-8' }),
+        });
+      }
       return response;
     }
     if (!response.headers.get('content-type')?.includes('application/json')) return response;
@@ -672,9 +678,7 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
     const allowedQuery =
       path === '/api/v1/search'
         ? new Set(['q', 'limit', 'cursor'])
-        : path === '/api/v1/catalog' ||
-            path === '/api/v1/favorites' ||
-            path === '/api/v1/collections'
+        : path === '/api/v1/catalog'
           ? new Set(['q', 'limit', 'cursor'])
           : path === '/api/v1/progress' && method === 'GET'
             ? new Set(['progressKey'])
@@ -682,8 +686,12 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
     if (params.some(([key]) => !allowedQuery.has(key))) return publicError(c, 'invalid_query', 400);
     if (
       path === '/api/v1/search' &&
-      (!url.searchParams.get('q') || url.searchParams.get('q')!.trim().length < 1)
+      (!url.searchParams.get('q') ||
+        url.searchParams.get('q')!.trim().length < 1 ||
+        url.searchParams.get('q')!.length > 256)
     )
+      return publicError(c, 'invalid_query', 400);
+    if (path === '/api/v1/catalog' && url.searchParams.get('q')?.length! > 256)
       return publicError(c, 'invalid_query', 400);
     const limit = url.searchParams.get('limit');
     if (limit !== null && (!/^[0-9]+$/.test(limit) || Number(limit) < 1 || Number(limit) > 100))
@@ -742,6 +750,7 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
               ['progressKey', 'expectedRevision', 'pageOrdinal', 'completed'].includes(key),
             ) ||
             typeof parsed.progressKey !== 'string' ||
+            !/^source:[A-Za-z0-9_-]{1,128}$/.test(parsed.progressKey) ||
             !Number.isSafeInteger(parsed.expectedRevision) ||
             (parsed.expectedRevision as number) < 0 ||
             !Number.isSafeInteger(parsed.pageOrdinal) ||
@@ -766,7 +775,10 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
           if (
             !Object.keys(parsed).every((key) => allowed.includes(key)) ||
             typeof parsed.targetKind !== 'string' ||
-            typeof parsed.targetId !== 'string'
+            typeof parsed.targetId !== 'string' ||
+            (parsed.targetKind === 'series' && !/^[0-9a-f]{64}$/.test(parsed.targetId)) ||
+            (parsed.targetKind === 'publication' &&
+              !/^[0-9a-f]{64}:[0-9a-f]{64}$/.test(parsed.targetId))
           )
             return publicError(c, 'invalid_request', 400);
           if (path === '/api/v1/favorites' && typeof parsed.favorite !== 'boolean')
@@ -824,7 +836,7 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
       .catch((error) => {
         if (error instanceof Error && error.message === 'public_timeout')
           return publicError(c, 'timeout', 504);
-        throw error;
+        return publicError(c, 'reader_unavailable', 503);
       });
   });
   app.get('/api/v1/openapi.json', async (c) => {
