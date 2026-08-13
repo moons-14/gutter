@@ -1,12 +1,12 @@
 import { createHash } from 'node:crypto';
-import { readFile, writeFile, readdir } from 'node:fs/promises';
+import { lstat, readFile, writeFile, readdir } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { relative, resolve } from 'node:path';
 
 const [resultsPath, outputPath] = process.argv.slice(2);
 if (!resultsPath || !outputPath)
   throw new Error('usage: generate-release-evidence.mjs RESULTS.tsv OUTPUT.json');
-const root = resolve(new URL('..', import.meta.url).pathname);
+const root = resolve(process.env.RELEASE_GATE_ROOT ?? new URL('..', import.meta.url).pathname);
 const manifest = JSON.parse(
   await readFile(resolve(root, 'docs/release-gate-manifest.json'), 'utf8'),
 );
@@ -17,6 +17,13 @@ const safeRepoPath = (value) => {
     throw new Error(`unsafe evidence path: ${value}`);
   return candidate;
 };
+const safeRunnerLogPath = (value, gateId) => {
+  if (value.startsWith('/')) throw new Error(`unsafe runner log path: ${value}`);
+  const candidate = safeRepoPath(value);
+  if (candidate !== `release-artifacts/${gateId}.log`)
+    throw new Error(`unsafe runner log path: ${value}`);
+  return candidate;
+};
 const lines = (await readFile(resolve(root, resultsPath), 'utf8'))
   .trim()
   .split('\n')
@@ -24,6 +31,7 @@ const lines = (await readFile(resolve(root, resultsPath), 'utf8'))
 const results = new Map(
   lines.map((line) => {
     const [id, command, commandHash, status, log, logHash] = line.split('\t');
+    if (!/^(0|[1-9][0-9]*)$/.test(status)) throw new Error(`malformed runner status: ${id}`);
     return [id, { id, command, commandHash, status: Number(status), log, logHash }];
   }),
 );
@@ -41,6 +49,12 @@ for (const result of results.values()) {
     result.log.split('/').includes('..')
   )
     throw new Error(`unsafe runner log path: ${result.id}`);
+  const logPath = resolve(root, result.log);
+  const logStat = await lstat(logPath);
+  if (!logStat.isFile() || logStat.isSymbolicLink())
+    throw new Error(`unsafe runner log path: ${result.id}`);
+  if (sha(await readFile(logPath)) !== result.logHash)
+    throw new Error(`runner log hash mismatch: ${result.id}`);
 }
 if (lines.some((line) => line.split('\t').length !== 6))
   throw new Error('malformed runner TSV field count');
@@ -68,7 +82,7 @@ const gates = [...results.values()].map((result) => ({
   commandHash: result.commandHash,
   artifacts: [
     {
-      path: safeRepoPath(result.log),
+      path: safeRunnerLogPath(result.log, result.id),
       role: result.id === 'nas-source' ? 'nas-evidence' : 'runner-log',
       gate: result.id,
       sha256: result.logHash,
