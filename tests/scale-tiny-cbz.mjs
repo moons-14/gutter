@@ -57,8 +57,9 @@ try {
   const { validateSourceItem } = await import('../packages/page-validator/src/index.ts');
   async function validateWithRetry(item) {
     for (let attempt = 0; ; attempt++) {
-      try { return await validateSourceItem(root, item); }
-      catch (error) {
+      try {
+        return await validateSourceItem(root, item);
+      } catch (error) {
         if (error?.message !== 'archive_unavailable' || attempt >= 3) throw error;
         await new Promise((resolve) => setTimeout(resolve, 25 * (attempt + 1)));
       }

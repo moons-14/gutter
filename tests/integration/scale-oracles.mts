@@ -69,7 +69,11 @@ const thresholds = {
 };
 const baseline = JSON.parse(
   await readFile(new URL('../../docs/scale-oracle-baseline.json', import.meta.url), 'utf8'),
-) as { schemaVersion: string; portable: Record<string, number>; advisoryHardware: Record<string, number> };
+) as {
+  schemaVersion: string;
+  portable: Record<string, number>;
+  advisoryHardware: Record<string, number>;
+};
 assert.equal(baseline.schemaVersion, 'gutter.scale-oracle.v1');
 assert.equal(baseline.portable.sourceFixtureBooks, 1_000);
 assert.equal(baseline.portable.sourceFixturePages, 1_000);
@@ -113,10 +117,27 @@ async function cacheUsage(root: string): Promise<{ entries: number; bytes: numbe
 }
 
 function validateEvidence(report: Record<string, unknown>) {
-  const required = ['schemaVersion', 'status', 'unavailablePlatformReason', 'seed', 'runId', 'dataset', 'thresholds', 'environment', 'timingsMs', 'plans', 'cache', 'worker', 'sparse', 'baselineComparison'];
+  const required = [
+    'schemaVersion',
+    'status',
+    'unavailablePlatformReason',
+    'seed',
+    'runId',
+    'dataset',
+    'thresholds',
+    'environment',
+    'timingsMs',
+    'plans',
+    'cache',
+    'worker',
+    'sparse',
+    'baselineComparison',
+  ];
   for (const key of required) assert.ok(Object.hasOwn(report, key), `evidence requires ${key}`);
   assert.equal(report.schemaVersion, 'gutter.scale-oracle.v1');
-  assert.ok(report.status === 'pass' || report.status === 'fail' || report.status === 'unavailable');
+  assert.ok(
+    report.status === 'pass' || report.status === 'fail' || report.status === 'unavailable',
+  );
   assert.equal(typeof report.seed, 'string');
   assert.equal(typeof report.runId, 'string');
   const worker = report.worker as { runs?: Record<string, any>; queueCompletedRuns?: unknown };
@@ -302,8 +323,14 @@ try {
   assert.equal(workerRun?.state, 'completed', 'production worker queue completed the request');
   assert.equal(workerRun?.summary?.updated, sourceCount);
   await assertQueueLink(workerRun!);
-  const firstObserved = await pool.query<{ relative_path: string; manifest_sha256: string; mtime_ms: string; size_bytes: string }>(
-    'select relative_path,manifest_sha256,mtime_ms::text,size_bytes::text from source_items where root_id=$1 order by relative_path', [scanRootId],
+  const firstObserved = await pool.query<{
+    relative_path: string;
+    manifest_sha256: string;
+    mtime_ms: string;
+    size_bytes: string;
+  }>(
+    'select relative_path,manifest_sha256,mtime_ms::text,size_bytes::text from source_items where root_id=$1 order by relative_path',
+    [scanRootId],
   );
   const firstCounts = firstObserved.rows.length;
   const persisted = await pool.query<{ books: string; pages: string }>(
@@ -330,9 +357,16 @@ try {
   assert.equal(secondRun?.state, 'completed');
   assert.equal(secondRun?.summary?.unchanged, sourceCount);
   await assertQueueLink(secondRun!);
-  const noChangeObserved = await pool.query('select relative_path,manifest_sha256,mtime_ms::text,size_bytes::text from source_items where root_id=$1 order by relative_path', [scanRootId]);
+  const noChangeObserved = await pool.query(
+    'select relative_path,manifest_sha256,mtime_ms::text,size_bytes::text from source_items where root_id=$1 order by relative_path',
+    [scanRootId],
+  );
   assert.equal(noChangeObserved.rows.length, firstCounts);
-  assert.deepEqual(noChangeObserved.rows, firstObserved.rows, 'no-change scan preserves observations');
+  assert.deepEqual(
+    noChangeObserved.rows,
+    firstObserved.rows,
+    'no-change scan preserves observations',
+  );
   const changedMtime = new Date(Date.now() - 2_000);
   await writeFile(
     join(sourceRoot, 'scale-1.cbz'),
@@ -361,9 +395,14 @@ try {
   assert.equal(changedRun?.state, 'completed');
   assert.equal(changedRun?.summary?.updated, 1);
   await assertQueueLink(changedRun!);
-  const changedObserved = await pool.query('select relative_path,manifest_sha256,mtime_ms::text,size_bytes::text from source_items where root_id=$1 order by relative_path', [scanRootId]);
+  const changedObserved = await pool.query(
+    'select relative_path,manifest_sha256,mtime_ms::text,size_bytes::text from source_items where root_id=$1 order by relative_path',
+    [scanRootId],
+  );
   assert.equal(changedObserved.rows.length, firstCounts);
-  const changedRows = changedObserved.rows.filter((row, index) => JSON.stringify(row) !== JSON.stringify(firstObserved.rows[index]));
+  const changedRows = changedObserved.rows.filter(
+    (row, index) => JSON.stringify(row) !== JSON.stringify(firstObserved.rows[index]),
+  );
   assert.equal(changedRows.length, 1, 'changed scan mutates exactly one persisted observation');
   assert.notEqual(firstRequest.id, secondRequest.id);
   assert.notEqual(secondRequest.id, changedRequest.id);
@@ -453,8 +492,14 @@ try {
       .sort((a, b) => a - b),
     'production list ordering is stable',
   );
-  const pageTwo = await listCatalogSeries({ libraryId: rootId, limit: 10, cursor: pageOne.nextCursor! }, adminScope);
-  assert.ok(pageTwo.items.every((item) => !pageOne.items.some((other) => other.id === item.id)), 'cursor pages do not overlap');
+  const pageTwo = await listCatalogSeries(
+    { libraryId: rootId, limit: 10, cursor: pageOne.nextCursor! },
+    adminScope,
+  );
+  assert.ok(
+    pageTwo.items.every((item) => !pageOne.items.some((other) => other.id === item.id)),
+    'cursor pages do not overlap',
+  );
 
   const listTimes: number[] = [];
   const searchTimes: number[] = [];
@@ -462,7 +507,10 @@ try {
     listTimes.push((await timedQuery(productionQuery.text, productionQuery.values)).elapsedMs);
     searchTimes.push((await timedQuery(searchQuery.text, searchQuery.values)).elapsedMs);
   }
-  cacheRoot = join(process.env.GUTTER_DERIVED_CACHE_ROOT ?? (await mkdtemp(join(tmpdir(), 'gutter-scale-cache-'))), runId);
+  cacheRoot = join(
+    process.env.GUTTER_DERIVED_CACHE_ROOT ?? (await mkdtemp(join(tmpdir(), 'gutter-scale-cache-'))),
+    runId,
+  );
   await mkdir(cacheRoot, { recursive: true });
   const cache = new DerivedCache({ root: cacheRoot, quotaBytes: 5 * 1024, maxQueue: 8 });
   const descriptor = (n: number) => ({
@@ -513,7 +561,10 @@ try {
   await stat(pressurePath(2));
   await stat(pressurePath(3));
   const pressureAfter = await cacheUsage(pressureRoot);
-  assert.ok(pressureAfter.entries < pressureBefore.entries, 'GC reclaimed an evictable cache entry');
+  assert.ok(
+    pressureAfter.entries < pressureBefore.entries,
+    'GC reclaimed an evictable cache entry',
+  );
   const reclaimedBytes = pressureBefore.bytes - pressureAfter.bytes;
   assert.ok(reclaimedBytes > 0, 'GC reclaimed measured bytes');
   protectedEntry.release();
@@ -572,7 +623,9 @@ try {
     },
     worker: {
       runs: { first: workerRun, noChange: secondRun, changed: changedRun },
-      queueCompletedRuns: [workerRun, secondRun, changedRun].filter((run) => run?.state === 'completed').length,
+      queueCompletedRuns: [workerRun, secondRun, changedRun].filter(
+        (run) => run?.state === 'completed',
+      ).length,
     },
     sparse: { logicalBytes: sparse.size, allocatedBlocks: sparse.blocks },
     baselineComparison: {
@@ -581,7 +634,8 @@ try {
       portable:
         books === (full ? baseline.portable.fullBooks : baseline.portable.defaultBooks) &&
         pagesPerBook === (full ? baseline.portable.fullPagesPerBook : 10) &&
-        books * pagesPerBook === (full ? baseline.portable.fullPages : baseline.portable.defaultPages) &&
+        books * pagesPerBook ===
+          (full ? baseline.portable.fullPages : baseline.portable.defaultPages) &&
         producers === baseline.portable.coldProducerCount &&
         Number(sparse.blocks) <= baseline.portable.sparseAllocatedBlocksMax
           ? 'pass'

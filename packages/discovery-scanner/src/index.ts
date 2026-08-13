@@ -206,7 +206,9 @@ export async function inspectCbz(
       comicInfo: null,
       scanIssues: [],
       quarantinedReason: archiveErrorReason(error as Error),
-      source: expected ? { size: Number(expected.size), mtimeMs: Number(expected.mtimeNs) / 1_000_000 } : undefined,
+      source: expected
+        ? { size: Number(expected.size), mtimeMs: Number(expected.mtimeNs) / 1_000_000 }
+        : undefined,
     };
   }
   let initial: BigIntStats;
@@ -227,7 +229,9 @@ export async function inspectCbz(
       comicInfo: null,
       scanIssues: [],
       quarantinedReason: 'malformed_archive',
-      source: expected ? { size: Number(expected.size), mtimeMs: Number(expected.mtimeNs) / 1_000_000 } : undefined,
+      source: expected
+        ? { size: Number(expected.size), mtimeMs: Number(expected.mtimeNs) / 1_000_000 }
+        : undefined,
     };
   }
   if (!initial.isFile() || (expected && !sameObservation(expected, observation(initial)))) {

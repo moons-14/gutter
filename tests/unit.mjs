@@ -311,7 +311,9 @@ test('missing/nontransient outer open never crashes scan and preserves other fil
   assert.equal(scanned.summary.discovered, 1);
   assert.equal(scanned.items[0]?.relativePath, 'good.cbz');
   const missing = await inspectCbz(join(directory, 'eloop-race.cbz'));
-  assert.ok(missing.deferredReason === 'unstable' || missing.quarantinedReason === 'malformed_archive');
+  assert.ok(
+    missing.deferredReason === 'unstable' || missing.quarantinedReason === 'malformed_archive',
+  );
   assert.deepEqual(missing.pages, []);
 });
 
