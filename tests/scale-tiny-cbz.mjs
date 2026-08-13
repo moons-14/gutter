@@ -8,7 +8,7 @@ import { crc32 } from 'node:zlib';
 const count = Number(process.env.SCALE_TINY_CBZ_COUNT ?? 10_000);
 if (process.env.SCALE_TINY_CBZ !== '1')
   throw new Error('tiny CBZ benchmark requires SCALE_TINY_CBZ=1');
-assert.ok(Number.isInteger(count) && count >= 1 && count <= 10_000);
+assert.equal(count, 10_000, 'named tiny-CBZ benchmark always proves exactly 10,000 archives');
 const root = await mkdtemp(join(tmpdir(), 'gutter-tiny-cbz-'));
 const body = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
@@ -55,7 +55,14 @@ try {
   assert.equal(scanned.summary.pages, count);
   assert.equal(scanned.summary.quarantined, 0);
   const { validateSourceItem } = await import('../packages/page-validator/src/index.ts');
-  assert.equal((await validateSourceItem(root, scanned.items[0])).validCount, 1);
+  for (let offset = 0; offset < scanned.items.length; offset += 32) {
+    const batch = scanned.items.slice(offset, offset + 32);
+    const results = await Promise.all(batch.map((item) => validateSourceItem(root, item)));
+    assert.equal(
+      results.reduce((sum, result) => sum + result.validCount, 0),
+      batch.length,
+    );
+  }
   const bytesPerFile = 30 + 5 + body.length + 46 + 5 + 22;
   console.log(
     `TINY_CBZ_RESULT ${JSON.stringify({ count, bytesPerFile, discovered: scanned.summary.discovered, pages: scanned.summary.pages, elapsedMs: performance.now() - started })}`,

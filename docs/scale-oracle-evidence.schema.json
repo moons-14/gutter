@@ -5,11 +5,17 @@
   "required": [
     "schemaVersion",
     "status",
+    "unavailablePlatformReason",
     "seed",
+    "runId",
     "dataset",
     "thresholds",
     "environment",
     "timingsMs",
+    "plans",
+    "cache",
+    "worker",
+    "sparse",
     "baselineComparison"
   ],
   "properties": {
@@ -17,6 +23,7 @@
     "status": { "enum": ["pass", "fail", "unavailable"] },
     "unavailablePlatformReason": { "type": ["string", "null"] },
     "seed": { "type": "string", "minLength": 1 },
+    "runId": { "type": "string", "minLength": 8 },
     "dataset": {
       "type": "object",
       "required": ["books", "pages", "sourceFixtureBooks", "sourceFixturePages"],
@@ -31,7 +38,24 @@
     "thresholds": { "type": "object", "additionalProperties": { "type": "number" } },
     "environment": { "type": "object" },
     "timingsMs": { "type": "object" },
+    "plans": { "type": "object" },
+    "cache": { "type": "object" },
+    "worker": {
+      "type": "object",
+      "required": ["queueCompletedRuns"],
+      "properties": { "queueCompletedRuns": { "type": "integer", "minimum": 1 } },
+      "additionalProperties": false
+    },
+    "sparse": {
+      "type": "object",
+      "required": ["logicalBytes", "allocatedBlocks"],
+      "properties": {
+        "logicalBytes": { "type": "integer", "minimum": 1 },
+        "allocatedBlocks": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
     "baselineComparison": { "type": "object" }
   },
-  "additionalProperties": true
+  "additionalProperties": false
 }

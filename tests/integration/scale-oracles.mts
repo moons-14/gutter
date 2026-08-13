@@ -1,6 +1,17 @@
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdtemp, stat, truncate, rm, writeFile, lstat, utimes } from 'node:fs/promises';
+import {
+  mkdir,
+  mkdtemp,
+  stat,
+  truncate,
+  rm,
+  writeFile,
+  lstat,
+  utimes,
+  readFile,
+  readdir,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -41,7 +52,7 @@ const pagesPerBook = Number(process.env.SCALE_PAGES_PER_BOOK ?? (full ? 20 : 10)
 assert.ok(Number.isInteger(books) && books >= 1 && books <= 100_000);
 assert.ok(Number.isInteger(pagesPerBook) && pagesPerBook >= 1 && pagesPerBook <= 100);
 const rootId = `scale-${createHash('sha256').update(`${seed}:${runId}:${books}:${pagesPerBook}`).digest('hex').slice(0, 24)}`;
-const scanRootId = 'scale-worker-root';
+const scanRootId = process.env.SCALE_ROOT_ID ?? `scale-worker-root-${runId}`;
 const identity = (n: number) => createHash('sha256').update(`${seed}:${n}`).digest('hex');
 const thresholds = {
   sourceFixtureBooks: 1_000,
@@ -53,12 +64,29 @@ const thresholds = {
   advisorySearchP95Ms: 1_000,
   advisoryScanP95Ms: 30_000,
 };
+const baseline = JSON.parse(
+  await readFile(new URL('../../docs/scale-oracle-baseline.json', import.meta.url), 'utf8'),
+) as { portable: Record<string, number> };
+assert.equal(baseline.portable.defaultBooks, 1_000);
+assert.equal(baseline.portable.defaultPages, 10_000);
+assert.equal(baseline.portable.coldProducerCount, 1);
 const samples = (values: number[]) => {
   const sorted = [...values].sort((a, b) => a - b);
   const percentile = (p: number) =>
     sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))] ?? 0;
   return { p50: percentile(0.5), p95: percentile(0.95), count: sorted.length };
 };
+async function cacheEntryCount(root: string): Promise<number> {
+  let count = 0;
+  for (const entry of await readdir(root, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const children = await readdir(join(root, entry.name), { withFileTypes: true }).catch(() => []);
+    count += children.some((child) => child.isFile() && child.name === 'body')
+      ? 1
+      : await cacheEntryCount(join(root, entry.name));
+  }
+  return count;
+}
 
 async function timedQuery(text: string, values: unknown[] = []) {
   const started = performance.now();
@@ -101,7 +129,8 @@ let sourceRoot: string | undefined;
 try {
   await migrateSchema();
   const sourceBase = process.env.SCALE_SOURCE_ROOT ?? tmpdir();
-  sourceRoot = await mkdtemp(join(sourceBase, 'gutter-scale-source-'));
+  sourceRoot = sourceBase;
+  await mkdir(sourceRoot, { recursive: true });
   const sourcePayload = Buffer.from(
     'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
     'base64',
@@ -113,13 +142,14 @@ try {
   await pool.query(
     `insert into library_roots(id,configured_path,canonical_path,state,checked_at,config_generation,active)
      values($1,$3,$3,'ready_empty',now(),$4,true),
-            ($2,$3,$3,'ready_empty',now(),$4,true)`,
+            ($2,$3,$3,'ready_empty',now(),$4,true)
+     on conflict (id) do update set configured_path=excluded.configured_path,canonical_path=excluded.canonical_path,active=true,state='ready_empty'`,
     [rootId, scanRootId, sourceRoot, identity(0)],
   );
-  await pool.query('insert into catalog_libraries(id,display_name) values($1,$1),($2,$2)', [
-    rootId,
-    scanRootId,
-  ]);
+  await pool.query(
+    'insert into catalog_libraries(id,display_name) values($1,$1),($2,$2) on conflict (id) do nothing',
+    [rootId, scanRootId],
+  );
   await pool.query(
     `insert into source_items(root_id,relative_path,kind,size_bytes,mtime_ms,page_count,active,manifest_sha256)
      select $1,'scale-' || g || '.cbz','cbz',$3,g,$2,true,md5($1 || ':' || g::text)
@@ -185,34 +215,49 @@ try {
     revision: 0,
     scopeHash: 'a'.repeat(64),
   };
-  const scanAndPersist = async (items: readonly ScanItem[]) => {
-    const outcome = {
-      updated: items === firstScan.items ? sourceCount : 0,
-      unchanged: items === firstScan.items ? 0 : sourceCount,
-    };
-    return outcome;
-  };
-  const firstOutcome = await scanAndPersist(firstScan.items);
-  assert.equal(firstOutcome.updated, sourceCount);
-  await requestRootScan(scanRootId, 'startup');
-  const workerDeadline = Date.now() + 30_000;
-  let workerCompletedRuns = 0;
+  const firstRequest = await requestRootScan(scanRootId, 'startup');
+  const workerDeadline = Date.now() + 300_000;
+  let workerRun: {
+    id: string;
+    requestId: string;
+    state: string;
+    summary: { updated?: number; unchanged?: number } | null;
+  } | null = null;
   while (Date.now() < workerDeadline) {
-    const result = await pool.query<{ count: string }>(
-      "select count(*)::text as count from scan_runs where root_id=$1 and state='completed'",
-      [scanRootId],
+    const result = await pool.query<typeof workerRun & {}>(
+      `select r.id::text,r.scan_request_id as "requestId",r.state,r.summary
+         from scan_runs r where r.root_id=$1 and r.scan_request_id=$2 order by r.id desc limit 1`,
+      [scanRootId, firstRequest.id],
     );
-    workerCompletedRuns = Number(result.rows[0]?.count ?? 0);
-    if (workerCompletedRuns >= 1) break;
+    workerRun = result.rows[0] ?? null;
+    if (workerRun?.state === 'completed') break;
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
-  assert.ok(workerCompletedRuns >= 1, 'production worker queue completed a reconciliation run');
+  assert.equal(workerRun?.requestId, firstRequest.id);
+  assert.equal(workerRun?.state, 'completed', 'production worker queue completed the request');
+  assert.equal(workerRun?.summary?.updated, sourceCount);
+  const persisted = await pool.query<{ books: string; pages: string }>(
+    `select (select count(*) from source_items where root_id=$1)::text as books,
+            (select count(*) from source_pages p join source_items i on i.id=p.source_item_id where i.root_id=$1)::text as pages`,
+    [scanRootId],
+  );
+  assert.deepEqual(persisted.rows[0], { books: String(sourceCount), pages: String(sourceCount) });
   const noChangeTimes: number[] = [];
-  const secondScan = await scanRootBatched(sourceRoot, { batchSize: 100 });
   const noChangeStarted = performance.now();
-  const secondOutcome = await scanAndPersist(secondScan.items);
+  const secondRequest = await requestRootScan(scanRootId, 'watcher');
+  let secondRun: typeof workerRun = null;
+  while (Date.now() < workerDeadline + 30_000) {
+    const result = await pool.query<typeof workerRun & {}>(
+      `select r.id::text,r.scan_request_id as "requestId",r.state,r.summary from scan_runs r where r.root_id=$1 and r.scan_request_id=$2 order by r.id desc limit 1`,
+      [scanRootId, secondRequest.id],
+    );
+    secondRun = result.rows[0] ?? null;
+    if (secondRun?.state === 'completed') break;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
   noChangeTimes.push(performance.now() - noChangeStarted);
-  assert.equal(secondOutcome.unchanged, sourceCount);
+  assert.equal(secondRun?.state, 'completed');
+  assert.equal(secondRun?.summary?.unchanged, sourceCount);
   const changedMtime = new Date(Date.now() - 2_000);
   await writeFile(
     join(sourceRoot, 'scale-1.cbz'),
@@ -225,14 +270,20 @@ try {
   );
   await utimes(join(sourceRoot, 'scale-1.cbz'), changedMtime, changedMtime);
   const changedStarted = performance.now();
-  const changedScan = await scanRootBatched(sourceRoot, { batchSize: 100 });
-  const changedOutcome = { updated: 1, unchanged: sourceCount - 1 };
+  const changedRequest = await requestRootScan(scanRootId, 'watcher');
+  let changedRun: typeof workerRun = null;
+  while (Date.now() < workerDeadline + 60_000) {
+    const result = await pool.query<typeof workerRun & {}>(
+      `select r.id::text,r.scan_request_id as "requestId",r.state,r.summary from scan_runs r where r.root_id=$1 and r.scan_request_id=$2 order by r.id desc limit 1`,
+      [scanRootId, changedRequest.id],
+    );
+    changedRun = result.rows[0] ?? null;
+    if (changedRun?.state === 'completed') break;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
   const changedTimes: number[] = [performance.now() - changedStarted];
-  assert.equal(
-    changedOutcome.updated,
-    1,
-    JSON.stringify({ changedSummary: changedScan.summary, changedOutcome }),
-  );
+  assert.equal(changedRun?.state, 'completed');
+  assert.equal(changedRun?.summary?.updated, 1);
 
   const firstItem = firstScan.items[Math.min(1, firstScan.items.length - 1)]!;
   const sourcePath = join(sourceRoot, firstItem.relativePath);
@@ -300,10 +351,8 @@ try {
   assert.match(plans, /catalog_series_list_state/);
   assert.match(plans, /catalog_releases/);
   assert.match(plans, /source_items/);
-  assert.match(
-    plans,
-    /catalog_series_list_state_(library_(name|metadata_updated)|search_trgm)_idx/,
-  );
+  assert.match(listPlans, /catalog_series_list_state_library_name_idx/);
+  assert.match(searchPlans, /catalog_series_list_state_search_trgm_idx/);
   const firstPage = await listCatalogSeries(
     { libraryId: rootId, q: 'zzzz-no-match', limit: 10 },
     adminScope,
@@ -360,11 +409,14 @@ try {
   await pressureCache.getOrCreate(descriptor(1), async () => sourcePayload);
   const protectedEntry = await pressureCache.lease(descriptor(2), async () => sourcePayload);
   await pressureCache.getOrCreate(descriptor(3), async () => sourcePayload);
+  const pressureBefore = await cacheEntryCount(pressureRoot);
   const reclaimed = await pressureCache.gc();
   assert.equal(reclaimed, true);
   await assert.rejects(stat(pressurePath(1)), { code: 'ENOENT' });
   await stat(pressurePath(2));
   await stat(pressurePath(3));
+  const pressureAfter = await cacheEntryCount(pressureRoot);
+  assert.ok(pressureAfter < pressureBefore, 'GC reclaimed an evictable cache entry');
   protectedEntry.release();
 
   const sparseRoot = await mkdtemp(join(tmpdir(), 'gutter-scale-sparse-'));
@@ -415,7 +467,7 @@ try {
         protectedLiveEntry: true,
       },
     },
-    worker: { queueCompletedRuns: workerCompletedRuns },
+    worker: { queueCompletedRuns: [firstRequest.id, secondRequest.id, changedRequest.id].length },
     sparse: { logicalBytes: sparse.size, allocatedBlocks: sparse.blocks },
     baselineComparison: {
       baseline: 'docs/scale-oracle-baseline.json',

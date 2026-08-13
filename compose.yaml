@@ -170,6 +170,7 @@ services:
       DATABASE_URL: 'postgresql://gutter:${POSTGRES_PASSWORD:-}@integration-db:5432/gutter_integration'
     depends_on:
       integration-db: { condition: service_healthy }
+      scale-migrate: { condition: service_completed_successfully }
       scale-worker: { condition: service_started }
     profiles: [scale]
     volumes:
@@ -179,20 +180,36 @@ services:
     build: { context: ., target: worker }
     command: [node, --import, tsx, dist/index.js]
     environment:
-      DATABASE_URL: 'postgresql://gutter:${POSTGRES_PASSWORD:-}@integration-db:5432/gutter_integration'
-      GUTTER_ALLOWED_ROOTS_JSON: '[{"id":"scale-worker-root","path":"/scale-source"}]'
+      DATABASE_HOST: integration-db
+      DATABASE_NAME: gutter_integration
+      DATABASE_USER: gutter_worker
+      DATABASE_PASSWORD_FILE: /run/secrets/worker_db_password
+      GUTTER_ALLOWED_ROOTS_JSON: '[{"id":"${SCALE_ROOT_ID:-scale-worker-root}","path":"/scale-source"}]'
+      GUTTER_SCALE_ORACLE: '1'
       GUTTER_READER_CAPABILITY_SECRET: scale-oracle-reader-secret-012345678901234567890123
       BETTER_AUTH_SECRET: scale-oracle-auth-secret-012345678901234567890123456789
       GUTTER_STABLE_GRACE_MS: '0'
       GUTTER_WATCHER_HINTS_ENABLED: 'false'
       GUTTER_DERIVED_CACHE_ROOT: /cache/derived
-    depends_on: { integration-db: { condition: service_healthy } }
+    depends_on: { scale-migrate: { condition: service_completed_successfully } }
     profiles: [scale]
     restart: on-failure
     volumes:
       - scale-source:/scale-source:ro
       - scale-cache:/cache
     networks: [internal]
+    secrets: [worker_db_password, reader_capability_secret]
+  scale-migrate:
+    build: { context: ., target: migrate }
+    command: [node, --import, tsx, src/migrate.ts]
+    environment:
+      DATABASE_URL: 'postgresql://gutter:${POSTGRES_PASSWORD:-}@integration-db:5432/gutter_integration'
+      GUTTER_API_DB_PASSWORD_FILE: /run/secrets/api_db_password
+      GUTTER_WORKER_DB_PASSWORD_FILE: /run/secrets/worker_db_password
+    depends_on: { integration-db: { condition: service_healthy } }
+    profiles: [scale]
+    networks: [internal]
+    secrets: [api_db_password, worker_db_password]
 volumes:
   db-data:
   cache-data:

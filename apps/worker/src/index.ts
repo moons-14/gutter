@@ -155,8 +155,9 @@ const validationDispatcher = setInterval(
   () => void dispatchValidationIntents(boss, claimValidationIntents),
   30_000,
 );
-for (const root of readyRoots.values())
-  await requestRootScan(root.id, 'startup', reconciliation.intervalSeconds);
+if (process.env.GUTTER_SCALE_ORACLE !== '1')
+  for (const root of readyRoots.values())
+    await requestRootScan(root.id, 'startup', reconciliation.intervalSeconds);
 await dispatchReconciliationRequests(
   boss,
   claimScanRequestsForDispatch,
