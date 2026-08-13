@@ -44,15 +44,15 @@ digests, and the output of these gates on that same tree. The machine-readable r
 `docs/platform-evidence.schema.json` and include every gate ID and all three platform names from
 `docs/release-gate-manifest.json`; every artifact entry carries a SHA-256 checksum.
 
-| Gate                                        | Required result              | Evidence                                                                                                                              |
-| ------------------------------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| dependency, format, lint, type, unit, build | pass                         | CI log and command line                                                                                                               |
-| license and MIT/exception notices           | pass                         | `docs/license-audit.json`, `docs/license-inventory.md`                                                                                |
-| secret/container/static checks              | pass                         | `scripts/verify-release-gate.mjs` output and image scan/SBOM                                                                          |
-| migration and OpenAPI compatibility         | pass                         | `scripts/prepare-migration-compatibility-fixture.sh`, `scripts/migration-compatibility-oracle.sh`, `scripts/check-openapi-compat.mjs` |
-| browser E2E and Compose smoke               | pass                         | CI artifacts                                                                                                                          |
-| backup/restore                              | pass                         | `scripts/compose-restore-drill.sh` output and checksum manifest                                                                       |
-| scale/concurrency (#26)                     | pass or explicit unavailable | #26 evidence JSON, schema, and baseline                                                                                               |
+| Gate                                        | Required result | Evidence                                                                                                                              |
+| ------------------------------------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| dependency, format, lint, type, unit, build | pass            | CI log and command line                                                                                                               |
+| license and MIT/exception notices           | pass            | `docs/license-audit.json`, `docs/license-inventory.md`                                                                                |
+| secret/container/static checks              | pass            | `scripts/verify-release-gate.mjs` output and image scan/SBOM                                                                          |
+| migration and OpenAPI compatibility         | pass            | `scripts/prepare-migration-compatibility-fixture.sh`, `scripts/migration-compatibility-oracle.sh`, `scripts/check-openapi-compat.mjs` |
+| browser E2E and Compose smoke               | pass            | CI artifacts                                                                                                                          |
+| backup/restore                              | pass            | `scripts/compose-restore-drill.sh` output and checksum manifest                                                                       |
+| scale/concurrency (#26)                     | pass            | #26 evidence JSON, schema, and baseline                                                                                               |
 
 The final gate must include an SPDX or CycloneDX SBOM for each built image, provenance attestation
 for the build inputs, the committed license inventory and generated audit, release notes, known
