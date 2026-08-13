@@ -60,6 +60,7 @@
   "requiredPlatformNames": ["linux", "macos-docker", "windows-docker"],
   "requiredImageNames": ["node", "postgres", "caddy"],
   "requiredApplicationImageNames": ["api", "worker", "web"],
+  "applicationImageRegistry": "ghcr.io/moons-14/gutter",
   "threatClaims": {
     "archive-path-containment": "unit",
     "acl-pat": "operations",

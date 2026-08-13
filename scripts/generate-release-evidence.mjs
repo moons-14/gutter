@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readFile, writeFile, readdir } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
-import { resolve } from 'node:path';
+import { relative, resolve } from 'node:path';
 
 const [resultsPath, outputPath] = process.argv.slice(2);
 if (!resultsPath || !outputPath)
@@ -11,6 +11,12 @@ const manifest = JSON.parse(
   await readFile(resolve(root, 'docs/release-gate-manifest.json'), 'utf8'),
 );
 const sha = (value) => createHash('sha256').update(value).digest('hex');
+const safeRepoPath = (value) => {
+  const candidate = value.startsWith('/') ? relative(root, value) : value;
+  if (!candidate || candidate.startsWith('..') || candidate.includes('\\'))
+    throw new Error(`unsafe evidence path: ${value}`);
+  return candidate;
+};
 const lines = (await readFile(resolve(root, resultsPath), 'utf8'))
   .trim()
   .split('\n')
@@ -62,7 +68,7 @@ const gates = [...results.values()].map((result) => ({
   commandHash: result.commandHash,
   artifacts: [
     {
-      path: result.log,
+      path: safeRepoPath(result.log),
       role: result.id === 'nas-source' ? 'nas-evidence' : 'runner-log',
       gate: result.id,
       sha256: result.logHash,
@@ -83,7 +89,7 @@ for (const name of await readdir(artifactDir).catch(() => [])) {
   gates
     .find((gate) => gate.id === gateId)
     .artifacts.push({
-      path: `${process.env.RELEASE_ARTIFACT_DIR ?? 'release-artifacts'}/${name}`,
+      path: safeRepoPath(resolve(artifactDir, name)),
       role: gateId === 'sbom' ? 'sbom-report' : 'provenance-attestation',
       gate: gateId,
       sha256: sha(bytes),
@@ -101,10 +107,19 @@ try {
 } catch {
   // Pre-#26 runs intentionally remain blocked and cannot fabricate scale evidence.
 }
-const images = (process.env.RELEASE_IMAGE_REFS ?? '')
-  .split(/\s+/)
-  .filter(Boolean)
-  .map((reference) => ({ reference, digest: reference.slice(reference.indexOf('@') + 1) }));
+const mappingPath = process.env.RELEASE_APPLICATION_SUBJECTS;
+const mappings = mappingPath
+  ? JSON.parse(await readFile(mappingPath, 'utf8'))
+  : (process.env.RELEASE_IMAGE_REFS ?? '')
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((subject) => ({ subject }));
+if (!Array.isArray(mappings) || mappings.length !== 3)
+  throw new Error('three application subjects are required');
+const images = mappings.map((entry) => ({
+  reference: entry.subject,
+  digest: entry.subject.slice(entry.subject.indexOf('@') + 1),
+}));
 const evidence = {
   schemaVersion: 'gutter.release-evidence.v1',
   exactTree: { commit, lockfileSha256 },

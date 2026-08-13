@@ -79,6 +79,7 @@ run_gate backup-restore './scripts/compose-restore-drill.sh' ./scripts/compose-r
 run_gate nas-source './scripts/nas-source-oracle.sh' ./scripts/nas-source-oracle.sh
 docker compose build api worker web
 application_image_refs=''
+api_subject=''; worker_subject=''; web_subject=''
 if [ -n "${RELEASE_IMAGE_REGISTRY:-}" ]; then
   : "${GITHUB_TOKEN:?GITHUB_TOKEN is required when publishing application subjects}"
   printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io -u "${GITHUB_ACTOR:?GITHUB_ACTOR is required}" --password-stdin
@@ -92,15 +93,25 @@ for service in api worker web; do
     docker tag "$image_id" "$published"
     docker push "$published" >/dev/null
     digest=$(docker image inspect --format '{{index .RepoDigests 0}}' "$published")
-    case "$digest" in *@sha256:[0-9a-f][0-9a-f]*) application_image_refs="$application_image_refs $digest" ;; *) echo "missing registry digest for $service" >&2; exit 1 ;; esac
+    case "$digest" in *@sha256:[0-9a-f][0-9a-f]*) subject="$digest" ;; *) echo "missing registry digest for $service" >&2; exit 1 ;; esac
   else
-    application_image_refs="$application_image_refs local/gutter-release-$service@$image_id"
+    subject="local/gutter-release-$service@$image_id"
   fi
+  application_image_refs="$application_image_refs $subject"
+  case "$service" in
+    api) api_subject="$subject" ;;
+    worker) worker_subject="$subject" ;;
+    web) web_subject="$subject" ;;
+  esac
 done
 export RELEASE_IMAGE_REFS="$application_image_refs"
-run_gate containers 'trivy built application image IDs' sh -ec 'for image in $RELEASE_IMAGE_REFS; do docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "$RELEASE_TRIVY_IMAGE" image --db-repository "$RELEASE_TRIVY_DB_REPOSITORY" --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed "${image%%@*}"; done'
+mapping="$out/application-subjects.json"
+printf '[{"service":"api","localTag":"gutter-release-api:local","subject":"%s"},{"service":"worker","localTag":"gutter-release-worker:local","subject":"%s"},{"service":"web","localTag":"gutter-release-web:local","subject":"%s"}]\n' "$api_subject" "$worker_subject" "$web_subject" >"$mapping"
+export RELEASE_APPLICATION_SUBJECTS="$mapping"
+printf 'api\tgutter-release-api:local\t%s\nworker\tgutter-release-worker:local\t%s\nweb\tgutter-release-web:local\t%s\n' "$api_subject" "$worker_subject" "$web_subject" >"$out/application-subjects.tsv"
+run_gate containers 'trivy built application image subjects' sh -ec 'while IFS="	" read -r service local_tag subject; do scan_ref="$subject"; case "$subject" in local/*@sha256:*) scan_ref="$local_tag" ;; esac; docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "$RELEASE_TRIVY_IMAGE" image --db-repository "$RELEASE_TRIVY_DB_REPOSITORY" --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed "$scan_ref"; done <"$RELEASE_ARTIFACT_DIR/application-subjects.tsv"'
 run_gate sbom 'syft built application image IDs cyclonedx' sh -ec 'for service in api worker web; do docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "$RELEASE_SYFT_IMAGE" "gutter-release-$service:local" -o cyclonedx-json >"$RELEASE_ARTIFACT_DIR/$service.sbom.json"; sha256sum "$RELEASE_ARTIFACT_DIR/$service.sbom.json" >"$RELEASE_ARTIFACT_DIR/$service.sbom.json.sha256"; done'
-run_gate provenance 'cosign built application image attestations' sh -ec 'for image in $RELEASE_IMAGE_REFS; do service=$(printf "%s" "$image" | sed -E "s#^.*/?gutter-release-(api|worker|web)(@.*|:.*)$#\1#"); docker run --rm "$RELEASE_COSIGN_IMAGE" verify-attestation --type slsaprovenance --certificate-identity-regexp "$RELEASE_COSIGN_CERTIFICATE_IDENTITY_REGEXP" --certificate-oidc-issuer "$RELEASE_COSIGN_OIDC_ISSUER" "$image" --output json >"$RELEASE_ARTIFACT_DIR/$service.provenance.json"; done'
+run_gate provenance 'cosign built application image attestations' sh -ec 'while IFS="	" read -r service local_tag subject; do docker run --rm "$RELEASE_COSIGN_IMAGE" verify-attestation --type slsaprovenance --certificate-identity-regexp "$RELEASE_COSIGN_CERTIFICATE_IDENTITY_REGEXP" --certificate-oidc-issuer "$RELEASE_COSIGN_OIDC_ISSUER" "$subject" --output json >"$RELEASE_ARTIFACT_DIR/$service.provenance.json"; done <"$RELEASE_ARTIFACT_DIR/application-subjects.tsv"'
 if [ -f docs/scale-oracle-evidence.schema.json ]; then
   run_gate scale-concurrency 'SCALE_FULL=1 production Compose scale oracle' env SCALE_FULL=1 SCALE_EVIDENCE_PATH="$RELEASE_ARTIFACT_DIR/scale-evidence.json" ./scripts/run-scale-oracle.sh
 else

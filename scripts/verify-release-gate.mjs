@@ -79,13 +79,22 @@ const validateScaleEvidence = async (artifact) => {
 };
 const validateNasEvidence = async (artifact) => {
   const lines = (await safeArtifact(artifact.path)).toString().trim().split('\n');
-  const linux = JSON.parse(lines.find((line) => line.includes('linux-local-source')) ?? '{}');
+  const records = lines.map((line) => JSON.parse(line));
+  const byName = new Map(records.map((record) => [record.name, record]));
+  assert.deepEqual([...byName.keys()].sort(), ['linux-local-source', 'nfs', 'smb']);
+  const linux = byName.get('linux-local-source');
   assert.equal(linux.status, 'pass');
   assert.equal(linux.outageObserved, true);
   assert.equal(linux.projectionReadable, true);
   assert.match(linux.projectionHashBefore, /^[0-9a-f]{64}$/);
   assert.equal(linux.projectionHashBefore, linux.projectionHashDuring);
   assert.match(linux.sourceHash, /^[0-9a-f]{64}$/);
+  for (const name of ['nfs', 'smb']) {
+    const record = byName.get(name);
+    assert.ok(['pass', 'unavailable'].includes(record.status));
+    if (record.status === 'unavailable') assert.match(record.reason, /.+/);
+    assert.match(record.command, /.+/);
+  }
 };
 const assertKeys = (value, allowed, label) => {
   for (const key of Object.keys(value ?? {}))
@@ -181,6 +190,12 @@ assert.equal(
     'ghcr.io/aquasecurity/trivy-db:2@sha256:182c8405cd03caefe80982cf39bf071c9176ca3b1d1018a6ac02706c4597c72e',
   toolRefs.images.trivyDb,
   'Trivy DB repository must match the immutable tool reference',
+);
+assert.match(
+  actionWorkflow,
+  new RegExp(
+    `RELEASE_IMAGE_REGISTRY:\\s*${manifest.applicationImageRegistry.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`,
+  ),
 );
 assert.match(
   actionWorkflow,
@@ -424,18 +439,23 @@ for (const image of evidence.images) {
   assert.ok(subject, `application subject name missing: ${image.reference}`);
   for (const role of ['sbom-report', 'provenance-attestation']) {
     const gateId = role === 'sbom-report' ? 'sbom' : 'provenance';
-    assert.ok(
-      evidence.gates
-        .find((gate) => gate.id === gateId)
-        .artifacts.some(
-          (artifact) =>
-            artifact.role === role &&
-            artifact.path.endsWith(
-              `${subject}.${role === 'sbom-report' ? 'sbom' : 'provenance'}.json`,
-            ),
-        ),
-      `${role} missing for ${image.reference}`,
-    );
+    const matching = evidence.gates
+      .find((gate) => gate.id === gateId)
+      .artifacts.find(
+        (artifact) =>
+          artifact.role === role &&
+          artifact.path.endsWith(
+            `${subject}.${role === 'sbom-report' ? 'sbom' : 'provenance'}.json`,
+          ),
+      );
+    assert.ok(matching, `${role} missing for ${image.reference}`);
+    const bytes = await safeArtifact(matching.path);
+    assert.ok(bytes.length > 0 && bytes.length <= 10 * 1024 * 1024, `${role} size invalid`);
+    const parsed = JSON.parse(bytes);
+    const serialized = JSON.stringify(parsed);
+    const escapedDigest = image.digest.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    assert.match(serialized, new RegExp(escapedDigest));
+    assert.match(serialized, new RegExp(subject));
   }
 }
 console.log(
