@@ -304,6 +304,19 @@ test('CBZ inspection closes its owned descriptor after success and quarantine', 
   assert.equal(await descriptors(), before);
 });
 
+test('missing/nontransient outer open never crashes scan and preserves other files', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'gutter-scanner-open-race-'));
+  await writeFile(join(directory, 'good.cbz'), zip([{ name: '1.jpg' }]));
+  const scanned = await scanRootBatched(directory, { stableGraceMs: 0 });
+  assert.equal(scanned.summary.discovered, 1);
+  assert.equal(scanned.items[0]?.relativePath, 'good.cbz');
+  const missing = await inspectCbz(join(directory, 'eloop-race.cbz'));
+  assert.ok(
+    missing.deferredReason === 'unstable' || missing.quarantinedReason === 'malformed_archive',
+  );
+  assert.deepEqual(missing.pages, []);
+});
+
 test('CBZ outer observation mismatch is deferred instead of quarantined', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'gutter-scanner-snapshot-'));
   const archive = join(directory, 'comic.cbz');

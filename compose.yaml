@@ -144,7 +144,8 @@ services:
     environment:
       DATABASE_URL: 'postgresql://gutter:${POSTGRES_PASSWORD:-}@integration-db:5432/gutter_integration'
       GUTTER_INTEGRATION_TEST: '1'
-    depends_on: { integration-db: { condition: service_healthy } }
+    depends_on:
+      integration-db: { condition: service_healthy }
     profiles: [integration]
     networks: [internal]
   integration-db:
@@ -158,11 +159,70 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
-    profiles: [integration]
+    profiles: [integration, scale]
     networks: [internal]
+  scale-oracles:
+    build: { context: ., target: build }
+    command: [pnpm, integration:scale-oracles]
+    environment:
+      GUTTER_SCALE_ORACLE: '1'
+      SCALE_RUN_ID: '${SCALE_RUN_ID:-local}'
+      SCALE_ROOT_ID: '${SCALE_ROOT_ID:-scale-worker-root}'
+      SCALE_EVIDENCE_PATH: /scale-evidence/evidence.json
+      SCALE_FULL: '${SCALE_FULL:-}'
+      SCALE_BOOKS: '${SCALE_BOOKS:-1000}'
+      SCALE_PAGES_PER_BOOK: '${SCALE_PAGES_PER_BOOK:-10}'
+      SCALE_SOURCE_ROOT: /scale-source
+      DATABASE_URL: 'postgresql://gutter:${POSTGRES_PASSWORD:-}@integration-db:5432/gutter_integration'
+    depends_on:
+      integration-db: { condition: service_healthy }
+      scale-migrate: { condition: service_completed_successfully }
+      scale-worker: { condition: service_started }
+    profiles: [scale]
+    volumes:
+      - scale-source:/scale-source
+      - scale-cache:/cache
+      - '${SCALE_EVIDENCE_DIR:-/tmp/gutter-scale-evidence-local}:/scale-evidence'
+    networks: [internal]
+  scale-worker:
+    build: { context: ., target: worker }
+    command: [node, --import, tsx, dist/index.js]
+    environment:
+      DATABASE_HOST: integration-db
+      DATABASE_NAME: gutter_integration
+      DATABASE_USER: gutter_worker
+      DATABASE_PASSWORD_FILE: /run/secrets/worker_db_password
+      GUTTER_ALLOWED_ROOTS_JSON: '[{"id":"${SCALE_ROOT_ID:-scale-worker-root}","path":"/scale-source"}]'
+      GUTTER_SCALE_ORACLE: '1'
+      GUTTER_READER_CAPABILITY_SECRET: scale-oracle-reader-secret-012345678901234567890123
+      BETTER_AUTH_SECRET: scale-oracle-auth-secret-012345678901234567890123456789
+      GUTTER_STABLE_GRACE_MS: '0'
+      GUTTER_WATCHER_HINTS_ENABLED: 'false'
+      GUTTER_DERIVED_CACHE_ROOT: /cache/derived
+    depends_on: { scale-migrate: { condition: service_completed_successfully } }
+    profiles: [scale]
+    restart: on-failure
+    volumes:
+      - scale-source:/scale-source:ro
+      - scale-cache:/cache
+    networks: [internal]
+    secrets: [worker_db_password, reader_capability_secret]
+  scale-migrate:
+    build: { context: ., target: migrate }
+    command: [node, --import, tsx, src/migrate.ts]
+    environment:
+      DATABASE_URL: 'postgresql://gutter:${POSTGRES_PASSWORD:-}@integration-db:5432/gutter_integration'
+      GUTTER_API_DB_PASSWORD_FILE: /run/secrets/api_db_password
+      GUTTER_WORKER_DB_PASSWORD_FILE: /run/secrets/worker_db_password
+    depends_on: { integration-db: { condition: service_healthy } }
+    profiles: [scale]
+    networks: [internal]
+    secrets: [api_db_password, worker_db_password]
 volumes:
   db-data:
   cache-data:
+  scale-source:
+  scale-cache:
 secrets:
   api_db_password:
     file: ./secrets/api_db_password

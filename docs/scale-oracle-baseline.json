@@ -1,0 +1,21 @@
+{
+  "schemaVersion": "gutter.scale-oracle.v1",
+  "portable": {
+    "sourceFixtureBooks": 1000,
+    "sourceFixturePages": 1000,
+    "defaultBooks": 1000,
+    "defaultPages": 10000,
+    "fullBooks": 100000,
+    "fullPagesPerBook": 20,
+    "fullPages": 2000000,
+    "readerCount": 5,
+    "coldProducerCount": 1,
+    "sparseAllocatedBlocksMax": 1024,
+    "tinyCbzCount": 10000
+  },
+  "advisoryHardware": {
+    "catalogP95Ms": 1000,
+    "searchP95Ms": 1000,
+    "scanP95Ms": 30000
+  }
+}
