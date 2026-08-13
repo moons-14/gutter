@@ -1,5 +1,5 @@
 import { serve } from '@hono/node-server';
-import { createHash } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { readFile } from 'node:fs/promises';
@@ -125,6 +125,7 @@ const PUBLIC_MAX_CURSOR_BYTES = 4096;
 const PUBLIC_TIMEOUT_MS = 10_000;
 const PUBLIC_RATE_LIMIT = 60;
 const PUBLIC_RATE_WINDOW_MS = 60_000;
+const PUBLIC_CURSOR_TTL_MS = 24 * 60 * 60 * 1000;
 
 const publicRateBuckets = new Map<string, number[]>();
 const publicSeriesId = (value: unknown): string =>
@@ -256,6 +257,50 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
     resolvePublicTarget,
     resolvePublicCollectionId,
   } = resolved;
+  const publicCursorSecret = async () =>
+    resolved.readerCapabilityKey || (await readerCapabilitySecret());
+  const encodePublicCursor = async (principal: PublicPrincipal, path: string, internal: string) => {
+    const key = createHash('sha256')
+      .update(await publicCursorSecret())
+      .digest();
+    const iv = randomBytes(12);
+    const cipher = createCipheriv('aes-256-gcm', key, iv);
+    const payload = JSON.stringify({
+      v: 1,
+      user: principal.id,
+      path,
+      exp: Date.now() + PUBLIC_CURSOR_TTL_MS,
+      internal,
+    });
+    const ciphertext = Buffer.concat([cipher.update(payload, 'utf8'), cipher.final()]);
+    return Buffer.concat([iv, cipher.getAuthTag(), ciphertext]).toString('base64url');
+  };
+  const decodePublicCursor = async (principal: PublicPrincipal, path: string, value: string) => {
+    try {
+      const raw = Buffer.from(value, 'base64url');
+      if (raw.length < 29) throw new Error();
+      const key = createHash('sha256')
+        .update(await publicCursorSecret())
+        .digest();
+      const decipher = createDecipheriv('aes-256-gcm', key, raw.subarray(0, 12));
+      decipher.setAuthTag(raw.subarray(12, 28));
+      const payload = JSON.parse(
+        Buffer.concat([decipher.update(raw.subarray(28)), decipher.final()]).toString('utf8'),
+      ) as Record<string, unknown>;
+      if (
+        payload.v !== 1 ||
+        payload.user !== principal.id ||
+        payload.path !== path ||
+        typeof payload.internal !== 'string' ||
+        typeof payload.exp !== 'number' ||
+        payload.exp < Date.now()
+      )
+        throw new Error();
+      return payload.internal;
+    } catch {
+      throw new Error('invalid_public_cursor');
+    }
+  };
   const app = new OpenAPIHono();
   // Delegated public requests must retain the already-authenticated principal. A new Request
   // object is required for the internal alias, so a private in-process map carries authority
@@ -288,7 +333,7 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
   const publicError = (
     c: any,
     error: string,
-    status: 400 | 401 | 403 | 404 | 405 | 413 | 429 | 504,
+    status: 400 | 401 | 403 | 404 | 405 | 409 | 413 | 429 | 500 | 503 | 504,
   ) =>
     c.json(
       {
@@ -324,6 +369,28 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
     publicPath: string,
     principal: PublicPrincipal,
   ): Promise<Response> => {
+    if (!response.ok && publicPath.startsWith('/api/v1/page/')) {
+      const error =
+        response.status === 404
+          ? 'not_found'
+          : response.status === 504
+            ? 'timeout'
+            : response.status === 503
+              ? 'reader_unavailable'
+              : response.status === 409
+                ? 'reader_conflict'
+                : 'reader_error';
+      return new Response(
+        JSON.stringify({
+          error,
+          requestId: c.res.headers.get('x-request-id') ?? c.req.header('x-request-id') ?? '',
+        }),
+        {
+          status: response.status,
+          headers: new Headers({ 'content-type': 'application/json; charset=utf-8' }),
+        },
+      );
+    }
     if (!response.headers.get('content-type')?.includes('application/json')) return response;
     const text = await response.text();
     const body = (() => {
@@ -347,7 +414,9 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
           displayName: item.displayName,
           publicationCount: item.publicationCount,
         })),
-        nextCursor: page.nextCursor ?? null,
+        nextCursor: page.nextCursor
+          ? await encodePublicCursor(principal, publicPath, page.nextCursor)
+          : null,
       };
     } else if (publicPath === '/api/v1/progress' && Object.hasOwn(body, 'progress')) {
       const progress = (body as { progress?: Record<string, unknown> | null }).progress;
@@ -367,10 +436,16 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
               item.favorite === true && ['series', 'publication'].includes(String(item.targetKind)),
           )
           .map((item) => {
-            const { rootId: _rootId, targetKey, ...safe } = item;
-            return { ...safe, targetId: targetKey };
+            return {
+              targetKind: item.targetKind,
+              targetId: item.targetKey,
+              favorite: true,
+              ...(item.updatedAt === undefined ? {} : { updatedAt: item.updatedAt }),
+            };
           }),
-        nextCursor: page.nextCursor ?? null,
+        nextCursor: page.nextCursor
+          ? await encodePublicCursor(principal, publicPath, page.nextCursor)
+          : null,
       };
     } else if (response.ok && publicPath === '/api/v1/collections') {
       const page = body as {
@@ -388,7 +463,9 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
               updatedAt,
             };
           }),
-          nextCursor: page.nextCursor ?? null,
+          nextCursor: page.nextCursor
+            ? await encodePublicCursor(principal, publicPath, page.nextCursor)
+            : null,
         };
       } else if (body.collection && typeof body.collection === 'object') {
         const collection = body.collection as Record<string, unknown>;
@@ -587,12 +664,22 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
       !/^source:[A-Za-z0-9_-]{1,128}$/.test(url.searchParams.get('progressKey')!)
     )
       return publicError(c, 'invalid_request', 400);
+    let internalCursor: string | undefined;
+    if (cursor) {
+      try {
+        internalCursor = await decodePublicCursor(principal, path, cursor);
+      } catch {
+        return publicError(c, 'invalid_cursor', 400);
+      }
+    }
     const rewrittenParams = new URLSearchParams();
     for (const key of allowedQuery) {
       const value = url.searchParams.get(key);
-      if (value !== null) rewrittenParams.set(key, value);
+      if (value !== null && key !== 'cursor') rewrittenParams.set(key, value);
     }
+    if (internalCursor) rewrittenParams.set('cursor', internalCursor);
     if (path === '/api/v1/progress' && method === 'GET') {
+      if (!url.searchParams.get('progressKey')) return publicError(c, 'invalid_request', 400);
       const progressTarget = await withPublicTimeout(
         resolvePublicProgressTarget(principal.id, url.searchParams.get('progressKey') ?? ''),
       ).catch((error) => {
@@ -627,7 +714,10 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
             ) ||
             typeof parsed.progressKey !== 'string' ||
             !Number.isSafeInteger(parsed.expectedRevision) ||
+            (parsed.expectedRevision as number) < 0 ||
             !Number.isSafeInteger(parsed.pageOrdinal) ||
+            (parsed.pageOrdinal as number) < 0 ||
+            (parsed.pageOrdinal as number) > 1000000 ||
             typeof parsed.completed !== 'boolean'
           )
             return publicError(c, 'invalid_request', 400);
@@ -653,9 +743,12 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
           if (path === '/api/v1/favorites' && typeof parsed.favorite !== 'boolean')
             return publicError(c, 'invalid_request', 400);
           if (
-            path === '/api/v1/ratings' &&
-            parsed.rating !== null &&
-            !Number.isSafeInteger(parsed.rating)
+            (path === '/api/v1/ratings' &&
+              parsed.rating !== null &&
+              !Number.isSafeInteger(parsed.rating)) ||
+            (path === '/api/v1/ratings' &&
+              parsed.rating !== null &&
+              ((parsed.rating as number) < 1 || (parsed.rating as number) > 5))
           )
             return publicError(c, 'invalid_request', 400);
           if (!['series', 'publication'].includes(parsed.targetKind))

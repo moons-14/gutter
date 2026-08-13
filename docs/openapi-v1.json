@@ -137,6 +137,18 @@
           },
           "429": {
             "$ref": "#/components/responses/RateLimited"
+          },
+          "409": {
+            "$ref": "#/components/responses/ReaderConflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/ReaderError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ReaderUnavailable"
+          },
+          "504": {
+            "$ref": "#/components/responses/ReaderTimeout"
           }
         }
       }
@@ -480,6 +492,9 @@
               "method_not_allowed",
               "rate_limited",
               "timeout",
+              "reader_unavailable",
+              "reader_conflict",
+              "reader_error",
               "progress_conflict"
             ]
           },
@@ -846,6 +861,22 @@
             }
           }
         }
+      },
+      "ReaderConflict": {
+        "description": "Reader delegated conflict",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+      },
+      "ReaderUnavailable": {
+        "description": "Reader unavailable",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+      },
+      "ReaderTimeout": {
+        "description": "Reader timeout",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+      },
+      "ReaderError": {
+        "description": "Reader delegated error",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
       }
     }
   }

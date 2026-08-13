@@ -2633,15 +2633,15 @@ export async function resolvePublicProgressTarget(
 ): Promise<Readonly<{ rootId: string; sourceKey: string }> | null> {
   if (!/^source:[A-Za-z0-9_-]{1,128}$/.test(progressKey)) return null;
   const result = await pool.query<{ root_id: string; relative_path: string }>(
-    `select distinct i.root_id,i.relative_path
+    `select i.root_id,i.relative_path
        from visible_source_items i
        join catalog_releases r on r.source_item_id=i.id
-       where gutter_user_can_read_release($1,r.id)`,
-    [userId],
+       where gutter_user_can_read_release($1,r.id)
+         and 'source:' || translate(rtrim(replace(encode(digest(i.root_id || chr(0) || i.relative_path, 'sha256'), 'base64'), E'\\n', ''), '='), '+/', '-_') = $2
+       limit 1`,
+    [userId, progressKey],
   );
-  const match = result.rows.find(
-    (row) => readerProgressKey(row.root_id, row.relative_path) === progressKey,
-  );
+  const match = result.rows[0];
   return match ? { rootId: match.root_id, sourceKey: match.relative_path } : null;
 }
 
