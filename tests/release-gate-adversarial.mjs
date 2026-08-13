@@ -107,6 +107,15 @@ test('release runtime gates use readable disposable secrets and isolated Compose
   assert.doesNotMatch(smoke, /docker compose down/);
   assert.doesNotMatch(restore, /trap[^\n]*\bERR\b|\$LINENO/);
   assert.match(restore, /compose_build_flags="--build"/);
+  assert.match(
+    restore,
+    /chmod 0755 "\$root\/source" "\$root\/source\/title" "\$root\/source\/visible"/,
+  );
+  assert.match(
+    restore,
+    /chmod 0644 "\$root\/source\/title\/001\.png" "\$root\/source\/visible\/001\.png"/,
+  );
+  assert.match(restore, /synthetic source fixture is worker-readable/);
   assert.match(restore, /while \[ "\$attempt" -le 45 \]/);
   assert.match(restore, /pgboss\.job where name='catalog\.reconciliation\.v1'/);
   assert.match(fixture, /prior_tag=0013_runtime_acl_bootstrap/);

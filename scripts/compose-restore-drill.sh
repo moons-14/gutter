@@ -31,6 +31,10 @@ printf 'drill-reader-secret-0123456789012345678901\n' > "$root/secrets/reader_ca
 # A deterministic 1x1 PNG is enough for the scanner's real directory path.
 printf 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=' | base64 -d > "$root/source/title/001.png"
 cp "$root/source/title/001.png" "$root/source/visible/001.png"
+# The release runner intentionally inherits umask 077 while it creates disposable secrets.
+# Override that only for this synthetic read-only source so uid 10001 can traverse and read it.
+chmod 0755 "$root/source" "$root/source/title" "$root/source/visible"
+chmod 0644 "$root/source/title/001.png" "$root/source/visible/001.png"
 # Compose mounts file-backed secrets with their host mode; the migration image runs as a
 # non-root user, so make this synthetic-only directory readable (never a production secret).
 chmod 644 "$root/secrets"/*
@@ -269,6 +273,12 @@ for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
   [ "$attempt" = 15 ] && exit 1
   sleep 2
 done
+if ! docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker \
+  sh -c 'test -x /drill-source && test -x /drill-source/title && test -r /drill-source/title/001.png && test -r /drill-source/visible/001.png'; then
+  echo 'restore drill failed: worker uid cannot read the synthetic source fixture' >&2
+  exit 1
+fi
+echo "restore drill checkpoint: synthetic source fixture is worker-readable" >&2
 # Drop only rebuildable projections/inventory. The worker must recreate them by reading the mount.
 docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T db psql -U gutter -d gutter -v ON_ERROR_STOP=1 -c "delete from catalog_series_list_state; delete from catalog_releases; delete from catalog_publications; delete from catalog_series; delete from catalog_libraries;"
 for table in catalog_libraries catalog_series catalog_publications catalog_releases catalog_series_list_state; do

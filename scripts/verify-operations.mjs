@@ -47,6 +47,12 @@ if (!drill.includes('compose_build_flags="--build"'))
 if (/trap[^\n]*\bERR\b|\$LINENO/.test(drill)) throw new Error('drill_uses_nonportable_err_trap');
 if (!drill.includes('chmod 644 "$root/secrets"/*'))
   throw new Error('drill_secret_permissions_missing');
+if (
+  !drill.includes('chmod 0755 "$root/source" "$root/source/title" "$root/source/visible"') ||
+  !drill.includes('chmod 0644 "$root/source/title/001.png" "$root/source/visible/001.png"') ||
+  !drill.includes('synthetic source fixture is worker-readable')
+)
+  throw new Error('drill_source_fixture_permissions_missing');
 if (!releaseGates.includes('chmod 0444 "$path"'))
   throw new Error('release_secret_permissions_missing');
 if (!releaseGates.includes('./scripts/compose-smoke-release.sh'))
