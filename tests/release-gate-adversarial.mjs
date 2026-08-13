@@ -38,6 +38,30 @@ test('workflow image refs normalize docker.io/library and contract passes', asyn
   assert.match(stdout, /contract structure passed/);
 });
 
+test('workflow attestation identity and trigger guard are exact', async () => {
+  const workflow = await readFile('.github/workflows/release.yml', 'utf8');
+  const identity = workflow.match(/RELEASE_COSIGN_CERTIFICATE_IDENTITY_REGEXP: '([^']+)'/)?.[1];
+  assert.ok(identity);
+  const regexp = new RegExp(identity);
+  assert.match(
+    'https://github.com/moons-14/gutter/.github/workflows/release.yml@refs/heads/main',
+    regexp,
+  );
+  assert.match(
+    'https://github.com/moons-14/gutter/.github/workflows/release.yml@refs/tags/v1.2.3',
+    regexp,
+  );
+  for (const ref of [
+    'https://github.com/moons-14/gutter/.github/workflows/release.yml@refs/heads/feature',
+    'https://github.com/moons-14/gutter/.github/workflows/release.yml@refs/tags/v1.2',
+    'https://github.com/moons-14/gutter/.github/workflows/release.yml@refs/tags/v1.2.3-evil',
+  ])
+    assert.doesNotMatch(ref, regexp);
+  assert.match(workflow, /if:.*github\.event_name == 'workflow_dispatch'.*refs\/heads\/main/);
+  assert.match(workflow, /Validate release trigger/);
+  assert.match(workflow, /tags: \['v\*'\]/);
+});
+
 test('container scan preserves colon-tag local image input', async () => {
   const runner = await readFile('scripts/run-release-gates.sh', 'utf8');
   assert.match(runner, /docker save \"\$scan_ref\" -o \"\$archive\"/);

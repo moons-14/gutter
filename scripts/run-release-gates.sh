@@ -82,7 +82,11 @@ api_subject=''; worker_subject=''; web_subject=''
 if [ -n "${RELEASE_PREPARED_SUBJECTS:-}" ]; then
   test -f "$RELEASE_PREPARED_SUBJECTS" ! -L "$RELEASE_PREPARED_SUBJECTS"
   test "$(wc -c <"$RELEASE_PREPARED_SUBJECTS")" -le 65536
-  validated=$(node scripts/validate-application-subjects.mjs "$RELEASE_PREPARED_SUBJECTS" --allow-local)
+  allow_local_arg=''
+  if [ "${RELEASE_GATE_TEST_MODE:-0}" = 1 ] && [ "${out#/tmp/}" != "$out" ]; then
+    allow_local_arg='--allow-local'
+  fi
+  validated=$(node scripts/validate-application-subjects.mjs "$RELEASE_PREPARED_SUBJECTS" $allow_local_arg)
   source_real=$(realpath "$RELEASE_PREPARED_SUBJECTS")
   target_real=$(realpath -m "$out/application-subjects.json")
   if [ "$source_real" != "$target_real" ]; then printf '%s\n' "$validated" >"$out/application-subjects.json"; fi

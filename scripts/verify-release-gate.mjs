@@ -7,6 +7,7 @@ import { dirname, relative, resolve, sep } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 
 const root = resolve(process.env.RELEASE_GATE_ROOT ?? new URL('..', import.meta.url).pathname);
+const allowLocalEvidence = process.env.RELEASE_GATE_TEST_MODE === '1' && root.startsWith('/tmp/');
 const read = (file) => readFile(resolve(root, file), 'utf8');
 const safeArtifact = async (file) => {
   if (!file || file.includes('\\') || file.startsWith('/') || file.split('/').includes('..'))
@@ -507,9 +508,9 @@ for (const image of evidence.images) {
   assert.match(image.reference, /@sha256:[0-9a-f]{64}$/);
   assert.match(image.digest, /^sha256:[0-9a-f]{64}$/);
   const appPrefix = manifest.applicationImageRegistry;
-  const localSubject = /^local\/gutter-release-(api|worker|web)@sha256:[0-9a-f]{64}$/.exec(
-    image.reference,
-  );
+  const localSubject = allowLocalEvidence
+    ? /^local\/gutter-release-(api|worker|web)@sha256:[0-9a-f]{64}$/.exec(image.reference)
+    : null;
   const registrySubject = new RegExp(
     `^${appPrefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\/(api|worker|web)@sha256:[0-9a-f]{64}$`,
   ).exec(image.reference);
