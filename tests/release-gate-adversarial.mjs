@@ -41,6 +41,21 @@ test('workflow final reaches evidence validation after image membership', async 
   );
 });
 
+test('final mode normalizes malformed evidence JSON without leaking parser details', async () => {
+  const relative = `tests/.release-gate-malformed-${process.pid}.json`;
+  try {
+    await writeFile(relative, 'not-json');
+    await assert.rejects(
+      exec(process.execPath, ['scripts/verify-release-gate.mjs', 'final', relative]),
+      (error) =>
+        /final mode requires evidence\.json containing valid JSON/.test(error.message) &&
+        !/SyntaxError|Unexpected token/.test(error.message),
+    );
+  } finally {
+    await rm(relative, { force: true });
+  }
+});
+
 test('invalid scale schema/baseline JSON rejects before synthetic evidence can pass', async () => {
   const schemaPath = 'docs/scale-oracle-evidence.schema.json';
   const baselinePath = 'docs/scale-oracle-baseline.json';

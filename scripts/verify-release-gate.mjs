@@ -204,7 +204,16 @@ try {
 
 const evidencePath = process.argv[3];
 if (!evidencePath) throw new Error('final mode requires evidence.json');
-const evidence = JSON.parse(await safeArtifact(evidencePath));
+let evidence;
+try {
+  evidence = JSON.parse(await safeArtifact(evidencePath));
+} catch (error) {
+  // Preserve safeArtifact's path, symlink, and integrity diagnostics. Only malformed
+  // JSON is normalized at this boundary so final mode never leaks parser internals.
+  if (error instanceof SyntaxError)
+    throw new Error('final mode requires evidence.json containing valid JSON');
+  throw error;
+}
 assert.equal(evidence.schemaVersion, 'gutter.release-evidence.v1');
 assertKeys(
   evidence,
