@@ -33,6 +33,7 @@ services:
       DATABASE_PASSWORD_FILE: /run/secrets/api_db_password
       BETTER_AUTH_SECRET_FILE: /run/secrets/better_auth_secret
       GUTTER_READER_CAPABILITY_SECRET_FILE: /run/secrets/reader_capability_secret
+      GUTTER_READER_SERVICE_URL: ${GUTTER_READER_SERVICE_URL:-http://worker:3001}
       GUTTER_AUTH_ORIGIN: ${GUTTER_AUTH_ORIGIN:-http://localhost:8080}
       # Caddy is fixed at 172.30.0.20; API is otherwise unreachable from clients.
       GUTTER_AUTH_TRUSTED_PROXIES_JSON: '["172.30.0.20"]'
@@ -89,6 +90,25 @@ services:
       - >-
         node -e "Promise.all(['http://web:8080/api/health','http://web:8080/manifest.webmanifest','http://web:8080/service-worker.js'].map(url=>fetch(url))).then(async rs=>{if(!rs.every(r=>r.ok))throw Error('smoke response');if(!(await rs[1].text()).includes('192x192'))throw Error('manifest');}).catch(e=>{console.error(e);process.exit(1)})"
     depends_on: { api: { condition: service_healthy }, web: { condition: service_healthy } }
+    networks: [internal]
+  public-api-test:
+    build: { context: ., target: build }
+    command: [pnpm, test:public]
+    environment:
+      PUBLIC_API_BASE_URL: http://web:8080
+      PUBLIC_API_ORIGIN: http://localhost:8080
+      DATABASE_URL: 'postgresql://gutter:${POSTGRES_PASSWORD:-}@db:5432/gutter'
+    depends_on:
+      web: { condition: service_healthy }
+      reader-fixture: { condition: service_started }
+    profiles: [public-api]
+    networks: [internal]
+  reader-fixture:
+    image: node:24.19.0-bookworm-slim
+    working_dir: /src
+    command: [node, tests/public-reader-fixture.mjs]
+    volumes: [.:/src:ro]
+    profiles: [public-api]
     networks: [internal]
   auth-test:
     build: { context: ., target: auth-test }

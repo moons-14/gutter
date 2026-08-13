@@ -1,6 +1,8 @@
 import { serve } from '@hono/node-server';
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { readFile } from 'node:fs/promises';
 import { OpenAPIHono } from '@hono/zod-openapi';
 import {
   catalogEntitiesRoute,
@@ -59,6 +61,12 @@ import {
   pool,
   putUserProgress,
   readerRootForRequestPath,
+  getReaderPublicationSession,
+  getReaderPublicationSessionByIdentity,
+  resolvePublicProgressTarget,
+  resolvePublicTarget,
+  publicCollectionKey,
+  resolvePublicCollectionId,
   setUserCollectionMembership,
   setUserTargetState,
   type LibraryAccessScope,
@@ -69,6 +77,15 @@ import { Gauge, Registry, collectDefaultMetrics } from 'prom-client';
 import pino from 'pino';
 import { reconciliationMetricLabels } from './metrics.js';
 import { authenticatedUser, authHandler, trustedMutationOrigin } from './auth.js';
+import {
+  authenticatePublicApiToken,
+  createPublicApiToken,
+  listPublicApiTokens,
+  revokePublicApiToken,
+  publicApiScopes,
+  defaultPublicApiScopes,
+  type PublicApiScope,
+} from './public-pat.js';
 
 const log = pino({
   redact: ['req.headers.authorization', 'req.headers.cookie', '*.password', '*.token'],
@@ -94,6 +111,69 @@ const reconciliationRequests = new Gauge({
   labelNames: ['trigger', 'state'],
   registers: [metrics],
 });
+type PublicPrincipal = Readonly<{
+  id: string;
+  role: string | null;
+  patScopes: readonly PublicApiScope[] | null;
+  patId: string | null;
+}>;
+const PUBLIC_BODY_BYTES = 256 * 1024;
+const PUBLIC_MAX_PROPERTIES = 16;
+const PUBLIC_MAX_QUERY_BYTES = 8192;
+const PUBLIC_MAX_QUERY_PARAMETERS = 16;
+const PUBLIC_MAX_CURSOR_BYTES = 4096;
+const PUBLIC_TIMEOUT_MS = 10_000;
+const PUBLIC_RATE_LIMIT = 60;
+const PUBLIC_RATE_WINDOW_MS = 60_000;
+const PUBLIC_CURSOR_TTL_MS = 24 * 60 * 60 * 1000;
+const PUBLIC_TIMEOUT = Symbol('public_timeout');
+const PUBLIC_DEPENDENCY_ERROR = Symbol('public_dependency_error');
+
+const isAbortLike = (error: unknown): boolean => {
+  if (!(error instanceof Error)) return false;
+  return (
+    error.name === 'AbortError' ||
+    error.name === 'TimeoutError' ||
+    (error as NodeJS.ErrnoException).code === 'ABORT_ERR' ||
+    error.message === 'public_timeout'
+  );
+};
+
+const publicRateBuckets = new Map<string, number[]>();
+const publicSeriesId = (value: unknown): string =>
+  typeof value === 'string' && /^[0-9a-f]{64}$/.test(value)
+    ? value
+    : createHash('sha256')
+        .update(`series\u0000${String(value)}`)
+        .digest('hex');
+let publicRateLastCleanup = 0;
+const publicRateAllowed = (key: string, now = Date.now()): { ok: boolean; retryAfter: number } => {
+  if (now - publicRateLastCleanup >= PUBLIC_RATE_WINDOW_MS) {
+    publicRateLastCleanup = now;
+    for (const [bucketKey, timestamps] of publicRateBuckets) {
+      const recent = timestamps.filter((timestamp) => timestamp > now - PUBLIC_RATE_WINDOW_MS);
+      if (recent.length) publicRateBuckets.set(bucketKey, recent);
+      else publicRateBuckets.delete(bucketKey);
+    }
+    while (publicRateBuckets.size > 4096) {
+      const oldest = publicRateBuckets.keys().next().value;
+      if (oldest === undefined) break;
+      publicRateBuckets.delete(oldest);
+    }
+  }
+  const timestamps = (publicRateBuckets.get(key) ?? []).filter(
+    (timestamp) => timestamp > now - PUBLIC_RATE_WINDOW_MS,
+  );
+  if (timestamps.length >= PUBLIC_RATE_LIMIT) {
+    return {
+      ok: false,
+      retryAfter: Math.max(1, Math.ceil((timestamps[0] + PUBLIC_RATE_WINDOW_MS - now) / 1000)),
+    };
+  }
+  timestamps.push(now);
+  publicRateBuckets.set(key, timestamps);
+  return { ok: true, retryAfter: 0 };
+};
 export type ApiDeps = Readonly<{
   authenticatedUser?: typeof authenticatedUser;
   trustedMutationOrigin?: typeof trustedMutationOrigin;
@@ -119,6 +199,16 @@ export type ApiDeps = Readonly<{
   permanentlyDeleteUser?: typeof permanentlyDeleteUser;
   changeLibraryAccess?: typeof changeLibraryAccess;
   listAdminUsers?: typeof listAdminUsers;
+  getReaderPublicationSessionByIdentity?: typeof getReaderPublicationSessionByIdentity;
+  authenticatePublicApiToken?: typeof authenticatePublicApiToken;
+  libraryAccessScope?: typeof libraryAccessScope;
+  canAccessLibrary?: typeof canAccessLibrary;
+  readerRootForRequestPath?: typeof readerRootForRequestPath;
+  fetchReader?: typeof fetch;
+  readerServiceUrl?: string;
+  resolvePublicProgressTarget?: typeof resolvePublicProgressTarget;
+  resolvePublicTarget?: typeof resolvePublicTarget;
+  resolvePublicCollectionId?: typeof resolvePublicCollectionId;
   readerCapabilityKey?: string;
 }>;
 export const productionDeps: Required<ApiDeps> = {
@@ -146,6 +236,16 @@ export const productionDeps: Required<ApiDeps> = {
   permanentlyDeleteUser,
   changeLibraryAccess,
   listAdminUsers,
+  getReaderPublicationSessionByIdentity,
+  authenticatePublicApiToken,
+  libraryAccessScope,
+  canAccessLibrary,
+  readerRootForRequestPath,
+  fetchReader: fetch,
+  readerServiceUrl: process.env.GUTTER_READER_SERVICE_URL ?? 'http://worker:3001',
+  resolvePublicProgressTarget,
+  resolvePublicTarget,
+  resolvePublicCollectionId,
   readerCapabilityKey: '',
 };
 /** Build a fresh application. Importing this module has no schema/serve side effects. */
@@ -176,13 +276,776 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
     permanentlyDeleteUser,
     changeLibraryAccess,
     listAdminUsers,
+    getReaderPublicationSessionByIdentity,
+    authenticatePublicApiToken,
+    libraryAccessScope,
+    canAccessLibrary,
+    readerRootForRequestPath,
+    fetchReader,
+    readerServiceUrl,
+    resolvePublicProgressTarget,
+    resolvePublicTarget,
+    resolvePublicCollectionId,
   } = resolved;
+  const publicCursorSecret = async () =>
+    resolved.readerCapabilityKey || (await readerCapabilitySecret());
+  const encodePublicCursor = async (principal: PublicPrincipal, path: string, internal: string) => {
+    const key = createHash('sha256')
+      .update(await publicCursorSecret())
+      .digest();
+    const iv = randomBytes(12);
+    const cipher = createCipheriv('aes-256-gcm', key, iv);
+    const payload = JSON.stringify({
+      v: 1,
+      user: principal.id,
+      path,
+      exp: Date.now() + PUBLIC_CURSOR_TTL_MS,
+      internal,
+    });
+    const ciphertext = Buffer.concat([cipher.update(payload, 'utf8'), cipher.final()]);
+    return Buffer.concat([iv, cipher.getAuthTag(), ciphertext]).toString('base64url');
+  };
+  const decodePublicCursor = async (principal: PublicPrincipal, path: string, value: string) => {
+    try {
+      const raw = Buffer.from(value, 'base64url');
+      if (raw.length < 29) throw new Error();
+      const key = createHash('sha256')
+        .update(await publicCursorSecret())
+        .digest();
+      const decipher = createDecipheriv('aes-256-gcm', key, raw.subarray(0, 12));
+      decipher.setAuthTag(raw.subarray(12, 28));
+      const payload = JSON.parse(
+        Buffer.concat([decipher.update(raw.subarray(28)), decipher.final()]).toString('utf8'),
+      ) as Record<string, unknown>;
+      if (
+        payload.v !== 1 ||
+        payload.user !== principal.id ||
+        payload.path !== path ||
+        typeof payload.internal !== 'string' ||
+        typeof payload.exp !== 'number' ||
+        payload.exp < Date.now()
+      )
+        throw new Error();
+      return payload.internal;
+    } catch {
+      throw new Error('invalid_public_cursor');
+    }
+  };
   const app = new OpenAPIHono();
+  // Delegated public requests must retain the already-authenticated principal. Hono may wrap a
+  // nested Request before dispatching it, so identity-based WeakMap lookup is not sufficient.
+  // Instead use a short-lived random in-process context id. The id is generated here, accepted
+  // only while it is present in this map, and never leaves the private API boundary as authority.
+  const delegatedPrincipals = new Map<string, PublicPrincipal>();
+  const delegatedPrincipalFor = (request: Request): PublicPrincipal | undefined => {
+    const id =
+      request.headers.get('x-gutter-delegation') ??
+      new URL(request.url).searchParams.get('__gutter_delegation');
+    return id ? delegatedPrincipals.get(id) : undefined;
+  };
+  const requestPrincipal = async (
+    request: Request,
+    allowBearer = false,
+  ): Promise<PublicPrincipal | null> => {
+    const delegated = delegatedPrincipalFor(request);
+    if (delegated) return delegated;
+    const authorization = request.headers.get('authorization')?.trim();
+    if (authorization) {
+      // Direct internal routes can only use the browser session. A public bearer is accepted
+      // exclusively by the versioned adapter and then carried in the delegated context.
+      if (/^Bearer\s+gtr_pat_v1_[A-Za-z0-9_-]+$/i.test(authorization)) {
+        if (!allowBearer) return null;
+        const pat = await authenticatePublicApiToken(authorization.replace(/^Bearer\s+/i, ''));
+        return pat
+          ? { id: pat.userId, role: null, patScopes: pat.scopes, patId: pat.tokenId }
+          : null;
+      }
+      // Better Auth owns cookie/session authentication. Non-PAT authorization headers are
+      // ignored by production Better Auth, while retaining deterministic injected test sessions.
+      if (allowBearer) return null;
+    }
+    const session = await authenticatedUser(request);
+    return session ? { ...session, patScopes: null, patId: null } : null;
+  };
+  const publicError = (
+    c: any,
+    error: string,
+    status: 400 | 401 | 403 | 404 | 405 | 409 | 413 | 429 | 499 | 500 | 503 | 504,
+  ) =>
+    c.json(
+      {
+        error,
+        // The request-id middleware synthesizes an id for requests that did not provide one.
+        // Read the response context so validation/auth failures carry that same stable id.
+        requestId: c.res.headers.get('x-request-id') ?? c.req.header('x-request-id') ?? '',
+      },
+      status,
+    );
+  const publicClientKey = (request: Request, principal: PublicPrincipal): string => {
+    if (principal.patId) return `pat:${principal.patId}`;
+    const forwarded = request.headers.get('x-forwarded-for');
+    const trusted = request.headers.get('x-gutter-proxy') === '1';
+    return `client:${trusted && forwarded ? forwarded.split(',')[0]!.trim() : 'direct'}`;
+  };
+  const withPublicTimeout = async <T>(operation: Promise<T>): Promise<T> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        operation,
+        new Promise<T>((_, reject) => {
+          timer = setTimeout(() => reject(new Error('public_timeout')), PUBLIC_TIMEOUT_MS);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  };
+  const withPublicDependency = async <T>(
+    operation: Promise<T>,
+  ): Promise<T | typeof PUBLIC_TIMEOUT | typeof PUBLIC_DEPENDENCY_ERROR> => {
+    try {
+      return await withPublicTimeout(operation);
+    } catch (error) {
+      return isAbortLike(error) ? PUBLIC_TIMEOUT : PUBLIC_DEPENDENCY_ERROR;
+    }
+  };
+  const normalizePublicResponse = async (
+    c: any,
+    response: Response,
+    publicPath: string,
+    principal: PublicPrincipal,
+  ): Promise<Response> => {
+    if (publicPath.startsWith('/api/v1/page/')) {
+      const requestId = c.res.headers.get('x-request-id') ?? c.req.header('x-request-id') ?? '';
+      if (response.status === 304) return response;
+      if (!response.ok) {
+        const status = [404, 409, 416, 499, 500, 503, 504].includes(response.status)
+          ? response.status
+          : response.status >= 500
+            ? 503
+            : 500;
+        const error =
+          status === 404
+            ? 'not_found'
+            : status === 409
+              ? 'reader_conflict'
+              : status === 416
+                ? 'range_not_satisfiable'
+                : status === 499
+                  ? 'reader_cancelled'
+                  : status === 503
+                    ? 'reader_unavailable'
+                    : status === 504
+                      ? 'timeout'
+                      : 'reader_error';
+        const headers = new Headers({ 'content-type': 'application/json; charset=utf-8' });
+        const contentRange = response.headers.get('content-range');
+        if (contentRange) headers.set('content-range', contentRange);
+        return new Response(JSON.stringify({ error, requestId }), { status, headers });
+      }
+      const contentType = response.headers.get('content-type')?.split(';', 1)[0]?.toLowerCase();
+      if (contentType === 'application/json') {
+        return new Response(JSON.stringify({ error: 'reader_error', requestId }), {
+          status: 500,
+          headers: new Headers({ 'content-type': 'application/json; charset=utf-8' }),
+        });
+      }
+      if (
+        (response.status === 200 || response.status === 206) &&
+        (!response.body || !contentType?.startsWith('image/'))
+      ) {
+        return new Response(JSON.stringify({ error: 'reader_unavailable', requestId }), {
+          status: 503,
+          headers: new Headers({ 'content-type': 'application/json; charset=utf-8' }),
+        });
+      }
+      if (response.status < 200 || response.status >= 300 || ![200, 206].includes(response.status))
+        return new Response(JSON.stringify({ error: 'reader_error', requestId }), {
+          status: 500,
+          headers: new Headers({ 'content-type': 'application/json; charset=utf-8' }),
+        });
+      // Do not let a zero-byte success masquerade as a usable page.  The
+      // reader response is bounded by the reader service; buffering here also
+      // makes the public contract deterministic for the published proxy.
+      if (response.status === 200 || response.status === 206) {
+        const bytes = new Uint8Array(await response.arrayBuffer());
+        if (bytes.byteLength === 0)
+          return new Response(JSON.stringify({ error: 'reader_unavailable', requestId }), {
+            status: 503,
+            headers: new Headers({ 'content-type': 'application/json; charset=utf-8' }),
+          });
+        const headers = new Headers(response.headers);
+        headers.set('content-length', String(bytes.byteLength));
+        return new Response(bytes, { status: response.status, headers });
+      }
+      return response;
+    }
+    const requestId = c.res.headers.get('x-request-id') ?? c.req.header('x-request-id') ?? '';
+    if (!response.ok) {
+      let delegatedBody: Record<string, unknown> | null = null;
+      if (
+        response.headers.get('content-type')?.split(';', 1)[0]?.toLowerCase() === 'application/json'
+      ) {
+        const parsed = await response
+          .clone()
+          .json()
+          .catch(() => null);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed))
+          delegatedBody = parsed as Record<string, unknown>;
+      }
+      const status = [401, 403, 404, 405, 409, 413, 429, 499, 500, 503, 504].includes(
+        response.status,
+      )
+        ? response.status
+        : response.status >= 500
+          ? 503
+          : 500;
+      const error =
+        status === 401
+          ? 'authentication_required'
+          : status === 403
+            ? 'insufficient_scope'
+            : status === 404
+              ? 'not_found'
+              : status === 405
+                ? 'method_not_allowed'
+                : status === 409
+                  ? 'collection_conflict'
+                  : status === 413
+                    ? 'body_too_large'
+                    : status === 429
+                      ? 'rate_limited'
+                      : status === 499
+                        ? 'reader_cancelled'
+                        : status === 504
+                          ? 'timeout'
+                          : status === 503
+                            ? 'reader_unavailable'
+                            : 'reader_error';
+      if (
+        publicPath === '/api/v1/progress' &&
+        status === 409 &&
+        delegatedBody?.error === 'progress_conflict'
+      ) {
+        const rawProgress = delegatedBody.progress;
+        const progress =
+          rawProgress && typeof rawProgress === 'object' && !Array.isArray(rawProgress)
+            ? rawProgress
+            : null;
+        return new Response(JSON.stringify({ error: 'progress_conflict', progress, requestId }), {
+          status,
+          headers: new Headers({ 'content-type': 'application/json; charset=utf-8' }),
+        });
+      }
+      return new Response(JSON.stringify({ error, requestId }), {
+        status,
+        headers: new Headers({ 'content-type': 'application/json; charset=utf-8' }),
+      });
+    }
+    if (
+      response.headers.get('content-type')?.split(';', 1)[0]?.toLowerCase() !== 'application/json'
+    )
+      return new Response(JSON.stringify({ error: 'reader_error', requestId }), {
+        status: 500,
+        headers: new Headers({ 'content-type': 'application/json; charset=utf-8' }),
+      });
+    const text = await response.text();
+    const body = (() => {
+      try {
+        return JSON.parse(text);
+      } catch {
+        return null;
+      }
+    })();
+    if (!body || typeof body !== 'object' || Array.isArray(body) || 'error' in body)
+      return new Response(JSON.stringify({ error: 'reader_error', requestId }), {
+        status: 500,
+        headers: new Headers({ 'content-type': 'application/json; charset=utf-8' }),
+      });
+    let projected: Record<string, unknown> = body as Record<string, unknown>;
+    if (response.ok && (publicPath === '/api/v1/catalog' || publicPath === '/api/v1/search')) {
+      const page = body as {
+        items?: readonly Record<string, unknown>[];
+        nextCursor?: string | null;
+      };
+      projected = {
+        items: (page.items ?? []).map((item) => ({
+          seriesId: publicSeriesId(item.identityKey ?? item.id),
+          displayName: item.displayName,
+          publicationCount: item.publicationCount,
+        })),
+        nextCursor: page.nextCursor
+          ? await encodePublicCursor(principal, publicPath, page.nextCursor)
+          : null,
+      };
+    } else if (publicPath === '/api/v1/progress' && Object.hasOwn(body, 'progress')) {
+      const progress = (body as { progress?: Record<string, unknown> | null }).progress;
+      if (progress) {
+        const { rootId: _rootId, sourceKey: _sourceKey, userId: _userId, ...safe } = progress;
+        projected = { progress: safe };
+      } else projected = { progress: null };
+    } else if (response.ok && publicPath === '/api/v1/favorites') {
+      const page = body as {
+        items?: readonly Record<string, unknown>[];
+        nextCursor?: string | null;
+      };
+      projected = {
+        items: (page.items ?? [])
+          .filter(
+            (item) =>
+              item.favorite === true && ['series', 'publication'].includes(String(item.targetKind)),
+          )
+          .map((item) => {
+            return {
+              targetKind: item.targetKind,
+              targetId: item.targetKey,
+              favorite: true,
+              ...(item.updatedAt === undefined ? {} : { updatedAt: item.updatedAt }),
+            };
+          }),
+        nextCursor: page.nextCursor
+          ? await encodePublicCursor(principal, publicPath, page.nextCursor)
+          : null,
+      };
+    } else if (response.ok && publicPath === '/api/v1/collections') {
+      const page = body as {
+        items?: readonly Record<string, unknown>[];
+        nextCursor?: string | null;
+      };
+      if (Array.isArray(page.items)) {
+        projected = {
+          items: page.items.map((item) => {
+            const { id, name, createdAt, updatedAt } = item;
+            return {
+              collectionId: publicCollectionKey(principal.id, String(id)),
+              name,
+              createdAt,
+              updatedAt,
+            };
+          }),
+          nextCursor: page.nextCursor
+            ? await encodePublicCursor(principal, publicPath, page.nextCursor)
+            : null,
+        };
+      } else if (body.collection && typeof body.collection === 'object') {
+        const collection = body.collection as Record<string, unknown>;
+        projected = {
+          collection: {
+            collectionId: publicCollectionKey(principal.id, String(collection.id)),
+            name: collection.name,
+          },
+        };
+      }
+    }
+    if ('error' in projected)
+      projected = {
+        ...projected,
+        requestId: c.res.headers.get('x-request-id') ?? c.req.header('x-request-id') ?? '',
+      };
+    const headers = new Headers(response.headers);
+    headers.set('content-type', 'application/json; charset=utf-8');
+    return new Response(JSON.stringify(projected), {
+      status: response.status,
+      headers,
+    });
+  };
   const readerKey = resolved.readerCapabilityKey || null;
-
+  const fetchReaderForPrincipal = async (
+    request: Request,
+    user: PublicPrincipal,
+    pathname: string,
+  ): Promise<Response> => {
+    const scope = await libraryAccessScope(user.id);
+    const rootId = await readerRootForRequestPath(pathname);
+    const hasLibraryAccess = rootId ? canAccessLibrary(scope, rootId) : false;
+    const visible = rootId ? await isReaderPathVisible(user.id, pathname) : false;
+    if (!rootId || !hasLibraryAccess || !visible)
+      return new Response(JSON.stringify({ error: 'not_found' }), {
+        status: 404,
+        headers: new Headers({ 'content-type': 'application/json; charset=utf-8' }),
+      });
+    const headers = new Headers();
+    for (const name of ['range', 'if-none-match', 'if-modified-since']) {
+      const value = request.headers.get(name);
+      if (value) headers.set(name, value);
+    }
+    headers.set(
+      'x-gutter-reader-capability',
+      signReaderCapability(readerKey ?? (await readerCapabilitySecret()), {
+        userId: user.id,
+        rootId,
+        path: pathname,
+        aclRevision: scope.revision,
+      }),
+    );
+    const upstream = await withPublicTimeout(
+      fetchReader(`${readerServiceUrl}${pathname}`, {
+        method: request.method,
+        headers,
+        signal: request.signal,
+      }),
+    ).catch((error) => {
+      if (request.signal.aborted || isAbortLike(error)) return PUBLIC_TIMEOUT;
+      return PUBLIC_DEPENDENCY_ERROR;
+    });
+    const requestId = request.headers.get('x-request-id') ?? '';
+    if (upstream === PUBLIC_TIMEOUT)
+      return new Response(JSON.stringify({ error: 'timeout', requestId }), {
+        status: 504,
+        headers: new Headers({ 'content-type': 'application/json; charset=utf-8' }),
+      });
+    if (upstream === PUBLIC_DEPENDENCY_ERROR)
+      return new Response(JSON.stringify({ error: 'reader_unavailable', requestId }), {
+        status: 503,
+        headers: new Headers({ 'content-type': 'application/json; charset=utf-8' }),
+      });
+    const responseHeaders = new Headers();
+    for (const name of [
+      'accept-ranges',
+      'content-length',
+      'content-range',
+      'content-type',
+      'etag',
+      'last-modified',
+    ]) {
+      const value = upstream.headers.get(name);
+      if (value) responseHeaders.set(name, value);
+    }
+    responseHeaders.set('cache-control', 'no-store');
+    return new Response(upstream.body, { status: upstream.status, headers: responseHeaders });
+  };
+  const requiredScope: Record<string, PublicApiScope> = {
+    '/api/v1/catalog': 'catalog:read',
+    '/api/v1/search': 'search:read',
+    '/api/v1/page/': 'page:read',
+    '/api/v1/progress:GET': 'reading-state:read',
+    '/api/v1/progress:PUT': 'reading-state:write',
+    '/api/v1/favorites:GET': 'reading-state:read',
+    '/api/v1/favorites:PUT': 'reading-state:write',
+    '/api/v1/ratings:PUT': 'reading-state:write',
+    '/api/v1/collections:GET': 'collections:read',
+    '/api/v1/collections:POST': 'collections:write',
+  };
+  // Establish the request identifier before any public routing or validation can return an error.
   app.use('*', async (c, next) => {
     const requestId = c.req.header('x-request-id') ?? crypto.randomUUID();
     c.header('x-request-id', requestId);
+    await next();
+  });
+  app.get('/user-state/pats', async (c) => {
+    const user = await requestPrincipal(c.req.raw);
+    if (!user) return c.json({ error: 'authentication_required' as const }, 401);
+    return c.json({ items: await listPublicApiTokens(user.id) }, 200);
+  });
+  app.post('/user-state/pats', async (c) => {
+    const user = await requestPrincipal(c.req.raw);
+    if (!user) return c.json({ error: 'authentication_required' as const }, 401);
+    if (!trustedMutationOrigin(c.req.raw)) return c.json({ error: 'invalid_origin' as const }, 403);
+    const body = await c.req.json().catch(() => null);
+    if (
+      !body ||
+      typeof body.label !== 'string' ||
+      body.label.length > 128 ||
+      (body.scopes !== undefined &&
+        (!Array.isArray(body.scopes) || body.scopes.length > publicApiScopes.length)) ||
+      (body.expiresAt !== undefined &&
+        body.expiresAt !== null &&
+        typeof body.expiresAt !== 'string')
+    )
+      return c.json({ error: 'invalid_request' as const }, 400);
+    try {
+      return c.json(
+        await createPublicApiToken(
+          user.id,
+          body.label,
+          body.scopes ?? defaultPublicApiScopes,
+          body.expiresAt,
+        ),
+        201,
+      );
+    } catch {
+      return c.json({ error: 'invalid_request' as const }, 400);
+    }
+  });
+  app.delete('/user-state/pats/:id', async (c) => {
+    const user = await requestPrincipal(c.req.raw);
+    if (!user) return c.json({ error: 'authentication_required' as const }, 401);
+    if (!trustedMutationOrigin(c.req.raw)) return c.json({ error: 'invalid_origin' as const }, 403);
+    return c.json({ revoked: await revokePublicApiToken(user.id, c.req.param('id')) }, 200);
+  });
+  // Public v1 is a strict allow-list of aliases to existing authorization-safe handlers.
+  // Internal routes remain available only under their original, unstable namespaces.
+  app.use('/api/v1/*', async (c, next) => {
+    const path = new URL(c.req.url).pathname;
+    const aliases: Record<string, string> = {
+      '/api/v1/catalog': '/catalog/series',
+      '/api/v1/search': '/catalog/series',
+      '/api/v1/progress': '/user-state/progress',
+      '/api/v1/favorites': '/user-state/targets',
+      '/api/v1/ratings': '/user-state/targets',
+      '/api/v1/collections': '/user-state/collections',
+    };
+    if (path === '/api/v1/openapi.json') return next();
+    const method = c.req.method.toUpperCase();
+    const allowedMethods: Record<string, readonly string[]> = {
+      '/api/v1/catalog': ['GET'],
+      '/api/v1/search': ['GET'],
+      '/api/v1/progress': ['GET', 'PUT'],
+      '/api/v1/favorites': ['GET', 'PUT'],
+      '/api/v1/ratings': ['PUT'],
+      '/api/v1/collections': ['GET', 'POST'],
+    };
+    if (path.startsWith('/api/v1/page/')) {
+      if (!['GET', 'HEAD'].includes(method)) {
+        c.header('allow', 'GET, HEAD');
+        return publicError(c, 'method_not_allowed', 405);
+      }
+    } else if (allowedMethods[path] && !allowedMethods[path].includes(method)) {
+      c.header('allow', allowedMethods[path]!.join(', '));
+      return publicError(c, 'method_not_allowed', 405);
+    }
+    if (!path.startsWith('/api/v1/page/') && !aliases[path])
+      return publicError(c, 'not_found', 404);
+    const url = new URL(c.req.url);
+    if (Buffer.byteLength(url.search, 'utf8') > PUBLIC_MAX_QUERY_BYTES)
+      return publicError(c, 'invalid_query', 400);
+    const params = [...url.searchParams.entries()];
+    if (
+      params.length > PUBLIC_MAX_QUERY_PARAMETERS ||
+      params.some(
+        ([key, value]) =>
+          Buffer.byteLength(key, 'utf8') > 128 || Buffer.byteLength(value, 'utf8') > 4096,
+      )
+    )
+      return publicError(c, 'invalid_query', 400);
+    const cursor = url.searchParams.get('cursor');
+    if (cursor && Buffer.byteLength(cursor, 'utf8') > PUBLIC_MAX_CURSOR_BYTES)
+      return publicError(c, 'invalid_cursor', 400);
+    const contentLength = Number(c.req.header('content-length') ?? 0);
+    if (Number.isFinite(contentLength) && contentLength > PUBLIC_BODY_BYTES)
+      return publicError(c, 'body_too_large', 413);
+    const principal = await requestPrincipal(c.req.raw, true);
+    const scope =
+      requiredScope[path.startsWith('/api/v1/page/') ? '/api/v1/page/' : `${path}:${method}`] ??
+      requiredScope[path];
+    if (!principal) return publicError(c, 'authentication_required', 401);
+    if (!['GET', 'HEAD'].includes(method) && !principal.patId && !trustedMutationOrigin(c.req.raw))
+      return publicError(c, 'invalid_origin', 403);
+    if (principal.patScopes && scope && !principal.patScopes.includes(scope))
+      return publicError(c, 'insufficient_scope', 403);
+    const rate = publicRateAllowed(publicClientKey(c.req.raw, principal));
+    if (!rate.ok) {
+      c.header('retry-after', String(rate.retryAfter));
+      return publicError(c, 'rate_limited', 429);
+    }
+    if (path.startsWith('/api/v1/page/')) {
+      const match = /^\/api\/v1\/page\/([0-9a-f]{64}:[0-9a-f]{64})\/([0-9]+)$/.exec(path);
+      if (!match || Number(match[2]) > 1000000) return publicError(c, 'not_found', 404);
+      const publication = await withPublicDependency(
+        Promise.resolve().then(() => getReaderPublicationSessionByIdentity(match[1], principal.id)),
+      );
+      if (publication === PUBLIC_TIMEOUT) return publicError(c, 'timeout', 504);
+      if (publication === PUBLIC_DEPENDENCY_ERROR) return publicError(c, 'reader_error', 500);
+      if (!publication || !publication.release.validOrdinals.includes(Number(match[2])))
+        return publicError(c, 'not_found', 404);
+      url.pathname = `/api/reader/releases/${publication.releaseId}/pages/${match[2]}`;
+      const delegatedHeaders = new Headers(c.req.raw.headers);
+      const delegatedWithContext = new Request(url, {
+        method,
+        headers: delegatedHeaders,
+        signal: AbortSignal.timeout(PUBLIC_TIMEOUT_MS),
+      });
+      return withPublicTimeout(
+        fetchReaderForPrincipal(delegatedWithContext, principal, url.pathname),
+      )
+        .then((response) => normalizePublicResponse(c, response, path, principal))
+        .catch((error) => {
+          if (isAbortLike(error)) return publicError(c, 'timeout', 504);
+          return publicError(c, 'reader_unavailable', 503);
+        });
+    }
+    const target = aliases[path]!;
+    const allowedQuery =
+      path === '/api/v1/search'
+        ? new Set(['q', 'limit', 'cursor'])
+        : path === '/api/v1/catalog'
+          ? new Set(['q', 'limit', 'cursor'])
+          : path === '/api/v1/progress' && method === 'GET'
+            ? new Set(['progressKey'])
+            : new Set<string>();
+    if (params.some(([key]) => !allowedQuery.has(key))) return publicError(c, 'invalid_query', 400);
+    if (
+      path === '/api/v1/search' &&
+      (!url.searchParams.get('q') ||
+        url.searchParams.get('q')!.trim().length < 1 ||
+        url.searchParams.get('q')!.length > 256)
+    )
+      return publicError(c, 'invalid_query', 400);
+    if (path === '/api/v1/catalog' && url.searchParams.get('q')?.length! > 256)
+      return publicError(c, 'invalid_query', 400);
+    const limit = url.searchParams.get('limit');
+    if (limit !== null && (!/^[0-9]+$/.test(limit) || Number(limit) < 1 || Number(limit) > 100))
+      return publicError(c, 'invalid_pagination', 400);
+    if (
+      url.searchParams.get('progressKey') &&
+      !/^source:[A-Za-z0-9_-]{1,128}$/.test(url.searchParams.get('progressKey')!)
+    )
+      return publicError(c, 'invalid_request', 400);
+    let internalCursor: string | undefined;
+    if (cursor) {
+      try {
+        internalCursor = await decodePublicCursor(principal, path, cursor);
+      } catch {
+        return publicError(c, 'invalid_cursor', 400);
+      }
+    }
+    const rewrittenParams = new URLSearchParams();
+    for (const key of allowedQuery) {
+      const value = url.searchParams.get(key);
+      if (value !== null && key !== 'cursor') rewrittenParams.set(key, value);
+    }
+    if (internalCursor) rewrittenParams.set('cursor', internalCursor);
+    if (path === '/api/v1/progress' && method === 'GET') {
+      if (!url.searchParams.get('progressKey')) return publicError(c, 'invalid_request', 400);
+      const progressTarget = await withPublicDependency(
+        Promise.resolve().then(() =>
+          resolvePublicProgressTarget(principal.id, url.searchParams.get('progressKey') ?? ''),
+        ),
+      );
+      if (progressTarget === PUBLIC_TIMEOUT) return publicError(c, 'timeout', 504);
+      if (progressTarget === PUBLIC_DEPENDENCY_ERROR) return publicError(c, 'reader_error', 500);
+      if (!progressTarget) return publicError(c, 'not_found', 404);
+      rewrittenParams.set('rootId', progressTarget.rootId);
+      rewrittenParams.set('progressKey', url.searchParams.get('progressKey')!);
+    }
+    url.search = rewrittenParams.toString();
+    url.pathname = target;
+    let body: string | undefined;
+    if (method !== 'GET' && method !== 'HEAD') {
+      const rawBody = await c.req.raw.clone().text();
+      if (Buffer.byteLength(rawBody, 'utf8') > PUBLIC_BODY_BYTES)
+        return publicError(c, 'body_too_large', 413);
+      try {
+        const parsed = JSON.parse(rawBody) as Record<string, unknown>;
+        if (
+          !parsed ||
+          typeof parsed !== 'object' ||
+          Array.isArray(parsed) ||
+          Object.keys(parsed).length > PUBLIC_MAX_PROPERTIES
+        )
+          return publicError(c, 'invalid_request', 400);
+        let adapted: Record<string, unknown> = parsed;
+        if (path === '/api/v1/progress') {
+          if (
+            !Object.keys(parsed).every((key) =>
+              ['progressKey', 'expectedRevision', 'pageOrdinal', 'completed'].includes(key),
+            ) ||
+            typeof parsed.progressKey !== 'string' ||
+            !/^source:[A-Za-z0-9_-]{1,128}$/.test(parsed.progressKey) ||
+            !Number.isSafeInteger(parsed.expectedRevision) ||
+            (parsed.expectedRevision as number) < 0 ||
+            !Number.isSafeInteger(parsed.pageOrdinal) ||
+            (parsed.pageOrdinal as number) < 0 ||
+            (parsed.pageOrdinal as number) > 1000000 ||
+            typeof parsed.completed !== 'boolean'
+          )
+            return publicError(c, 'invalid_request', 400);
+          const progressTarget = await withPublicDependency(
+            Promise.resolve().then(() =>
+              resolvePublicProgressTarget(principal.id, parsed.progressKey as string),
+            ),
+          );
+          if (progressTarget === PUBLIC_TIMEOUT) return publicError(c, 'timeout', 504);
+          if (progressTarget === PUBLIC_DEPENDENCY_ERROR)
+            return publicError(c, 'reader_error', 500);
+          if (!progressTarget) return publicError(c, 'not_found', 404);
+          adapted = { ...parsed, rootId: progressTarget.rootId };
+        } else if (path === '/api/v1/favorites' || path === '/api/v1/ratings') {
+          const allowed =
+            path === '/api/v1/favorites'
+              ? ['targetKind', 'targetId', 'favorite']
+              : ['targetKind', 'targetId', 'rating'];
+          if (
+            !Object.keys(parsed).every((key) => allowed.includes(key)) ||
+            typeof parsed.targetKind !== 'string' ||
+            typeof parsed.targetId !== 'string' ||
+            (parsed.targetKind === 'series' && !/^[0-9a-f]{64}$/.test(parsed.targetId)) ||
+            (parsed.targetKind === 'publication' &&
+              !/^[0-9a-f]{64}:[0-9a-f]{64}$/.test(parsed.targetId))
+          )
+            return publicError(c, 'invalid_request', 400);
+          if (path === '/api/v1/favorites' && typeof parsed.favorite !== 'boolean')
+            return publicError(c, 'invalid_request', 400);
+          if (
+            (path === '/api/v1/ratings' &&
+              parsed.rating !== null &&
+              !Number.isSafeInteger(parsed.rating)) ||
+            (path === '/api/v1/ratings' &&
+              parsed.rating !== null &&
+              ((parsed.rating as number) < 1 || (parsed.rating as number) > 5))
+          )
+            return publicError(c, 'invalid_request', 400);
+          if (!['series', 'publication'].includes(parsed.targetKind))
+            return publicError(c, 'invalid_request', 400);
+          const target = await withPublicDependency(
+            Promise.resolve().then(() =>
+              resolvePublicTarget(
+                principal.id,
+                parsed.targetKind as 'series' | 'publication',
+                parsed.targetId as string,
+              ),
+            ),
+          );
+          if (target === PUBLIC_TIMEOUT) return publicError(c, 'timeout', 504);
+          if (target === PUBLIC_DEPENDENCY_ERROR) return publicError(c, 'reader_error', 500);
+          if (!target) return publicError(c, 'not_found', 404);
+          adapted = {
+            ...parsed,
+            rootId: target.rootId,
+            targetKey: target.targetKey,
+          };
+          delete adapted.targetId;
+        } else if (path === '/api/v1/collections') {
+          if (
+            !Object.keys(parsed).every((key) => key === 'name') ||
+            typeof parsed.name !== 'string' ||
+            parsed.name.length < 1 ||
+            parsed.name.length > 128
+          )
+            return publicError(c, 'invalid_request', 400);
+        }
+        body = JSON.stringify(adapted);
+      } catch {
+        return publicError(c, 'invalid_request', 400);
+      }
+    }
+    const delegatedHeaders = new Headers(c.req.raw.headers);
+    delegatedHeaders.delete('content-length');
+    delegatedHeaders.delete('host');
+    const delegationId = crypto.randomUUID();
+    delegatedHeaders.set('x-gutter-delegation', delegationId);
+    const delegated = new Request(url, {
+      method,
+      headers: delegatedHeaders,
+      body,
+      signal: AbortSignal.timeout(PUBLIC_TIMEOUT_MS),
+    });
+    delegatedPrincipals.set(delegationId, principal);
+    return withPublicTimeout(Promise.resolve(app.fetch(delegated)))
+      .then((response) => normalizePublicResponse(c, response, path, principal))
+      .catch((error) => {
+        if (isAbortLike(error)) return publicError(c, 'timeout', 504);
+        return publicError(c, 'reader_unavailable', 503);
+      })
+      .finally(() => delegatedPrincipals.delete(delegationId));
+  });
+  app.get('/api/v1/openapi.json', async (c) => {
+    const document = await readFile(resolve(process.cwd(), 'docs/openapi-v1.json'), 'utf8');
+    c.header('content-type', 'application/json; charset=utf-8');
+    return c.body(document, 200);
+  });
+  app.use('*', async (c, next) => {
+    const requestId = c.req.header('x-request-id')!;
     const started = performance.now();
     await next();
     log.info(
@@ -255,52 +1118,11 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
   app.all('/api/auth/*', (c) => authHandler(c.req.raw));
   app.all('/api/reader/*', async (c) => {
     if (!['GET', 'HEAD'].includes(c.req.method)) return c.body(null, 404);
-    const user = await authenticatedUser(c.req.raw);
+    const user = await requestPrincipal(c.req.raw);
     if (!user) return c.json({ error: 'not_found' }, 404);
-    const scope = await libraryAccessScope(user.id);
-    const pathname = new URL(c.req.url).pathname;
-    const rootId = await readerRootForRequestPath(pathname);
-    if (
-      !rootId ||
-      !canAccessLibrary(scope, rootId) ||
-      !(await isReaderPathVisible(user.id, pathname))
-    )
-      return c.json({ error: 'not_found' }, 404);
-    const headers = new Headers();
-    for (const name of ['range', 'if-none-match', 'if-modified-since']) {
-      const value = c.req.header(name);
-      if (value) headers.set(name, value);
-    }
-    headers.set(
-      'x-gutter-reader-capability',
-      signReaderCapability(readerKey ?? (await readerCapabilitySecret()), {
-        userId: user.id,
-        rootId,
-        path: pathname,
-        aclRevision: scope.revision,
-      }),
-    );
-    const upstream = await fetch(`http://worker:3001${pathname}`, {
-      method: c.req.method,
-      headers,
-      signal: c.req.raw.signal,
-    });
-    const responseHeaders = new Headers();
-    for (const name of [
-      'accept-ranges',
-      'content-length',
-      'content-range',
-      'content-type',
-      'etag',
-      'last-modified',
-    ]) {
-      const value = upstream.headers.get(name);
-      if (value) responseHeaders.set(name, value);
-    }
-    responseHeaders.set('cache-control', 'no-store');
-    return new Response(upstream.body, { status: upstream.status, headers: responseHeaders });
+    return fetchReaderForPrincipal(c.req.raw, user, new URL(c.req.url).pathname);
   });
-  const userStateUser = async (request: Request) => authenticatedUser(request);
+  const userStateUser = async (request: Request) => requestPrincipal(request);
   const userStateBody = async (c: any): Promise<Record<string, unknown> | null> => {
     const body = await c.req.json().catch(() => null);
     return body && typeof body === 'object' && !Array.isArray(body) ? body : null;
@@ -321,7 +1143,7 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
     typeof value === 'string' && targetKinds.has(value);
   const publicProgress = (progress: any) => {
     if (!progress) return null;
-    const { sourceKey, userId: _userId, ...safe } = progress;
+    const { sourceKey, rootId: _rootId, userId: _userId, ...safe } = progress;
     return {
       ...safe,
       progressKey:
@@ -344,7 +1166,12 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
     nextCursor: page.nextCursor,
   });
   app.use('/user-state/*', async (c, next) => {
-    if (!['GET', 'HEAD'].includes(c.req.method) && !trustedMutationOrigin(c.req.raw))
+    const delegated = delegatedPrincipalFor(c.req.raw);
+    if (
+      !['GET', 'HEAD'].includes(c.req.method) &&
+      !delegated?.patId &&
+      !trustedMutationOrigin(c.req.raw)
+    )
       return c.json({ error: 'invalid_origin' }, 403);
     if (!(await userStateUser(c.req.raw))) return c.json({ error: 'authentication_required' }, 401);
     await next();
@@ -471,7 +1298,14 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
       });
       return result.ok
         ? c.json({ progress: publicProgress(result.current) }, 200)
-        : c.json({ error: 'progress_conflict', progress: publicProgress(result.current) }, 409);
+        : c.json(
+            {
+              error: 'progress_conflict',
+              progress: publicProgress(result.current),
+              requestId: c.res.headers.get('x-request-id') ?? c.req.header('x-request-id') ?? '',
+            },
+            409,
+          );
     } catch (error) {
       return userStateError(c, error);
     }
@@ -598,7 +1432,16 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
     if (!body || !hasOnlyKeys(body, ['name']) || typeof body.name !== 'string')
       return c.json({ error: 'invalid_collection_name' }, 400);
     try {
-      return c.json({ collection: await createUserCollection(user.id, body.name) }, 201);
+      const collection = await createUserCollection(user.id, body.name);
+      if (!collection)
+        return c.json(
+          {
+            error: 'collection_conflict',
+            requestId: c.res.headers.get('x-request-id') ?? c.req.header('x-request-id') ?? '',
+          },
+          409,
+        );
+      return c.json({ collection }, 201);
     } catch (error) {
       return userStateError(c, error);
     }
@@ -699,7 +1542,7 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
   });
   const requestAccess = new WeakMap<Request, LibraryAccessScope>();
   app.use('/catalog/*', async (c, next) => {
-    const user = await authenticatedUser(c.req.raw);
+    const user = await requestPrincipal(c.req.raw);
     if (!user) return c.json({ error: 'authentication_required' }, 401);
     requestAccess.set(c.req.raw, await libraryAccessScope(user.id));
     await next();

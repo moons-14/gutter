@@ -10,7 +10,7 @@ jobs:
       - run: corepack enable && corepack prepare pnpm@11.20.0 --activate
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec playwright install --with-deps chrome
-      - run: pnpm audit:licenses && pnpm check && pnpm lint && pnpm typecheck && pnpm unit && pnpm build && pnpm --filter @gutter/web test:e2e
+      - run: pnpm audit:licenses && pnpm check && pnpm check:openapi-compat && pnpm test:public && pnpm lint && pnpm typecheck && pnpm unit && pnpm build && pnpm --filter @gutter/web test:e2e
   compose-smoke:
     needs: quality
     runs-on: ubuntu-latest
@@ -33,6 +33,7 @@ jobs:
       - run: docker compose wait migrate
       - run: docker compose up -d api worker web
       - run: docker compose --profile test run --rm test
+      - run: GUTTER_READER_SERVICE_URL=http://reader-fixture:3001 docker compose --profile public-api run --rm public-api-test
       - run: docker compose run --rm --no-deps migrate
       - if: failure()
         run: |
