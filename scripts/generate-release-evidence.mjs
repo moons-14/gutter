@@ -108,7 +108,7 @@ const evidence = {
     },
   ],
   references: {
-    issue26: 'pending #26 scale evidence',
+    issue26: 'release-artifacts/scale-evidence.json',
     issue27: 'scripts/compose-restore-drill.sh',
   },
   threatClaims: manifest.threatClaims,

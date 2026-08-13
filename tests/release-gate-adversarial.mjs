@@ -46,8 +46,16 @@ test('invalid scale schema/baseline JSON rejects before synthetic evidence can p
   const baselinePath = 'docs/scale-oracle-baseline.json';
   let schema;
   let baseline;
-  try { schema = await readFile(schemaPath); } catch (error) { if (error.code !== 'ENOENT') throw error; }
-  try { baseline = await readFile(baselinePath); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  try {
+    schema = await readFile(schemaPath);
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+  try {
+    baseline = await readFile(baselinePath);
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
   try {
     await writeFile(schemaPath, 'not-json');
     await writeFile(baselinePath, 'not-json');
@@ -56,8 +64,10 @@ test('invalid scale schema/baseline JSON rejects before synthetic evidence can p
       /Unexpected token|JSON|not valid/,
     );
   } finally {
-    if (schema) await writeFile(schemaPath, schema); else await rm(schemaPath, { force: true });
-    if (baseline) await writeFile(baselinePath, baseline); else await rm(baselinePath, { force: true });
+    if (schema) await writeFile(schemaPath, schema);
+    else await rm(schemaPath, { force: true });
+    if (baseline) await writeFile(baselinePath, baseline);
+    else await rm(baselinePath, { force: true });
   }
 });
 

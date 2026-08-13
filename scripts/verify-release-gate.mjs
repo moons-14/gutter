@@ -53,13 +53,24 @@ const validateScaleEvidence = async (artifact) => {
   assert.ok(report.seed && report.runId);
   assert.equal(report.dataset.books, 100000);
   assert.equal(report.dataset.pages, 2000000);
-  assert.equal(report.worker.queueCompletedRuns >= 2, true);
+  assert.equal(report.worker.queueCompletedRuns, 3);
+  for (const key of ['first', 'noChange', 'changed']) {
+    const run = report.worker.runs?.[key];
+    assert.ok(run?.requestId && run?.id && run?.pgBossJobId, `missing observed worker run: ${key}`);
+    assert.equal(run.state, 'completed');
+  }
+  assert.equal(report.worker.runs.first.summary.updated, 1000);
+  assert.equal(report.worker.runs.noChange.summary.unchanged, 1000);
+  assert.equal(report.worker.runs.changed.summary.updated, 1);
   assert.equal(report.cache.coldProducers, 1);
   assert.equal(report.cache.warmHit, true);
   assert.equal(report.cache.pressure.protectedLiveEntry, true);
   assert.equal(report.cache.pressure.reclaimedBytes > 0, true);
   assert.equal(report.sparse.logicalBytes, 20 * 1024 ** 4);
   assert.equal(report.sparse.allocatedBlocks < 1024, true);
+  assert.equal(report.environment.setupDatabaseRole, 'gutter');
+  assert.equal(report.environment.workerDatabaseRole, 'gutter_worker');
+  assert.equal(report.environment.sourceMount, 'read-only');
   for (const timing of Object.values(report.timingsMs)) {
     assert.ok(Number.isFinite(timing.p50) && Number.isFinite(timing.p95));
   }
@@ -175,17 +186,20 @@ let scaleBaseline;
 try {
   scaleSchema = JSON.parse(await read('docs/scale-oracle-evidence.schema.json'));
   scaleBaseline = JSON.parse(await read('docs/scale-oracle-baseline.json'));
-  assert.equal(scaleSchema.schemaVersion, 'gutter.scale-oracle.v1');
-  assert.ok(scaleSchema.required.includes('schemaVersion') && scaleSchema.required.includes('status'));
-  assert.equal(scaleSchema.additionalProperties, true);
+  assert.ok(
+    scaleSchema.required.includes('schemaVersion') && scaleSchema.required.includes('status'),
+  );
+  assert.equal(scaleSchema.properties.schemaVersion.const, 'gutter.scale-oracle.v1');
   assert.equal(scaleBaseline.schemaVersion, 'gutter.scale-oracle.v1');
   assert.equal(scaleBaseline.portable.defaultBooks, 1000);
   assert.equal(scaleBaseline.portable.defaultPages, 10000);
   assert.equal(scaleBaseline.portable.tinyCbzCount, 10000);
   for (const value of Object.values(scaleBaseline.portable)) assert.ok(Number.isFinite(value));
 } catch (error) {
-  if (error?.code === 'ENOENT') { scaleSchema = undefined; scaleBaseline = undefined; }
-  else throw error;
+  if (error?.code === 'ENOENT') {
+    scaleSchema = undefined;
+    scaleBaseline = undefined;
+  } else throw error;
 }
 
 const evidencePath = process.argv[3];
