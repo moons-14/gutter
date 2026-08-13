@@ -23,6 +23,14 @@ export async function revokePublicApiToken(userId: string, id: string) {
   return result.rowCount === 1;
 }
 
+export async function listPublicApiTokens(userId: string) {
+  const result = await pool.query(
+    'select id,label,scopes,created_at as "createdAt",last_used_at as "lastUsedAt",revoked_at as "revokedAt" from gutter_public_api_tokens where user_id=$1 order by created_at desc limit 100',
+    [userId],
+  );
+  return result.rows;
+}
+
 export async function authenticatePublicApiToken(value: string | undefined) {
   if (!value?.startsWith(prefix)) return null;
   const presented = hash(value.slice(0));
@@ -32,6 +40,8 @@ export async function authenticatePublicApiToken(value: string | undefined) {
   );
   const match = result.rows[0];
   if (!match || !timingSafeEqual(Buffer.from(match.token_hash), presented)) return null;
-  await pool.query('update gutter_public_api_tokens set last_used_at=now() where id=$1', [match.id]);
+  await pool.query('update gutter_public_api_tokens set last_used_at=now() where id=$1', [
+    match.id,
+  ]);
   return { userId: match.user_id, scope: 'api:v1' as const };
 }

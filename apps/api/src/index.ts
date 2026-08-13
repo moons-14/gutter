@@ -70,7 +70,12 @@ import { Gauge, Registry, collectDefaultMetrics } from 'prom-client';
 import pino from 'pino';
 import { reconciliationMetricLabels } from './metrics.js';
 import { authenticatedUser, authHandler, trustedMutationOrigin } from './auth.js';
-import { authenticatePublicApiToken } from './public-pat.js';
+import {
+  authenticatePublicApiToken,
+  createPublicApiToken,
+  listPublicApiTokens,
+  revokePublicApiToken,
+} from './public-pat.js';
 
 const log = pino({
   redact: ['req.headers.authorization', 'req.headers.cookie', '*.password', '*.token'],
@@ -180,26 +185,61 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
     listAdminUsers,
   } = resolved;
   const app = new OpenAPIHono();
+  app.get('/user-state/pats', async (c) => {
+    const user = await authenticatedUser(c.req.raw);
+    if (!user) return c.json({ error: 'authentication_required' as const }, 401);
+    return c.json({ items: await listPublicApiTokens(user.id) }, 200);
+  });
+  app.post('/user-state/pats', async (c) => {
+    const user = await authenticatedUser(c.req.raw);
+    if (!user) return c.json({ error: 'authentication_required' as const }, 401);
+    const body = await c.req.json().catch(() => null);
+    if (!body || typeof body.label !== 'string' || body.label.length > 128)
+      return c.json({ error: 'invalid_request' as const }, 400);
+    try {
+      return c.json(await createPublicApiToken(user.id, body.label), 201);
+    } catch {
+      return c.json({ error: 'invalid_request' as const }, 400);
+    }
+  });
+  app.delete('/user-state/pats/:id', async (c) => {
+    const user = await authenticatedUser(c.req.raw);
+    if (!user) return c.json({ error: 'authentication_required' as const }, 401);
+    return c.json({ revoked: await revokePublicApiToken(user.id, c.req.param('id')) }, 200);
+  });
   // Public v1 is a strict allow-list of aliases to existing authorization-safe handlers.
   // Internal routes remain available only under their original, unstable namespaces.
   app.use('/api/v1/*', async (c, next) => {
     const path = new URL(c.req.url).pathname;
     const aliases: Record<string, string> = {
-      '/api/v1/catalog': '/catalog/series', '/api/v1/search': '/catalog/series',
-      '/api/v1/progress': '/user-state/progress', '/api/v1/favorites': '/user-state/targets',
-      '/api/v1/ratings': '/user-state/targets', '/api/v1/collections': '/user-state/collections',
+      '/api/v1/catalog': '/catalog/series',
+      '/api/v1/search': '/catalog/series',
+      '/api/v1/progress': '/user-state/progress',
+      '/api/v1/favorites': '/user-state/targets',
+      '/api/v1/ratings': '/user-state/targets',
+      '/api/v1/collections': '/user-state/collections',
     };
     if (path === '/api/v1/openapi.json' || path.startsWith('/api/v1/page/')) return next();
     const target = aliases[path];
-    if (!target) return c.json({ error: 'not_found', requestId: c.req.header('x-request-id') ?? '' }, 404);
-    const pat = await authenticatePublicApiToken(c.req.header('authorization')?.replace(/^Bearer\s+/i, ''));
+    if (!target)
+      return c.json({ error: 'not_found', requestId: c.req.header('x-request-id') ?? '' }, 404);
+    const pat = await authenticatePublicApiToken(
+      c.req.header('authorization')?.replace(/^Bearer\s+/i, ''),
+    );
     if (!pat && !(await authenticatedUser(c.req.raw)))
-      return c.json({ error: 'authentication_required', requestId: c.req.header('x-request-id') ?? '' }, 401);
-    const url = new URL(c.req.url); url.pathname = target;
+      return c.json(
+        { error: 'authentication_required', requestId: c.req.header('x-request-id') ?? '' },
+        401,
+      );
+    const url = new URL(c.req.url);
+    url.pathname = target;
     return app.fetch(new Request(url, c.req.raw));
   });
   app.get('/api/v1/openapi.json', async (c) => {
-    const document = await readFile(new URL('../../../docs/openapi-v1.yaml', import.meta.url), 'utf8');
+    const document = await readFile(
+      new URL('../../../docs/openapi-v1.yaml', import.meta.url),
+      'utf8',
+    );
     c.header('content-type', 'text/yaml; charset=utf-8');
     return c.body(document, 200);
   });
