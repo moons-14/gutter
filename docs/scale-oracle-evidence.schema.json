@@ -35,17 +35,26 @@
       },
       "additionalProperties": false
     },
-    "thresholds": { "type": "object", "additionalProperties": { "type": "number" } },
-    "environment": { "type": "object" },
-    "timingsMs": { "type": "object" },
-    "plans": { "type": "object" },
-    "cache": { "type": "object" },
+    "thresholds": {
+      "type": "object",
+      "required": ["sourceFixtureBooks", "sourceFixturePages", "readerCount", "coldProducerCount", "sparseAllocatedBlocksMax", "advisoryCatalogP95Ms", "advisorySearchP95Ms", "advisoryScanP95Ms"],
+      "properties": {
+        "sourceFixtureBooks": { "const": 1000 }, "sourceFixturePages": { "const": 1000 },
+        "readerCount": { "const": 5 }, "coldProducerCount": { "const": 1 },
+        "sparseAllocatedBlocksMax": { "type": "number", "minimum": 0 },
+        "advisoryCatalogP95Ms": { "type": "number", "minimum": 0 }, "advisorySearchP95Ms": { "type": "number", "minimum": 0 }, "advisoryScanP95Ms": { "type": "number", "minimum": 0 }
+      }, "additionalProperties": false
+    },
+    "environment": { "type": "object", "required": ["node", "postgres", "setupDatabaseRole", "workerDatabaseRole", "sourceMount"], "properties": { "node": { "type": "string" }, "postgres": { "type": "object" }, "setupDatabaseRole": { "const": "gutter" }, "workerDatabaseRole": { "const": "gutter_worker" }, "sourceMount": { "const": "read-only" } }, "additionalProperties": false },
+    "timingsMs": { "type": "object", "required": ["catalog", "search", "noChangeScan", "changedScan"], "additionalProperties": false },
+    "plans": { "type": "object", "required": ["queryShape", "list", "search"], "properties": { "queryShape": { "type": "string" }, "list": { "type": "array" }, "search": { "type": "array" } }, "additionalProperties": false },
+    "cache": { "type": "object", "required": ["readers", "coldProducers", "warmHit", "gc", "pressure"], "additionalProperties": false },
     "worker": {
       "type": "object",
       "required": ["queueCompletedRuns", "runs"],
       "properties": {
         "queueCompletedRuns": { "type": "integer", "minimum": 1 },
-        "runs": { "type": "object", "required": ["first", "noChange", "changed"], "additionalProperties": false }
+        "runs": { "type": "object", "required": ["first", "noChange", "changed"], "properties": { "first": { "$ref": "#/$defs/run" }, "noChange": { "$ref": "#/$defs/run" }, "changed": { "$ref": "#/$defs/run" } }, "additionalProperties": false }
       },
       "additionalProperties": false
     },
@@ -58,7 +67,10 @@
       },
       "additionalProperties": false
     },
-    "baselineComparison": { "type": "object" }
+    "baselineComparison": { "type": "object", "required": ["baseline", "baselineSha256", "portable", "hardwareAdvisory"], "properties": { "baseline": { "const": "docs/scale-oracle-baseline.json" }, "baselineSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }, "portable": { "enum": ["pass", "fail"] }, "hardwareAdvisory": { "type": "object" } }, "additionalProperties": false }
+  },
+  "$defs": {
+    "run": { "type": "object", "required": ["id", "requestId", "pgBossJobId", "state", "summary"], "properties": { "id": { "type": "string" }, "requestId": { "type": "string" }, "pgBossJobId": { "type": "string" }, "state": { "const": "completed" }, "summary": { "type": "object" } }, "additionalProperties": false }
   },
   "additionalProperties": false
 }

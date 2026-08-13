@@ -69,6 +69,9 @@ const thresholds = {
 const baseline = JSON.parse(
   await readFile(new URL('../../docs/scale-oracle-baseline.json', import.meta.url), 'utf8'),
 ) as { portable: Record<string, number> };
+const baselineSha256 = createHash('sha256')
+  .update(await readFile(new URL('../../docs/scale-oracle-baseline.json', import.meta.url)))
+  .digest('hex');
 assert.equal(baseline.portable.defaultBooks, 1_000);
 assert.equal(baseline.portable.defaultPages, 10_000);
 assert.equal(baseline.portable.coldProducerCount, 1);
@@ -498,6 +501,9 @@ try {
     environment: {
       node: process.version,
       postgres: (await pool.query('show server_version')).rows[0],
+      setupDatabaseRole: 'gutter',
+      workerDatabaseRole: 'gutter_worker',
+      sourceMount: 'read-only',
     },
     plans: {
       queryShape:
@@ -529,6 +535,7 @@ try {
     sparse: { logicalBytes: sparse.size, allocatedBlocks: sparse.blocks },
     baselineComparison: {
       baseline: 'docs/scale-oracle-baseline.json',
+      baselineSha256,
       portable:
         books === baseline.portable.defaultBooks &&
         books * pagesPerBook === baseline.portable.defaultPages &&

@@ -169,6 +169,9 @@ services:
       SCALE_RUN_ID: '${SCALE_RUN_ID:-local}'
       SCALE_ROOT_ID: '${SCALE_ROOT_ID:-scale-worker-root}'
       SCALE_EVIDENCE_PATH: /scale-evidence/evidence.json
+      SCALE_FULL: '${SCALE_FULL:-}'
+      SCALE_BOOKS: '${SCALE_BOOKS:-}'
+      SCALE_PAGES_PER_BOOK: '${SCALE_PAGES_PER_BOOK:-}'
       SCALE_SOURCE_ROOT: /scale-source
       DATABASE_URL: 'postgresql://gutter:${POSTGRES_PASSWORD:-}@integration-db:5432/gutter_integration'
     depends_on:
