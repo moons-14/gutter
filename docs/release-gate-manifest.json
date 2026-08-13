@@ -34,6 +34,11 @@
       "role": "migration-fixture",
       "gate": "migrations"
     },
+    {
+      "path": "scripts/install-release-gh.sh",
+      "role": "provenance-verifier-installer",
+      "gate": "provenance"
+    },
     { "path": "scripts/run-release-gates.sh", "role": "runner", "gate": "release-contract" },
     { "path": "scripts/nas-source-oracle.sh", "role": "nas-oracle", "gate": "nas-source" },
     { "path": "docs/release-notes.md", "role": "release-notes", "gate": "release-contract" },
@@ -99,7 +104,7 @@
     "nas-source": "./scripts/nas-source-oracle.sh",
     "containers": "trivy image pinned release refs",
     "sbom": "syft pinned release refs cyclonedx",
-    "provenance": "cosign pinned release refs slsaprovenance",
+    "provenance": "gh attestation verify pinned application subjects slsaprovenance/v1",
     "scale-concurrency": "SCALE_FULL=1 production Compose scale oracle"
   }
 }

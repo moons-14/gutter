@@ -27,6 +27,11 @@ jobs:
           "workflow_dispatch" && r === "refs/heads/main") || (e === "push" &&
           /^refs\/tags\/v[0-9]+\.[0-9]+\.[0-9]+$/.test(r))) process.exit(0);
           console.error(`unsupported release trigger: ${e} ${r}`); process.exit(1)'
+      - name: Install checksum-pinned GitHub CLI verifier
+        env:
+          RELEASE_GH_VERSION: 2.94.0
+          RELEASE_GH_ARCHIVE_SHA256: a757f1ba6db18f4de8cbadb244843a5f89bc75b5e7c6fc127d2bd77fbd12ed62
+        run: ./scripts/install-release-gh.sh "$RUNNER_TEMP/gutter-release-gh"
       - name: Prepare release gates and application subjects
         env:
           RELEASE_PHASE: prepare
@@ -37,9 +42,6 @@ jobs:
           RELEASE_TRIVY_IMAGE: docker.io/aquasec/trivy:0.59.1@sha256:029e990b328d149bf0a9ffe355919041e1f86192db2df47e217f8a36dd42ceac
           RELEASE_TRIVY_DB_REPOSITORY: ghcr.io/aquasecurity/trivy-db:2@sha256:182c8405cd03caefe80982cf39bf071c9176ca3b1d1018a6ac02706c4597c72e
           RELEASE_SYFT_IMAGE: docker.io/anchore/syft:v1.19.0@sha256:bc1ae555a43011d23bb011a4f50e175fc9a5984a008a3f8f2d692b211fcacd2a
-          RELEASE_COSIGN_IMAGE: gcr.io/projectsigstore/cosign:v2.4.3@sha256:c77247c92f4dfea851c70555738226498393e34e2f9ca83cb959e51c230e4ad7
-          RELEASE_COSIGN_CERTIFICATE_IDENTITY_REGEXP: '^https://github.com/moons-14/gutter/.github/workflows/release.yml@refs/(heads/main|tags/v[0-9]+\.[0-9]+\.[0-9]+)$'
-          RELEASE_COSIGN_OIDC_ISSUER: https://token.actions.githubusercontent.com
         run: pnpm run:release-gates
       - name: Read application subjects
         id: subjects
@@ -86,9 +88,11 @@ jobs:
           RELEASE_TRIVY_IMAGE: docker.io/aquasec/trivy:0.59.1@sha256:029e990b328d149bf0a9ffe355919041e1f86192db2df47e217f8a36dd42ceac
           RELEASE_TRIVY_DB_REPOSITORY: ghcr.io/aquasecurity/trivy-db:2@sha256:182c8405cd03caefe80982cf39bf071c9176ca3b1d1018a6ac02706c4597c72e
           RELEASE_SYFT_IMAGE: docker.io/anchore/syft:v1.19.0@sha256:bc1ae555a43011d23bb011a4f50e175fc9a5984a008a3f8f2d692b211fcacd2a
-          RELEASE_COSIGN_IMAGE: gcr.io/projectsigstore/cosign:v2.4.3@sha256:c77247c92f4dfea851c70555738226498393e34e2f9ca83cb959e51c230e4ad7
-          RELEASE_COSIGN_CERTIFICATE_IDENTITY_REGEXP: '^https://github.com/moons-14/gutter/.github/workflows/release.yml@refs/(heads/main|tags/v[0-9]+\.[0-9]+\.[0-9]+)$'
-          RELEASE_COSIGN_OIDC_ISSUER: https://token.actions.githubusercontent.com
+          RELEASE_GH_BIN: ${{ runner.temp }}/gutter-release-gh/gh
+          RELEASE_GH_VERSION: 2.94.0
+          RELEASE_ATTESTATION_REPOSITORY: moons-14/gutter
+          RELEASE_ATTESTATION_CERTIFICATE_IDENTITY_REGEXP: '^https://github.com/moons-14/gutter/.github/workflows/release.yml@refs/(heads/main|tags/v[0-9]+\.[0-9]+\.[0-9]+)$'
+          RELEASE_ATTESTATION_OIDC_ISSUER: https://token.actions.githubusercontent.com
         run: pnpm run:release-gates
       - name: Validate final evidence
         run: test -s release-evidence.json && node scripts/verify-release-gate.mjs final release-evidence.json

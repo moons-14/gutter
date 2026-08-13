@@ -29,6 +29,10 @@ EOF
 fi
 export POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-issue26-postgres-test}"
 export SCALE_RUN_ID="$run_id" SCALE_ROOT_ID="$root_id" SCALE_EVIDENCE_DIR="$staging"
+if [ "${SCALE_FULL:-}" = 1 ]; then
+  export SCALE_BOOKS="${SCALE_BOOKS:-100000}"
+  export SCALE_PAGES_PER_BOOK="${SCALE_PAGES_PER_BOOK:-20}"
+fi
 docker compose -p "$project" --profile scale run --rm scale-oracles
 mkdir -p "$(dirname "$target")"
 cp "$staging/evidence.json" "$target"

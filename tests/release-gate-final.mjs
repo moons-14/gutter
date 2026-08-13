@@ -168,7 +168,32 @@ async function buildFixture() {
       provenancePath,
       'provenance-attestation',
       'provenance',
-      JSON.stringify({ predicateType: 'https://slsa.dev/provenance/v1', ...payload }),
+      JSON.stringify([
+        {
+          verificationResult: {
+            statement: {
+              predicateType: 'https://slsa.dev/provenance/v1',
+              subject: [
+                {
+                  name: subject.reference.slice(0, subject.reference.indexOf('@')),
+                  digest: { sha256: subject.digest.slice('sha256:'.length) },
+                },
+              ],
+            },
+            signature: {
+              certificate: {
+                issuer: 'https://token.actions.githubusercontent.com',
+                subjectAlternativeName:
+                  'https://github.com/moons-14/gutter/.github/workflows/release.yml@refs/heads/main',
+                githubWorkflowRepository: 'moons-14/gutter',
+                githubWorkflowSHA: commit,
+                sourceRepositoryDigest: commit,
+              },
+            },
+            verifiedTimestamps: [{ type: 'Tlog', uri: 'https://rekor.sigstore.dev' }],
+          },
+        },
+      ]),
     );
   }
   const scalePath = 'release-artifacts/scale-evidence.json';
@@ -331,10 +356,10 @@ test('final mode rejects a cross-subject provenance reference even with updated 
         'utf8',
       ),
     );
-    payload.subject = subjects[1].reference;
-    payload.image = subjects[1].reference;
-    payload.digest = subjects[0].digest;
-    payload.components[0].bomRef = subjects[0].digest;
+    payload[0].verificationResult.statement.subject[0] = {
+      name: subjects[1].reference.slice(0, subjects[1].reference.indexOf('@')),
+      digest: { sha256: subjects[0].digest.slice('sha256:'.length) },
+    };
     await writeFile(path, JSON.stringify(payload));
     const evidencePath = join(root, 'evidence.json');
     const evidence = JSON.parse(await readFile(evidencePath, 'utf8'));
@@ -346,3 +371,20 @@ test('final mode rejects a cross-subject provenance reference even with updated 
     artifact.sha256 = sha256(Buffer.from(JSON.stringify(payload)));
     await writeFile(evidencePath, JSON.stringify(evidence));
   }, /expected: \/api\//));
+
+test('final mode rejects provenance from a different workflow commit', () =>
+  withFixture(async ({ root, subjects }) => {
+    const path = join(root, `release-artifacts/${subjects[0].service}.provenance.json`);
+    const payload = JSON.parse(await readFile(path, 'utf8'));
+    payload[0].verificationResult.signature.certificate.githubWorkflowSHA = 'f'.repeat(40);
+    await writeFile(path, JSON.stringify(payload));
+    const evidencePath = join(root, 'evidence.json');
+    const evidence = JSON.parse(await readFile(evidencePath, 'utf8'));
+    const artifact = evidence.gates
+      .find((gate) => gate.id === 'provenance')
+      .artifacts.find(
+        (entry) => entry.path === `release-artifacts/${subjects[0].service}.provenance.json`,
+      );
+    artifact.sha256 = sha256(Buffer.from(JSON.stringify(payload)));
+    await writeFile(evidencePath, JSON.stringify(evidence));
+  }, /Expected values to be strictly equal/));

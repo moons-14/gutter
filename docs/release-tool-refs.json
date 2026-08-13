@@ -3,6 +3,13 @@
   "actions": {
     "attest": "actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6"
   },
+  "binaries": {
+    "githubCli": {
+      "version": "2.94.0",
+      "archive": "https://github.com/cli/cli/releases/download/v2.94.0/gh_2.94.0_linux_amd64.tar.gz",
+      "archiveSha256": "a757f1ba6db18f4de8cbadb244843a5f89bc75b5e7c6fc127d2bd77fbd12ed62"
+    }
+  },
   "caddySource": {
     "version": "v2.11.4",
     "customVersion": "v2.11.4",
@@ -19,7 +26,6 @@
     "gitleaks": "docker.io/zricethezav/gitleaks:v8.24.2@sha256:b5918eb91b8d2473cec722f066abb4352e4ffdc4ec9f4283ec143aba9ec9ebc4",
     "trivy": "docker.io/aquasec/trivy:0.59.1@sha256:029e990b328d149bf0a9ffe355919041e1f86192db2df47e217f8a36dd42ceac",
     "syft": "docker.io/anchore/syft:v1.19.0@sha256:bc1ae555a43011d23bb011a4f50e175fc9a5984a008a3f8f2d692b211fcacd2a",
-    "cosign": "gcr.io/projectsigstore/cosign:v2.4.3@sha256:c77247c92f4dfea851c70555738226498393e34e2f9ca83cb959e51c230e4ad7",
     "trivyDb": "ghcr.io/aquasecurity/trivy-db:2@sha256:182c8405cd03caefe80982cf39bf071c9176ca3b1d1018a6ac02706c4597c72e"
   }
 }

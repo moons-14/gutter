@@ -188,6 +188,21 @@ if (
 for (const [name, ref] of Object.entries(toolRefs.images))
   if (!/@sha256:[0-9a-f]{64}$/.test(ref))
     throw new Error(`release tool is not digest pinned: ${name}`);
+assert.deepEqual(toolRefs.binaries?.githubCli, {
+  version: '2.94.0',
+  archive: 'https://github.com/cli/cli/releases/download/v2.94.0/gh_2.94.0_linux_amd64.tar.gz',
+  archiveSha256: 'a757f1ba6db18f4de8cbadb244843a5f89bc75b5e7c6fc127d2bd77fbd12ed62',
+});
+assert.match(actionWorkflow, /RELEASE_GH_VERSION:\s*2\.94\.0/);
+assert.match(
+  actionWorkflow,
+  /RELEASE_GH_ARCHIVE_SHA256:\s*a757f1ba6db18f4de8cbadb244843a5f89bc75b5e7c6fc127d2bd77fbd12ed62/,
+);
+assert.match(actionWorkflow, /RELEASE_ATTESTATION_REPOSITORY:\s*moons-14\/gutter/);
+const ghInstaller = await read('scripts/install-release-gh.sh');
+assert.match(ghInstaller, /curl --proto '=https' --tlsv1\.2 --fail/);
+assert.match(ghInstaller, /sha256sum -c -/);
+assert.match(ghInstaller, /github\.com\/cli\/cli\/releases\/download\/v\$version/);
 assert.equal(
   toolRefs.actions?.attest,
   'actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6',
@@ -502,17 +517,30 @@ const validateProvenance = (parsed, image) => {
   const records = Array.isArray(parsed) ? parsed : [parsed];
   let matched = false;
   for (const record of records) {
-    const payload =
-      typeof record.payload === 'string'
-        ? JSON.parse(Buffer.from(record.payload, 'base64').toString('utf8'))
-        : record;
-    const subjects = payload.subject ?? payload.predicate?.subject;
-    if (payload.predicateType?.includes('slsa') && Array.isArray(subjects)) {
+    const verification = record.verificationResult;
+    assert.ok(verification, 'GitHub attestation verification result is missing');
+    const statement = verification.statement;
+    const certificate = verification.signature?.certificate;
+    assert.equal(certificate?.issuer, 'https://token.actions.githubusercontent.com');
+    assert.match(
+      certificate?.subjectAlternativeName ?? '',
+      /^https:\/\/github\.com\/moons-14\/gutter\/\.github\/workflows\/release\.yml@refs\/(?:heads\/main|tags\/v[0-9]+\.[0-9]+\.[0-9]+)$/,
+    );
+    assert.equal(certificate?.githubWorkflowRepository, 'moons-14/gutter');
+    assert.equal(certificate?.githubWorkflowSHA, head);
+    assert.equal(certificate?.sourceRepositoryDigest, head);
+    assert.ok(
+      verification.verifiedTimestamps?.some((timestamp) => timestamp.type === 'Tlog'),
+      'provenance transparency-log timestamp is missing',
+    );
+    const subjects = statement.subject ?? statement.predicate?.subject;
+    const expectedName = image.reference.slice(0, image.reference.indexOf('@'));
+    if (statement.predicateType === 'https://slsa.dev/provenance/v1' && Array.isArray(subjects)) {
       matched ||= subjects.some(
-        (entry) => entry.name === image.reference && entry.digest?.sha256 === image.digest.slice(7),
+        (entry) => entry.name === expectedName && entry.digest?.sha256 === image.digest.slice(7),
       );
-    } else if (payload.predicateType?.includes('slsa')) {
-      matched ||= payload.subject === image.reference && payload.digest === image.digest;
+    } else if (statement.predicateType === 'https://slsa.dev/provenance/v1') {
+      matched ||= statement.subject === image.reference && statement.digest === image.digest;
     }
   }
   const expectedService = image.reference.split('/').at(-1).split('@')[0];
