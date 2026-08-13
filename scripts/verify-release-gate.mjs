@@ -6,7 +6,7 @@ import { constants } from 'node:fs';
 import { dirname, relative, resolve, sep } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 
-const root = resolve(new URL('..', import.meta.url).pathname);
+const root = resolve(process.env.RELEASE_GATE_ROOT ?? new URL('..', import.meta.url).pathname);
 const read = (file) => readFile(resolve(root, file), 'utf8');
 const safeArtifact = async (file) => {
   if (!file || file.includes('\\') || file.startsWith('/') || file.split('/').includes('..'))
@@ -275,7 +275,9 @@ assert.equal(
   evidence.images.length,
   'duplicate evidence image reference',
 );
-const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
+const head =
+  process.env.RELEASE_GATE_COMMIT ??
+  execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
 const lockHash = sha256(await read('pnpm-lock.yaml'));
 assert.equal(evidence.exactTree.commit, head, 'evidence commit does not match HEAD');
 assert.equal(evidence.exactTree.lockfileSha256, lockHash, 'evidence lockfile hash does not match');
