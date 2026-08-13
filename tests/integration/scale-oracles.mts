@@ -126,6 +126,21 @@ async function timedQuery(text: string, values: unknown[] = []) {
   const result = await pool.query(text, values);
   return { result, elapsedMs: performance.now() - started };
 }
+async function assertQueueLink(run: { pgBossJobId: string | null; requestId: string; id: string }) {
+  assert.ok(run.pgBossJobId, 'worker run must retain its PgBoss job id');
+  const job = await pool.query<{ id: string; name: string; state: string }>(
+    'select id::text,name,state from pgboss.job where id=$1',
+    [run.pgBossJobId],
+  );
+  assert.equal(job.rows.length, 1, 'PgBoss job exists for run');
+  assert.equal(job.rows[0]!.name, 'catalog.reconciliation.v1');
+  assert.equal(job.rows[0]!.state, 'completed');
+  const linkage = await pool.query(
+    'select 1 from scan_runs where id=$1 and scan_request_id=$2 and pg_boss_job_id=$3',
+    [run.id, run.requestId, run.pgBossJobId],
+  );
+  assert.equal(linkage.rowCount, 1, 'PgBoss job links exactly to scan request/run');
+}
 
 function tinyCbz(payload: Buffer): Buffer {
   const encodedName = Buffer.from('0.png');
@@ -273,6 +288,11 @@ try {
   assert.equal(workerRun?.requestId, firstRequest.id);
   assert.equal(workerRun?.state, 'completed', 'production worker queue completed the request');
   assert.equal(workerRun?.summary?.updated, sourceCount);
+  await assertQueueLink(workerRun!);
+  const firstObserved = await pool.query<{ relative_path: string; manifest_sha256: string; mtime_ms: string; size_bytes: string }>(
+    'select relative_path,manifest_sha256,mtime_ms::text,size_bytes::text from source_items where root_id=$1 order by relative_path', [scanRootId],
+  );
+  const firstCounts = firstObserved.rows.length;
   const persisted = await pool.query<{ books: string; pages: string }>(
     `select (select count(*) from source_items where root_id=$1)::text as books,
             (select count(*) from source_pages p join source_items i on i.id=p.source_item_id where i.root_id=$1)::text as pages`,
@@ -296,6 +316,10 @@ try {
   noChangeTimes.push(performance.now() - noChangeStarted);
   assert.equal(secondRun?.state, 'completed');
   assert.equal(secondRun?.summary?.unchanged, sourceCount);
+  await assertQueueLink(secondRun!);
+  const noChangeObserved = await pool.query('select relative_path,manifest_sha256,mtime_ms::text,size_bytes::text from source_items where root_id=$1 order by relative_path', [scanRootId]);
+  assert.equal(noChangeObserved.rows.length, firstCounts);
+  assert.deepEqual(noChangeObserved.rows, firstObserved.rows, 'no-change scan preserves observations');
   const changedMtime = new Date(Date.now() - 2_000);
   await writeFile(
     join(sourceRoot, 'scale-1.cbz'),
@@ -323,6 +347,11 @@ try {
   const changedTimes: number[] = [performance.now() - changedStarted];
   assert.equal(changedRun?.state, 'completed');
   assert.equal(changedRun?.summary?.updated, 1);
+  await assertQueueLink(changedRun!);
+  const changedObserved = await pool.query('select relative_path,manifest_sha256,mtime_ms::text,size_bytes::text from source_items where root_id=$1 order by relative_path', [scanRootId]);
+  assert.equal(changedObserved.rows.length, firstCounts);
+  const changedRows = changedObserved.rows.filter((row, index) => JSON.stringify(row) !== JSON.stringify(firstObserved.rows[index]));
+  assert.equal(changedRows.length, 1, 'changed scan mutates exactly one persisted observation');
   assert.notEqual(firstRequest.id, secondRequest.id);
   assert.notEqual(secondRequest.id, changedRequest.id);
   assert.notEqual(firstRequest.id, changedRequest.id);
