@@ -23,6 +23,7 @@ FROM node:24.19.0-bookworm-slim@sha256:3638d9a6fe4030bd716be989438248074489337ba
 WORKDIR /app
 ENV NODE_ENV=production
 RUN useradd --system --uid 10001 gutter \
+  && rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx \
   && mkdir -p /cache/derived \
   && chown -R gutter:gutter /cache
 USER gutter

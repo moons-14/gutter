@@ -4,6 +4,13 @@ packages:
   - packages/*
 injectWorkspacePackages: true
 dedupeInjectedDeps: false
+overrides:
+  brace-expansion: 5.0.7
+  ip-address: 10.3.1
+  tar: 7.5.19
+  undici: 6.27.0
+  vitest: 3.2.6
+  esbuild: 0.28.1
 allowBuilds:
   esbuild: true
 minimumReleaseAgeExclude:
