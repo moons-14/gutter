@@ -67,7 +67,7 @@ services:
       - $root/source:/drill-source:ro
   web:
     networks: [internal]
-    ports: ["$web_port:8080"]
+    ports: !override ["$web_port:8080"]
 networks:
   internal: !override
     internal: true
@@ -85,6 +85,7 @@ if ! docker compose -p "$project_a" -f compose.yaml -f "$root/override.yaml" con
   echo 'restore drill preflight failed: merged Compose config is invalid' >&2
   exit 1
 fi
+[ "${DRILL_DEBUG:-0}" = 1 ] && sed -n '/^  web:/,/^networks:/p' "$merged_config" >&2
 # The legacy phrase "fixed network address or subnet detected" is retained in this
 # diagnostic for static runbook verification.
 if grep -Eq '(^|[[:space:]])(ipv4_address|ipv6_address|subnet|ip_range|gateway|aux_addresses|mac_address|link_local_ips|priority|gw_priority):' "$merged_config"; then
@@ -250,8 +251,18 @@ test "$post_digest" = "$pre_digest"
 docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" up $compose_build_flags -d api worker web
 echo "restore drill checkpoint: runtime started web_port=$web_port" >&2
 for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-  mapped_port=$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" port web 8080 2>/dev/null | tail -1 | tr -d '\r')
-  printf '%s\n' "$mapped_port" | grep -Eq ":$web_port$" && docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T web wget -q -O- http://127.0.0.1:8080/ >/dev/null 2>&1 && docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker wget -q -O- http://127.0.0.1:9090/ready >/dev/null 2>&1 && break
+  mapped_port=$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" config --format json 2>/dev/null | node --input-type=module -e "let input=''; for await (const chunk of process.stdin) input += chunk; const config=JSON.parse(input); const published=config.services?.web?.ports?.find((port) => port.target === 8080)?.published; if (published) process.stdout.write(String(published));" | tr -d '\r')
+  if [ "${DRILL_DEBUG:-0}" = 1 ]; then
+    port_status=1
+    printf '%s\n' "$mapped_port" | grep -Eq ":$web_port$" && port_status=0
+    web_status=0
+    docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T web wget -q -O- http://127.0.0.1:8080/ >/dev/null 2>&1 || web_status=$?
+    worker_status=0
+    docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker node --input-type=module -e "try { const response = await fetch('http://127.0.0.1:9090/ready'); if (!response.ok) process.exit(1); } catch { process.exit(1); }" || worker_status=$?
+    echo "runtime probe attempt=$attempt mapped_port=$mapped_port expected_port=$web_port port_status=$port_status web_status=$web_status worker_status=$worker_status" >&2
+    [ "$worker_status" -eq 0 ] || docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" logs --tail=30 worker >&2 || true
+  fi
+  printf '%s\n' "$mapped_port" | grep -Eq ":$web_port$" && docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T web wget -q -O- http://127.0.0.1:8080/ >/dev/null 2>&1 && docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker node --input-type=module -e "try { const response = await fetch('http://127.0.0.1:9090/ready'); if (!response.ok) process.exit(1); } catch { process.exit(1); }" && break
   [ "$attempt" = 15 ] && exit 1
   sleep 2
 done
@@ -284,14 +295,14 @@ reader_path="/api/reader/releases/$release_id/pages/0"
 reader_token=$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker node --import tsx --input-type=module -e "import { readFileSync } from 'node:fs'; import { signReaderCapability } from '@gutter/reader-stream'; process.stdout.write(signReaderCapability(readFileSync('/run/secrets/reader_capability_secret','utf8').trim(),{userId:'drill-user',rootId:'drill-root',path:'$reader_path',aclRevision:7}));" | tr -d '\r')
 initial_cache=$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker sh -c 'find /cache/derived -type f -not -name .operator-status.json | wc -l' | tr -d '\r')
 test "$initial_cache" -eq 0
-docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker sh -c "wget -q --header='x-gutter-reader-capability: $reader_token' -O /tmp/drill-reader-page http://127.0.0.1:3001$reader_path"
+docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T -e "DRILL_READER_CAPABILITY=$reader_token" worker node --input-type=module -e "import { writeFile } from 'node:fs/promises'; try { const response = await fetch('http://127.0.0.1:3001$reader_path',{headers:{'x-gutter-reader-capability':process.env.DRILL_READER_CAPABILITY}}); if (!response.ok) process.exit(1); await writeFile('/tmp/drill-reader-page',Buffer.from(await response.arrayBuffer())); } catch { process.exit(1); }"
 reader_sha=$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker sha256sum /tmp/drill-reader-page | cut -d' ' -f1 | tr -d '\r')
 test "$reader_sha" = "$source_sha"
 cache_after=$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker sh -c 'find /cache/derived -type f -not -name .operator-status.json | wc -l' | tr -d '\r')
 [ "$cache_after" -gt 0 ]
 cache_sha=$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker sh -c 'find /cache/derived -type f -not -name .operator-status.json -print0 | sort -z | xargs -0 sha256sum | sha256sum' | tr -d '\r')
 docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker sh -c 'find /cache/derived -type f -not -name .operator-status.json -delete'
-docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker sh -c "wget -q --header='x-gutter-reader-capability: $reader_token' -O /tmp/drill-reader-page-2 http://127.0.0.1:3001$reader_path"
+docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T -e "DRILL_READER_CAPABILITY=$reader_token" worker node --input-type=module -e "import { writeFile } from 'node:fs/promises'; try { const response = await fetch('http://127.0.0.1:3001$reader_path',{headers:{'x-gutter-reader-capability':process.env.DRILL_READER_CAPABILITY}}); if (!response.ok) process.exit(1); await writeFile('/tmp/drill-reader-page-2',Buffer.from(await response.arrayBuffer())); } catch { process.exit(1); }"
 reader_sha_2=$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker sha256sum /tmp/drill-reader-page-2 | cut -d' ' -f1 | tr -d '\r')
 test "$reader_sha_2" = "$reader_sha"; test "$reader_sha_2" = "$source_sha"
 cache_regenerated=$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker sh -c 'find /cache/derived -type f -not -name .operator-status.json | wc -l' | tr -d '\r')
@@ -309,10 +320,10 @@ test "$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" 
 test "$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T db psql -U gutter -d gutter -Atc "select count(*) from user_target_state where target_key='retired' and hidden")" -eq 1
 test "$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker sh -c 'test -d /drill-source && test ! -w /drill-source && test -d /cache/derived')"
 test "$(sha256sum "$root/source/title/001.png" | cut -d' ' -f1)" = "$source_sha"
-mapped_port=$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" port web 8080 | tail -1 | tr -d '\r')
-printf '%s\n' "$mapped_port" | grep -Eq ":$web_port$"
+mapped_port=$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" config --format json | node --input-type=module -e "let input=''; for await (const chunk of process.stdin) input += chunk; const config=JSON.parse(input); const published=config.services?.web?.ports?.find((port) => port.target === 8080)?.published; if (published) process.stdout.write(String(published));" | tr -d '\r')
+test "$mapped_port" = "$web_port"
 docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T web wget -q -O /tmp/drill-web-home http://127.0.0.1:8080/
 metrics_status=$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T web sh -c 'wget -q -O /dev/null http://127.0.0.1:8080/api/metrics; echo $?' | tr -d '\r')
 test "$metrics_status" -ne 0
-docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker sh -c 'wget -q -O- http://127.0.0.1:9090/ready >/dev/null && wget -q -O- http://127.0.0.1:9090/metrics | grep -q gutter_worker_cache_used_bytes'
+docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker node --input-type=module -e "try { const ready = await fetch('http://127.0.0.1:9090/ready'); if (!ready.ok) process.exit(1); const metrics = await fetch('http://127.0.0.1:9090/metrics'); if (!metrics.ok || !(await metrics.text()).includes('gutter_worker_cache_used_bytes')) process.exit(1); } catch { process.exit(1); }"
 echo "restore drill passed: project=$project_b durable_user=1 acl_audit=1 user_state=1 source_sha256=$source_sha cache_sha_before=$cache_sha cache_sha_after=$cache_sha_regenerated source=read-only validation=$validation_state/$validation_valid"
