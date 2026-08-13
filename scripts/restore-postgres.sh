@@ -79,9 +79,10 @@ if [ "$target_relations" -ne 0 ] || [ "$target_functions" -ne 0 ] || [ "$unexpec
   exit 2
 fi
 # The archive is schema-scoped, so extension objects are not guaranteed to be
-# present in its TOC. Create the migration-owned operator class dependency
-# before post-data indexes are replayed; it is allowed by the preflight above.
+# present in its TOC. Create migration-owned dependencies before restore and
+# before the canonical ACL policy references pgcrypto's digest function.
 psql "$GUTTER_DATABASE_URL" -v ON_ERROR_STOP=1 -c 'create extension if not exists pg_trgm'
+psql "$GUTTER_DATABASE_URL" -v ON_ERROR_STOP=1 -c 'create extension if not exists pgcrypto'
 restore_log=$(mktemp "${TMPDIR:-/tmp}/gutter-restore-log.XXXXXX")
 set +e
 pg_restore --no-owner --no-privileges --dbname "$GUTTER_DATABASE_URL" "$GUTTER_BACKUP_ARCHIVE" 2>"$restore_log"

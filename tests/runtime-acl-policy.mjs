@@ -76,4 +76,10 @@ test('restore refuses non-fresh targets and never cleans a live schema', () => {
   assert.match(restore, /unexpected_extensions=/);
   assert.match(restore, /extname not in \('plpgsql', 'pg_trgm'\)/);
   assert.match(restore, /create extension if not exists pg_trgm/);
+  assert.match(restore, /create extension if not exists pgcrypto/);
+  assert.ok(
+    restore.indexOf('create extension if not exists pgcrypto') <
+      restore.indexOf('sh "$GUTTER_RUNTIME_ACL_SCRIPT"'),
+    'pgcrypto must exist before canonical runtime ACL reapply',
+  );
 });
