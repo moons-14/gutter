@@ -223,10 +223,9 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
     const target = aliases[path];
     if (!target)
       return c.json({ error: 'not_found', requestId: c.req.header('x-request-id') ?? '' }, 404);
-    const pat = await authenticatePublicApiToken(
-      c.req.header('authorization')?.replace(/^Bearer\s+/i, ''),
-    );
-    if (!pat && !(await authenticatedUser(c.req.raw)))
+    const authorization = c.req.header('authorization');
+    const pat = await authenticatePublicApiToken(authorization?.replace(/^Bearer\s+/i, ''));
+    if (authorization ? !pat : !(await authenticatedUser(c.req.raw)))
       return c.json(
         { error: 'authentication_required', requestId: c.req.header('x-request-id') ?? '' },
         401,
@@ -365,7 +364,18 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
     responseHeaders.set('cache-control', 'no-store');
     return new Response(upstream.body, { status: upstream.status, headers: responseHeaders });
   });
-  const userStateUser = async (request: Request) => authenticatedUser(request);
+  // Bearer PAT is authoritative whenever present. Never fall back to a browser session when a
+  // PAT was supplied: doing so would permit a confused-deputy cross-user request.
+  const requestPrincipal = async (request: Request) => {
+    const authorization = request.headers.get('authorization');
+    if (authorization?.trim()) {
+      const pat = await authenticatePublicApiToken(authorization.replace(/^Bearer\s+/i, ''));
+      return pat ? { id: pat.userId, role: null, patScope: pat.scope } : null;
+    }
+    const session = await authenticatedUser(request);
+    return session ? { ...session, patScope: null } : null;
+  };
+  const userStateUser = async (request: Request) => requestPrincipal(request);
   const userStateBody = async (c: any): Promise<Record<string, unknown> | null> => {
     const body = await c.req.json().catch(() => null);
     return body && typeof body === 'object' && !Array.isArray(body) ? body : null;
