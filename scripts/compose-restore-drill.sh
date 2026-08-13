@@ -5,8 +5,7 @@ set -eu
 project_a="gutter-issue27-drill-a"
 project_b="gutter-issue27-drill-b"
 case "${COMPOSE_PROJECT_NAME:-}" in gutter|gutter-issue27-drill-a|gutter-issue27-drill-b) echo 'refusing shared/default Compose project' >&2; exit 2;; esac
-root="${TMPDIR:-/tmp}/gutter-issue27-restore-drill"
-rm -rf "$root"
+root=$(mktemp -d "${TMPDIR:-/tmp}/gutter-issue27-restore-drill.XXXXXX")
 mkdir -p "$root/secrets" "$root/source"
 printf 'drill-db-password\n' > "$root/secrets/api_db_password"
 printf 'drill-db-password\n' > "$root/secrets/worker_db_password"
@@ -46,8 +45,9 @@ fi
 cleanup() { docker compose -p "$project_a" -f compose.yaml -f "$root/override.yaml" down -v --remove-orphans >/dev/null 2>&1 || true; docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" down -v --remove-orphans >/dev/null 2>&1 || true; }
 trap cleanup EXIT INT TERM
 docker compose -p "$project_a" -f compose.yaml -f "$root/override.yaml" up -d db migrate
-docker compose -p "$project_a" -f compose.yaml -f "$root/override.yaml" exec -T db pg_dump -U gutter -d gutter -Fc > "$root/backup.dump"
+docker compose -p "$project_a" -f compose.yaml -f "$root/override.yaml" wait migrate
 docker compose -p "$project_a" -f compose.yaml -f "$root/override.yaml" exec -T db psql -U gutter -d gutter -v ON_ERROR_STOP=1 -c "insert into gutter_schema(version) values ('drill-durable-row') on conflict do nothing;"
+docker compose -p "$project_a" -f compose.yaml -f "$root/override.yaml" exec -T db pg_dump -U gutter -d gutter -Fc > "$root/backup.dump"
 docker compose -p "$project_a" -f compose.yaml -f "$root/override.yaml" down -v --remove-orphans
 docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" up -d db
 docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T db pg_restore -U gutter -d gutter --clean --if-exists < "$root/backup.dump"

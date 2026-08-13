@@ -12,6 +12,10 @@
 			header_up X-Forwarded-For {remote_host}
 		}
 	}
+	# Prometheus is internal-only; never expose the API or worker metrics through the public ingress.
+	handle /api/metrics {
+		respond 404
+	}
 	handle_path /api/* {
 		reverse_proxy api:3000
 	}
