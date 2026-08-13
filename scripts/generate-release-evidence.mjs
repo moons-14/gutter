@@ -6,7 +6,7 @@ import { relative, resolve } from 'node:path';
 const [resultsPath, outputPath] = process.argv.slice(2);
 if (!resultsPath || !outputPath)
   throw new Error('usage: generate-release-evidence.mjs RESULTS.tsv OUTPUT.json');
-const root = resolve(new URL('..', import.meta.url).pathname);
+const root = resolve(process.env.RELEASE_GATE_ROOT ?? new URL('..', import.meta.url).pathname);
 const manifest = JSON.parse(
   await readFile(resolve(root, 'docs/release-gate-manifest.json'), 'utf8'),
 );
@@ -18,12 +18,8 @@ const safeRepoPath = (value) => {
   return candidate;
 };
 const safeRunnerLogPath = (value, gateId) => {
-  // Older runner TSVs emitted the gate identifier in the log column while the
-  // log itself was stored at the canonical artifact location. Normalize that
-  // observed shape without broadening path acceptance.
-  if (value === gateId) return `release-artifacts/${gateId}.log`;
   const candidate = safeRepoPath(value);
-  if (!candidate.startsWith('release-artifacts/') || !candidate.endsWith('.log'))
+  if (candidate !== `release-artifacts/${gateId}.log`)
     throw new Error(`unsafe runner log path: ${value}`);
   return candidate;
 };
@@ -34,6 +30,7 @@ const lines = (await readFile(resolve(root, resultsPath), 'utf8'))
 const results = new Map(
   lines.map((line) => {
     const [id, command, commandHash, status, log, logHash] = line.split('\t');
+    if (!/^\d+$/.test(status)) throw new Error(`malformed runner status: ${id}`);
     return [id, { id, command, commandHash, status: Number(status), log, logHash }];
   }),
 );

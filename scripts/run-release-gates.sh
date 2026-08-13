@@ -56,7 +56,7 @@ run_gate() {
   command_text="$canonical"
   if "$@" >"$log" 2>&1; then status=0; else status=$?; failed=1; fi
   sha256sum "$log" >"$log.sha256"
-  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$command_text" "$(printf '%s' "$command_text" | sha256sum | cut -d' ' -f1)" "$status" "$log" "$(sha256sum "$log" | cut -d' ' -f1)" >>"$results"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$command_text" "$(printf '%s' "$command_text" | sha256sum | cut -d' ' -f1)" "$status" "release-artifacts/$id.log" "$(sha256sum "$log" | cut -d' ' -f1)" >>"$results"
   return 0
 }
 
@@ -116,8 +116,9 @@ if [ -f docs/scale-oracle-evidence.schema.json ]; then
   run_gate scale-concurrency 'SCALE_FULL=1 production Compose scale oracle' env SCALE_FULL=1 SCALE_EVIDENCE_PATH="$RELEASE_ARTIFACT_DIR/scale-evidence.json" ./scripts/run-scale-oracle.sh
 else
   echo '#26 scale oracle is not present; final release remains blocked' >"$out/scale-concurrency.blocked"
+  cp "$out/scale-concurrency.blocked" "$out/scale-concurrency.log"
   sha256sum "$out/scale-concurrency.blocked" >"$out/scale-concurrency.blocked.sha256"
-  printf '%s\t%s\t%s\t%s\t%s\t%s\n' 'scale-concurrency' 'GUTTER_SCALE_ORACLE=1 SCALE_FULL=1 scale oracle' "$(printf '%s' 'GUTTER_SCALE_ORACLE=1 SCALE_FULL=1 scale oracle' | sha256sum | cut -d' ' -f1)" 99 "$out/scale-concurrency.blocked" "$(sha256sum "$out/scale-concurrency.blocked" | cut -d' ' -f1)" >>"$results"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' 'scale-concurrency' 'SCALE_FULL=1 production Compose scale oracle' "$(printf '%s' 'SCALE_FULL=1 production Compose scale oracle' | sha256sum | cut -d' ' -f1)" 99 'release-artifacts/scale-concurrency.log' "$(sha256sum "$out/scale-concurrency.blocked" | cut -d' ' -f1)" >>"$results"
 fi
 node scripts/generate-release-evidence.mjs "${results#./}" release-evidence.json
 echo "release gate command logs and release-evidence.json written to $out"
