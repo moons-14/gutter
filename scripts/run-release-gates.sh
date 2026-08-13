@@ -29,13 +29,14 @@ run_gate browser-e2e corepack pnpm --filter @gutter/web test:e2e
 run_gate migrations ./scripts/migration-compatibility-oracle.sh
 run_gate compose-config docker compose config
 run_gate compose-smoke docker compose up --abort-on-container-exit --exit-code-from test test
+run_gate operations node scripts/verify-operations.mjs
 run_gate backup-restore ./scripts/compose-restore-drill.sh
 : "${RELEASE_IMAGE_REFS:?set RELEASE_IMAGE_REFS to the digest-pinned images built for this tree}"
 run_gate containers sh -ec 'for image in $RELEASE_IMAGE_REFS; do trivy image --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed "$image"; done'
 run_gate sbom sh -ec 'for image in $RELEASE_IMAGE_REFS; do name=$(printf "%s" "$image" | tr "/:@" "___"); syft "$image" -o cyclonedx-json >"$RELEASE_ARTIFACT_DIR/$name.sbom.json"; sha256sum "$RELEASE_ARTIFACT_DIR/$name.sbom.json" >"$RELEASE_ARTIFACT_DIR/$name.sbom.json.sha256"; done'
 run_gate provenance sh -ec 'for image in $RELEASE_IMAGE_REFS; do cosign verify-attestation --type slsaprovenance "$image"; done'
 if [ -f docs/scale-oracle-evidence.schema.json ]; then
-  run_gate scale-concurrency sh -ec 'GUTTER_SCALE_ORACLE=1 SCALE_FULL=1 corepack pnpm --filter @gutter/db exec tsx ../../tests/integration/scale-oracles.mts'
+  run_gate scale-concurrency sh -ec 'GUTTER_SCALE_ORACLE=1 SCALE_FULL=1 SCALE_EVIDENCE_PATH="$RELEASE_ARTIFACT_DIR/scale-evidence.json" corepack pnpm --filter @gutter/db exec tsx ../../tests/integration/scale-oracles.mts'
 else
   echo '#26 scale oracle is not present; final release remains blocked' >"$out/scale-concurrency.blocked"
   sha256sum "$out/scale-concurrency.blocked" >"$out/scale-concurrency.blocked.sha256"

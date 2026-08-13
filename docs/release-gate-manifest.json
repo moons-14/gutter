@@ -8,7 +8,9 @@
     "scripts/backup-table-manifest.v1",
     "scripts/compose-restore-drill.sh",
     "scripts/migration-compatibility-oracle.sh",
-    "scripts/run-release-gates.sh"
+    "scripts/run-release-gates.sh",
+    "docs/release-notes.md",
+    "docs/release-tool-refs.json"
   ],
   "requiredGateIds": [
     "dependencies",
@@ -21,6 +23,7 @@
     "unit",
     "build",
     "compose-config",
+    "operations",
     "containers",
     "sbom",
     "provenance",

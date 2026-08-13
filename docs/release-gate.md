@@ -72,6 +72,9 @@ tools (`gitleaks`, `trivy`, `syft`, and `cosign`); their outputs must be added a
 artifacts and referenced by the corresponding gates before final mode. Missing tools or image refs
 fail the run rather than producing a partial release.
 
+The exact release-runner image refs are tracked in `docs/release-tool-refs.json`; update them only
+from an observed official registry digest and retain the version tag alongside the digest.
+
 The release workflow must execute, rather than merely list, the dependency/license/secret scan,
 container vulnerability scan, migration and OpenAPI checks, browser/UI E2E, Compose smoke,
 backup/restore drill, and (after #26 merges) the scale oracle. It must save command output and
