@@ -21,6 +21,8 @@ const results = new Map(
     return [id, { id, command, commandHash, status: Number(status), log, logHash }];
   }),
 );
+for (const id of results.keys())
+  if (!(id in manifest.gateCommands)) throw new Error(`unknown runner gate ID: ${id}`);
 for (const result of results.values()) {
   if (!/^[0-9a-f]{64}$/.test(result.commandHash) || !/^[0-9a-f]{64}$/.test(result.logHash))
     throw new Error(`malformed runner hash: ${result.id}`);
@@ -62,6 +64,18 @@ const gates = [...results.values()].map((result) => ({
 }));
 for (const artifact of requiredArtifacts)
   gates.find((gate) => gate.id === artifact.gate).artifacts.push(artifact);
+const scaleEvidencePath = 'release-artifacts/scale-evidence.json';
+try {
+  const scaleGate = gates.find((gate) => gate.id === 'scale-concurrency');
+  scaleGate.artifacts.push({
+    path: scaleEvidencePath,
+    role: 'scale-evidence',
+    gate: 'scale-concurrency',
+    sha256: sha(await readFile(resolve(root, scaleEvidencePath))),
+  });
+} catch {
+  // Pre-#26 runs intentionally remain blocked and cannot fabricate scale evidence.
+}
 const images = (process.env.RELEASE_IMAGE_REFS ?? '')
   .split(/\s+/)
   .filter(Boolean)

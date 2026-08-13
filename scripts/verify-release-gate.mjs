@@ -1,9 +1,8 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
-import { lstat, realpath } from 'node:fs/promises';
-import { dirname, relative, resolve } from 'node:path';
+import { readFile, lstat, realpath, open } from 'node:fs/promises';
+import { dirname, relative, resolve, sep } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 
 const root = resolve(new URL('..', import.meta.url).pathname);
@@ -13,12 +12,35 @@ const safeArtifact = async (file) => {
     throw new Error(`unsafe artifact path: ${file}`);
   const target = resolve(root, file);
   const rootReal = await realpath(root);
+  const parts = relative(rootReal, target).split(sep).filter(Boolean);
+  let current = rootReal;
+  for (const part of parts) {
+    current = resolve(current, part);
+    if ((await lstat(current)).isSymbolicLink())
+      throw new Error(`artifact symlink component is not allowed: ${file}`);
+  }
   const targetReal = await realpath(target);
   if (relative(rootReal, targetReal).startsWith('..'))
     throw new Error(`artifact escapes tree: ${file}`);
   const info = await lstat(target);
   if (info.isSymbolicLink()) throw new Error(`artifact symlink is not allowed: ${file}`);
-  return readFile(target);
+  if (!info.isFile()) throw new Error(`artifact is not a regular file: ${file}`);
+  const handle = await open(target, 'r');
+  try {
+    const before = await handle.stat();
+    const bytes = await handle.readFile();
+    const after = await handle.stat();
+    if (
+      before.dev !== after.dev ||
+      before.ino !== after.ino ||
+      before.size !== after.size ||
+      before.mtimeMs !== after.mtimeMs
+    )
+      throw new Error(`artifact changed while reading: ${file}`);
+    return bytes;
+  } finally {
+    await handle.close();
+  }
 };
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
 const assertKeys = (value, allowed, label) => {
@@ -89,6 +111,14 @@ const actionWorkflow = `${await read('.github/workflows/ci.yml')}\n${await read(
 for (const ref of actionWorkflow.matchAll(/uses:\s*([^\s]+)/g))
   if (!/@[0-9a-f]{40}$/.test(ref[1]))
     throw new Error(`GitHub Action is not commit pinned: ${ref[1]}`);
+const normalizeImage = (image) => image.replace(/^docker\.io\/library\//, '');
+const workflowImageRefs = [...actionWorkflow.matchAll(/RELEASE_IMAGE_REFS:\s*(.+)$/gm)].flatMap(
+  (match) => match[1].trim().split(/\s+/),
+);
+if (
+  workflowImageRefs.some((image) => !allImages.map(normalizeImage).includes(normalizeImage(image)))
+)
+  throw new Error('workflow image refs do not match digest-pinned tree refs');
 for (const [name, ref] of Object.entries(toolRefs.images))
   if (!/@sha256:[0-9a-f]{64}$/.test(ref))
     throw new Error(`release tool is not digest pinned: ${name}`);
@@ -121,6 +151,16 @@ assert.deepEqual(
   [...new Set(evidence.images.map((image) => imageName(image.reference)))].sort(),
   [...manifest.requiredImageNames].sort(),
   'evidence image set is incomplete or duplicated',
+);
+assert.equal(
+  evidence.images.length,
+  manifest.requiredImageNames.length,
+  'evidence image cardinality mismatch',
+);
+assert.equal(
+  new Set(evidence.images.map((image) => image.reference)).size,
+  evidence.images.length,
+  'duplicate evidence image reference',
 );
 const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
 const lockHash = sha256(await read('pnpm-lock.yaml'));
@@ -224,6 +264,15 @@ const hasScaleSchema = await Promise.all(
 ).then((values) => values.every(Boolean));
 if (manifest.deferredUntil['scale-concurrency'] && (!hasScaleSchema || scaleGate.status !== 'pass'))
   throw new Error('scale-concurrency cannot pass until #26 schema, baseline, and evidence exist');
+if (
+  scaleGate.status === 'pass' &&
+  (!scaleGate.artifacts.some((artifact) => artifact.role === 'scale-evidence') ||
+    !scaleGate.artifacts.some(
+      (artifact) =>
+        artifact.role === 'scale-evidence' && artifact.path.includes('scale-evidence.json'),
+    ))
+)
+  throw new Error('scale-concurrency pass requires scale-evidence artifact');
 if (!evidence.references.issue27.includes('compose-restore-drill'))
   throw new Error('issue27 backup/restore evidence reference is required');
 if (hasScaleSchema && !evidence.references.issue26.includes('scale'))

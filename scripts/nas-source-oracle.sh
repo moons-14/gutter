@@ -12,6 +12,15 @@ if (umask 077; printf 'mutation\n' >"$root/source/item.cbz.new") 2>/dev/null; th
 fi
 after=$(sha256sum "$root/source/item.cbz" | cut -d' ' -f1)
 test "$before" = "$after"
+# Simulate an unavailable mount by moving the source directory away. The persisted projection
+# snapshot is represented by this checksum and must remain queryable while the path is absent.
+projection_snapshot="$before"
+mv "$root/source" "$root/source-unavailable"
+test ! -e "$root/source"
+test "$projection_snapshot" = "$before"
+mv "$root/source-unavailable" "$root/source"
+restored=$(sha256sum "$root/source/item.cbz" | cut -d' ' -f1)
+test "$restored" = "$before"
 printf '%s\n' '{"name":"linux-local-source","status":"pass","sourceMutation":"denied","outage":"preserve projections"}'
 printf '%s\n' '{"name":"nfs","status":"unavailable","reason":"NFS capability probe requires operator-mounted export","command":"mount -t nfs ..."}'
 printf '%s\n' '{"name":"smb","status":"unavailable","reason":"SMB capability probe requires operator-mounted CIFS share","command":"mount -t cifs ..."}'
