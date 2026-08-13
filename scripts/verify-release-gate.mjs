@@ -422,10 +422,15 @@ for (const image of evidence.images) {
   assertKeys(image, ['reference', 'digest'], 'image');
   assert.match(image.reference, /@sha256:[0-9a-f]{64}$/);
   assert.match(image.digest, /^sha256:[0-9a-f]{64}$/);
+  const appPrefix = manifest.applicationImageRegistry;
+  const localSubject = /^local\/gutter-release-(api|worker|web)@sha256:[0-9a-f]{64}$/.exec(
+    image.reference,
+  );
+  const registrySubject = new RegExp(
+    `^${appPrefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\/(api|worker|web)@sha256:[0-9a-f]{64}$`,
+  ).exec(image.reference);
   assert.ok(
-    /^(?:local\/gutter-release-(?:api|worker|web)|ghcr\.io\/[^@/]+\/[^@/]+\/(?:api|worker|web))@sha256:[0-9a-f]{64}$/.test(
-      image.reference,
-    ),
+    localSubject || registrySubject,
     `evidence image is not an immutable application subject: ${image.reference}`,
   );
   assert.equal(
@@ -456,6 +461,10 @@ for (const image of evidence.images) {
     const escapedDigest = image.digest.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     assert.match(serialized, new RegExp(escapedDigest));
     assert.match(serialized, new RegExp(subject));
+    if (registrySubject) {
+      const escapedSubject = image.reference.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      assert.match(serialized, new RegExp(escapedSubject), `${role} subject mismatch`);
+    }
   }
 }
 console.log(
