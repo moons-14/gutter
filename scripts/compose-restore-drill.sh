@@ -255,6 +255,13 @@ end $$;
 SQL
 post_digest=$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T db psql -U gutter -d gutter -Atc "select concat_ws('|',(select count(*) from library_roots),(select count(*) from \"user\"),(select count(*) from session),(select count(*) from account),(select count(*) from gutter_public_api_tokens),(select count(*) from library_access_grants),(select count(*) from gutter_acl_revisions),(select count(*) from gutter_acl_audit),(select count(*) from gutter_user_state_revisions),(select count(*) from user_progress),(select count(*) from user_target_state),(select count(*) from user_bookmarks),(select count(*) from user_collections),(select count(*) from user_collection_members),(select count(*) from gutter_user_state_audit),(select count(*) from catalog_preferred_release_overrides),(select count(*) from global_source_suppressions),(select count(*) from source_items where not active),(select count(*) from source_metadata_issues))")
 test "$post_digest" = "$pre_digest"
+# Drop only rebuildable projections before the worker starts. Starting the runtime first races its
+# startup scan: the drill can otherwise delete a projection that the in-flight scan just rebuilt.
+docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T db psql -U gutter -d gutter -v ON_ERROR_STOP=1 -c "delete from catalog_series_list_state; delete from catalog_releases; delete from catalog_publications; delete from catalog_series; delete from catalog_libraries;"
+for table in catalog_libraries catalog_series catalog_publications catalog_releases catalog_series_list_state; do
+  test "$(drill_psql "$project_b" "select count(*) from public.\"$table\"")" -eq 0
+done
+echo 'restore drill checkpoint: rebuildable projections cleared before runtime startup' >&2
 docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" up $compose_build_flags -d api worker web
 echo "restore drill checkpoint: runtime started web_port=$web_port" >&2
 for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
@@ -279,24 +286,23 @@ if ! docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exe
   exit 1
 fi
 echo "restore drill checkpoint: synthetic source fixture is worker-readable" >&2
-# Drop only rebuildable projections/inventory. The worker must recreate them by reading the mount.
-docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T db psql -U gutter -d gutter -v ON_ERROR_STOP=1 -c "delete from catalog_series_list_state; delete from catalog_releases; delete from catalog_publications; delete from catalog_series; delete from catalog_libraries;"
-for table in catalog_libraries catalog_series catalog_publications catalog_releases catalog_series_list_state; do
-  test "$(drill_psql "$project_b" "select count(*) from public.\"$table\"")" -eq 0
-done
-docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker node --import tsx src/scan.ts scan enqueue --root drill-root >/dev/null
-echo "scan enqueue submitted" >&2
+scan_enqueue=$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker node --import tsx src/scan.ts scan enqueue --root drill-root | tr -d '\r')
+if ! scan_request_id=$(printf '%s\n' "$scan_enqueue" | node --input-type=module -e "let input=''; for await (const chunk of process.stdin) input += chunk; const value=JSON.parse(input); if (!/^[0-9a-f-]{36}$/i.test(value.requestId ?? '')) process.exit(1); process.stdout.write(value.requestId);"); then
+  echo "restore drill failed: scan enqueue did not return a request ID: $scan_enqueue" >&2
+  exit 1
+fi
+echo "scan enqueue submitted request_id=$scan_request_id" >&2
 attempt=1
 # The worker's durable reconciliation coordinator dispatches new requests every 30 seconds.
 # Allow two complete coordinator windows plus scan time instead of timing out before its first tick.
 while [ "$attempt" -le 45 ]; do
   scan_status=$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker node --import tsx src/scan.ts scan status --root drill-root | tr -d '\r')
-  state=$(printf '%s\n' "$scan_status" | node --input-type=module -e "let input=''; for await (const chunk of process.stdin) input += chunk; const rows=JSON.parse(input); if (rows[0]?.state) process.stdout.write(String(rows[0].state));")
+  state=$(printf '%s\n' "$scan_status" | DRILL_SCAN_REQUEST_ID="$scan_request_id" node --input-type=module -e "let input=''; for await (const chunk of process.stdin) input += chunk; const rows=JSON.parse(input); const row=rows.find((candidate) => candidate.id === process.env.DRILL_SCAN_REQUEST_ID); if (row?.state) process.stdout.write(String(row.state));")
   echo "scan poll attempt=$attempt state=${state:-missing}" >&2
   [ "$state" = completed ] && break
   if [ "$state" = failed ]; then
     echo "scan failed; status=$scan_status" >&2
-    docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T db psql -U gutter -d gutter -x -c "select id,root_id,trigger,state,scan_run_id,error_code,created_at,started_at,finished_at from scan_requests where root_id='drill-root' order by created_at desc limit 5; select * from scan_runs where root_id='drill-root' order by id desc limit 5" >&2 || true
+    docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T db psql -U gutter -d gutter -x -c "select id,root_id,trigger,state,scan_run_id,follow_up_requested,follow_up_trigger,error_code,created_at,started_at,finished_at from scan_requests where root_id='drill-root' order by created_at desc limit 5; select * from scan_runs where root_id='drill-root' order by id desc limit 5" >&2 || true
     docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T db psql -U gutter -d gutter -x -c "select id,name,state,retry_count,retry_limit,output from pgboss.job where id in (select pg_boss_job_id from scan_runs where root_id='drill-root') order by created_on desc" >&2 || true
     echo 'scan failed; worker log follows' >&2
     docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" logs --tail=80 worker >&2 || true
@@ -307,7 +313,7 @@ while [ "$attempt" -le 45 ]; do
 done
 echo "scan polling ended state=${state:-missing}" >&2
 if [ "${state:-}" != completed ]; then
-  docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T db psql -U gutter -d gutter -x -c "select id,root_id,trigger,state,scan_run_id,error_code,created_at,started_at,finished_at from scan_requests where root_id='drill-root' order by created_at desc limit 5; select id,name,state,retry_count,retry_limit,output from pgboss.job where name='catalog.reconciliation.v1' order by created_on desc limit 5" >&2 || true
+  docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T db psql -U gutter -d gutter -x -c "select id,root_id,trigger,state,scan_run_id,follow_up_requested,follow_up_trigger,error_code,created_at,started_at,finished_at from scan_requests where root_id='drill-root' order by created_at desc limit 5; select id,name,state,retry_count,retry_limit,output from pgboss.job where name='catalog.reconciliation.v1' order by created_on desc limit 5" >&2 || true
   docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" logs --tail=80 worker >&2 || true
   exit 1
 fi
@@ -328,8 +334,20 @@ test "$validation_state" = completed
 test "$validation_valid" -gt 0
 test "$validation_result_valid" -ge "$validation_valid"
 echo "restore drill checkpoint: validation=$validation_state/$validation_valid" >&2
-release_id=$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T db psql -U gutter -d gutter -Atc "select r.id from catalog_releases r join source_items i on i.id=r.source_item_id where i.relative_path='visible' order by r.id limit 1" | tr -d '\r')
-test -n "$release_id"
+release_id=''
+for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+  release_id=$(drill_psql "$project_b" "select r.id from catalog_releases r join source_items i on i.id=r.source_item_id where i.root_id='drill-root' and i.relative_path='visible' order by r.id limit 1")
+  [ -n "$release_id" ] && break
+  echo "catalog projection poll attempt=$attempt state=missing" >&2
+  sleep 2
+done
+if [ -z "$release_id" ]; then
+  echo 'restore drill failed: catalog projection is missing after the requested scan completed' >&2
+  docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T db psql -U gutter -d gutter -x -c "select id,root_id,relative_path,active,last_seen_run_id,manifest_sha256,validation_generation from source_items where root_id='drill-root' order by relative_path; select r.id,r.source_item_id,i.relative_path from catalog_releases r join source_items i on i.id=r.source_item_id where i.root_id='drill-root' order by r.id; select id,root_id,trigger,state,scan_run_id,follow_up_requested,follow_up_trigger,error_code,created_at,started_at,finished_at from scan_requests where root_id='drill-root' order by created_at desc limit 10; select id,root_id,state,summary,scan_request_id,pg_boss_job_id from scan_runs where root_id='drill-root' order by id desc limit 10" >&2 || true
+  docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" logs --tail=80 worker >&2 || true
+  exit 1
+fi
+echo "restore drill checkpoint: catalog projection completed release_id=$release_id" >&2
 reader_path="/api/reader/releases/$release_id/pages/0"
 reader_token=$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker node --import tsx --input-type=module -e "import { readFileSync } from 'node:fs'; import { signReaderCapability } from '@gutter/reader-stream'; process.stdout.write(signReaderCapability(readFileSync('/run/secrets/reader_capability_secret','utf8').trim(),{userId:'drill-user',rootId:'drill-root',path:'$reader_path',aclRevision:7}));" | tr -d '\r')
 initial_cache=$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker sh -c 'find /cache/derived -type f -not -name .operator-status.json | wc -l' | tr -d '\r')

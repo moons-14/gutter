@@ -124,6 +124,15 @@ test('release runtime gates use readable disposable secrets and isolated Compose
   assert.match(restore, /synthetic source fixture is worker-readable/);
   assert.match(restore, /while \[ "\$attempt" -le 45 \]/);
   assert.match(restore, /pgboss\.job where name='catalog\.reconciliation\.v1'/);
+  const projectionReset = restore.indexOf('delete from catalog_series_list_state');
+  const runtimeStart = restore.indexOf('up $compose_build_flags -d api worker web');
+  assert.ok(
+    projectionReset >= 0 &&
+      restore.lastIndexOf('delete from catalog_series_list_state') < runtimeStart,
+  );
+  assert.match(restore, /scan enqueue submitted request_id=\$scan_request_id/);
+  assert.match(restore, /candidate\.id === process\.env\.DRILL_SCAN_REQUEST_ID/);
+  assert.match(restore, /catalog projection is missing after the requested scan completed/);
   assert.match(fixture, /prior_tag=0013_runtime_acl_bootstrap/);
   assert.match(fixture, /meta\/_journal\.json/);
   assert.match(fixture, /postgres:18\.1@sha256:[0-9a-f]{64}/);
