@@ -168,6 +168,7 @@ services:
       GUTTER_SCALE_ORACLE: '1'
       SCALE_RUN_ID: '${SCALE_RUN_ID:-local}'
       SCALE_ROOT_ID: '${SCALE_ROOT_ID:-scale-worker-root}'
+      SCALE_EVIDENCE_PATH: /scale-evidence/evidence.json
       SCALE_SOURCE_ROOT: /scale-source
       DATABASE_URL: 'postgresql://gutter:${POSTGRES_PASSWORD:-}@integration-db:5432/gutter_integration'
     depends_on:
@@ -178,6 +179,7 @@ services:
     volumes:
       - scale-source:/scale-source
       - scale-cache:/cache
+      - '${SCALE_EVIDENCE_DIR:-/tmp/gutter-scale-evidence-local}:/scale-evidence'
     networks: [internal]
   scale-worker:
     build: { context: ., target: worker }

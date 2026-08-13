@@ -103,8 +103,16 @@ function validateEvidence(report: Record<string, unknown>) {
   assert.ok(report.status === 'pass' || report.status === 'fail' || report.status === 'unavailable');
   assert.equal(typeof report.seed, 'string');
   assert.equal(typeof report.runId, 'string');
-  const worker = report.worker as { queueCompletedRuns?: unknown };
-  assert.ok(Number.isInteger(worker.queueCompletedRuns) && Number(worker.queueCompletedRuns) >= 1);
+  const worker = report.worker as { runs?: Record<string, any>; queueCompletedRuns?: unknown };
+  assert.equal(worker.queueCompletedRuns, 3);
+  const runs = worker.runs ?? {};
+  const runValues = [runs.first, runs.noChange, runs.changed];
+  assert.ok(runValues.every((run) => run?.state === 'completed' && run?.pgBossJobId));
+  assert.equal(new Set(runValues.map((run) => run.requestId)).size, 3);
+  assert.equal(new Set(runValues.map((run) => run.id)).size, 3);
+  assert.equal(runs.first.summary?.updated, 1000);
+  assert.equal(runs.noChange.summary?.unchanged, 1000);
+  assert.equal(runs.changed.summary?.updated, 1);
   const sparse = report.sparse as { logicalBytes?: unknown; allocatedBlocks?: unknown };
   assert.ok(Number.isInteger(sparse.logicalBytes) && Number(sparse.logicalBytes) > 0);
   assert.ok(Number.isInteger(sparse.allocatedBlocks) && Number(sparse.allocatedBlocks) >= 0);
@@ -158,6 +166,7 @@ try {
     'base64',
   );
   const sourceCount = Math.min(books, 1_000);
+  assert.equal(sourceCount, 1_000, 'scale oracle requires exactly 1,000 mounted source CBZs');
   for (let n = 1; n <= sourceCount; n++)
     await writeFile(join(sourceRoot, `scale-${n}.cbz`), tinyCbz(sourcePayload));
   await pool.query('begin');
@@ -239,16 +248,17 @@ try {
   };
   const firstRequest = await requestRootScan(scanRootId, 'startup');
   const waitDeadline = () => Date.now() + 300_000;
-  let workerRun: {
+  type WorkerRun = {
     id: string;
     requestId: string;
     pgBossJobId: string | null;
     state: string;
     summary: { updated?: number; unchanged?: number } | null;
-  } | null = null;
+  };
+  let workerRun: WorkerRun | null = null;
   const firstDeadline = waitDeadline();
   while (Date.now() < firstDeadline) {
-    const result = await pool.query<typeof workerRun & {}>(
+    const result = await pool.query<WorkerRun>(
       `select r.id::text,r.scan_request_id as "requestId",r.pg_boss_job_id as "pgBossJobId",r.state,r.summary
          from scan_runs r where r.root_id=$1 and r.scan_request_id=$2 order by r.id desc limit 1`,
       [scanRootId, firstRequest.id],
@@ -272,7 +282,7 @@ try {
   let secondRun: typeof workerRun = null;
   const secondDeadline = waitDeadline();
   while (Date.now() < secondDeadline) {
-    const result = await pool.query<typeof workerRun & {}>(
+    const result = await pool.query<WorkerRun>(
       `select r.id::text,r.scan_request_id as "requestId",r.pg_boss_job_id as "pgBossJobId",r.state,r.summary from scan_runs r where r.root_id=$1 and r.scan_request_id=$2 order by r.id desc limit 1`,
       [scanRootId, secondRequest.id],
     );
@@ -299,7 +309,7 @@ try {
   let changedRun: typeof workerRun = null;
   const changedDeadline = waitDeadline();
   while (Date.now() < changedDeadline) {
-    const result = await pool.query<typeof workerRun & {}>(
+    const result = await pool.query<WorkerRun>(
       `select r.id::text,r.scan_request_id as "requestId",r.pg_boss_job_id as "pgBossJobId",r.state,r.summary from scan_runs r where r.root_id=$1 and r.scan_request_id=$2 order by r.id desc limit 1`,
       [scanRootId, changedRequest.id],
     );
@@ -310,6 +320,9 @@ try {
   const changedTimes: number[] = [performance.now() - changedStarted];
   assert.equal(changedRun?.state, 'completed');
   assert.equal(changedRun?.summary?.updated, 1);
+  assert.notEqual(firstRequest.id, secondRequest.id);
+  assert.notEqual(secondRequest.id, changedRequest.id);
+  assert.notEqual(firstRequest.id, changedRequest.id);
 
   const firstItem = firstScan.items[Math.min(1, firstScan.items.length - 1)]!;
   const sourcePath = join(sourceRoot, firstItem.relativePath);
@@ -389,9 +402,9 @@ try {
   assert.equal(pageOne.items.length, 10);
   assert.ok(pageOne.nextCursor, 'production list returns a cursor for the next page');
   assert.deepEqual(
-    pageOne.items.map((item) => Number(item.displayName.replace('Scale book ', ''))),
+    pageOne.items.map((item) => Number(String(item.displayName).replace('Scale book ', ''))),
     [...pageOne.items]
-      .map((item) => Number(item.displayName.replace('Scale book ', '')))
+      .map((item) => Number(String(item.displayName).replace('Scale book ', '')))
       .sort((a, b) => a - b),
     'production list ordering is stable',
   );
@@ -439,7 +452,7 @@ try {
   pressureRoot = await mkdtemp(join(tmpdir(), 'gutter-scale-cache-pressure-'));
   const pressureCache = new DerivedCache({
     root: pressureRoot,
-    quotaBytes: sourcePayload.length * 2,
+    quotaBytes: sourcePayload.length * 3,
   });
   const pressurePath = (n: number) => {
     const key = cacheIdentity(descriptor(n)).key;
@@ -449,7 +462,7 @@ try {
   const protectedEntry = await pressureCache.lease(descriptor(2), async () => sourcePayload);
   await pressureCache.getOrCreate(descriptor(3), async () => sourcePayload);
   const pressureBefore = await cacheUsage(pressureRoot);
-  const reclaimed = await pressureCache.gc();
+  const reclaimed = await pressureCache.gc(sourcePayload.length);
   assert.equal(reclaimed, true);
   await assert.rejects(stat(pressurePath(1)), { code: 'ENOENT' });
   await stat(pressurePath(2));
@@ -489,7 +502,8 @@ try {
     plans: {
       queryShape:
         'catalog_series_list_state + catalog_publications + catalog_releases + source_items',
-      listAndSearchExplain: 'both plans include production joins and indexed predicates',
+      list: listPlan.rows,
+      search: searchPlan.rows,
     },
     timingsMs: {
       catalog: samples(listTimes),
@@ -509,7 +523,7 @@ try {
       },
     },
     worker: {
-      runs: { first: { requestId: firstRequest.id, ...workerRun }, noChange: { requestId: secondRequest.id, ...secondRun }, changed: { requestId: changedRequest.id, ...changedRun } },
+      runs: { first: workerRun, noChange: secondRun, changed: changedRun },
       queueCompletedRuns: [workerRun, secondRun, changedRun].filter((run) => run?.state === 'completed').length,
     },
     sparse: { logicalBytes: sparse.size, allocatedBlocks: sparse.blocks },
