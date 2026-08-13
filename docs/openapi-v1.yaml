@@ -1,0 +1,58 @@
+openapi: 3.1.0
+info:
+  title: Gutter local public API
+  version: 1.0.0
+  description: Selected versioned local-client surface; unlisted routes are internal.
+servers:
+  - url: /
+security:
+  - bearerAuth: []
+paths:
+  /api/v1/catalog:
+    get:
+      operationId: listCatalog
+      parameters:
+        - {$ref: '#/components/parameters/Limit'}
+        - {$ref: '#/components/parameters/Cursor'}
+        - {name: q, in: query, schema: {type: string, maxLength: 256}}
+      responses: {'200': {description: Catalog page}, '400': {$ref: '#/components/responses/BadRequest'}}
+  /api/v1/search:
+    get:
+      operationId: searchCatalog
+      parameters:
+        - {name: q, in: query, required: true, schema: {type: string, minLength: 1, maxLength: 256}}
+        - {$ref: '#/components/parameters/Limit'}
+        - {$ref: '#/components/parameters/Cursor'}
+      responses: {'200': {description: Search page}, '400': {$ref: '#/components/responses/BadRequest'}}
+  /api/v1/page/{publicationId}/{ordinal}:
+    get:
+      operationId: getPage
+      parameters:
+        - {name: publicationId, in: path, required: true, schema: {type: string, pattern: '^[1-9][0-9]*$'}}
+        - {name: ordinal, in: path, required: true, schema: {type: integer, minimum: 0, maximum: 1000000}}
+      responses: {'200': {description: Reader page}, '404': {$ref: '#/components/responses/NotFound'}}
+  /api/v1/progress:
+    get: {operationId: getProgress, responses: {'200': {description: Progress state}, '401': {$ref: '#/components/responses/Unauthorized'}}}
+    put: {operationId: putProgress, requestBody: {$ref: '#/components/requestBodies/Json'}, responses: {'200': {description: Updated progress}, '409': {description: Revision conflict}, '401': {$ref: '#/components/responses/Unauthorized'}}}
+  /api/v1/favorites:
+    get: {operationId: listFavorites, parameters: [{$ref: '#/components/parameters/Limit'}, {$ref: '#/components/parameters/Cursor'}], responses: {'200': {description: Favorite page}, '401': {$ref: '#/components/responses/Unauthorized'}}}
+    put: {operationId: setFavorite, requestBody: {$ref: '#/components/requestBodies/Json'}, responses: {'200': {description: Updated favorite}, '401': {$ref: '#/components/responses/Unauthorized'}}}
+  /api/v1/ratings:
+    put: {operationId: setRating, requestBody: {$ref: '#/components/requestBodies/Json'}, responses: {'200': {description: Updated rating}, '401': {$ref: '#/components/responses/Unauthorized'}}}
+  /api/v1/collections:
+    get: {operationId: listCollections, responses: {'200': {description: Collection page}, '401': {$ref: '#/components/responses/Unauthorized'}}}
+    post: {operationId: createCollection, requestBody: {$ref: '#/components/requestBodies/Json'}, responses: {'201': {description: Created collection}, '401': {$ref: '#/components/responses/Unauthorized'}}}
+components:
+  securitySchemes:
+    bearerAuth: {type: http, scheme: bearer, bearerFormat: gutter_pat}
+  parameters:
+    Limit: {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 100, default: 30}}
+    Cursor: {name: cursor, in: query, schema: {type: string, maxLength: 4096}}
+  requestBodies:
+    Json: {required: true, content: {application/json: {schema: {type: object, additionalProperties: true, maxProperties: 16}}}}
+  schemas:
+    Error: {type: object, required: [error, requestId], properties: {error: {type: string}, requestId: {type: string}}, additionalProperties: false}
+  responses:
+    BadRequest: {description: Invalid request, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    Unauthorized: {description: Missing or revoked PAT, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    NotFound: {description: Not found, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}

@@ -1,6 +1,7 @@
 import { serve } from '@hono/node-server';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { readFile } from 'node:fs/promises';
 import { OpenAPIHono } from '@hono/zod-openapi';
 import {
   catalogEntitiesRoute,
@@ -69,6 +70,7 @@ import { Gauge, Registry, collectDefaultMetrics } from 'prom-client';
 import pino from 'pino';
 import { reconciliationMetricLabels } from './metrics.js';
 import { authenticatedUser, authHandler, trustedMutationOrigin } from './auth.js';
+import { authenticatePublicApiToken } from './public-pat.js';
 
 const log = pino({
   redact: ['req.headers.authorization', 'req.headers.cookie', '*.password', '*.token'],
@@ -178,6 +180,29 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
     listAdminUsers,
   } = resolved;
   const app = new OpenAPIHono();
+  // Public v1 is a strict allow-list of aliases to existing authorization-safe handlers.
+  // Internal routes remain available only under their original, unstable namespaces.
+  app.use('/api/v1/*', async (c, next) => {
+    const path = new URL(c.req.url).pathname;
+    const aliases: Record<string, string> = {
+      '/api/v1/catalog': '/catalog/series', '/api/v1/search': '/catalog/series',
+      '/api/v1/progress': '/user-state/progress', '/api/v1/favorites': '/user-state/targets',
+      '/api/v1/ratings': '/user-state/targets', '/api/v1/collections': '/user-state/collections',
+    };
+    if (path === '/api/v1/openapi.json' || path.startsWith('/api/v1/page/')) return next();
+    const target = aliases[path];
+    if (!target) return c.json({ error: 'not_found', requestId: c.req.header('x-request-id') ?? '' }, 404);
+    const pat = await authenticatePublicApiToken(c.req.header('authorization')?.replace(/^Bearer\s+/i, ''));
+    if (!pat && !(await authenticatedUser(c.req.raw)))
+      return c.json({ error: 'authentication_required', requestId: c.req.header('x-request-id') ?? '' }, 401);
+    const url = new URL(c.req.url); url.pathname = target;
+    return app.fetch(new Request(url, c.req.raw));
+  });
+  app.get('/api/v1/openapi.json', async (c) => {
+    const document = await readFile(new URL('../../../docs/openapi-v1.yaml', import.meta.url), 'utf8');
+    c.header('content-type', 'text/yaml; charset=utf-8');
+    return c.body(document, 200);
+  });
   const readerKey = resolved.readerCapabilityKey || null;
 
   app.use('*', async (c, next) => {

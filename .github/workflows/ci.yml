@@ -10,7 +10,11 @@ jobs:
       - run: corepack enable && corepack prepare pnpm@11.20.0 --activate
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec playwright install --with-deps chrome
-      - run: pnpm audit:licenses && pnpm check && pnpm lint && pnpm typecheck && pnpm unit && pnpm build && pnpm --filter @gutter/web test:e2e
+      - run: pnpm audit:licenses && pnpm check && pnpm check:openapi-compat && pnpm lint && pnpm typecheck && pnpm unit && pnpm build && pnpm --filter @gutter/web test:e2e
+      - name: OpenAPI breaking-change gate
+        run: |
+          git show origin/main:docs/openapi-v1.yaml > /tmp/openapi-base.yaml 2>/dev/null || cp docs/openapi-v1.yaml /tmp/openapi-base.yaml
+          node scripts/check-openapi-compat.mjs /tmp/openapi-base.yaml docs/openapi-v1.yaml
   compose-smoke:
     needs: quality
     runs-on: ubuntu-latest
