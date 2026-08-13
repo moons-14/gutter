@@ -1,0 +1,16 @@
+{
+  "schemaVersion": "gutter.release-gate.v1",
+  "requiredArtifacts": [
+    "docs/license-audit.json",
+    "docs/license-inventory.md",
+    "docs/openapi-v1.baseline.json",
+    "docs/platform-evidence.schema.json",
+    "scripts/backup-table-manifest.v1",
+    "scripts/compose-restore-drill.sh",
+    "scripts/migration-compatibility-oracle.sh"
+  ],
+  "deferredUntil": {
+    "scale": "#26 merge: attach SCALE evidence JSON and preserve unavailable status when unsupported"
+  },
+  "requiredStatuses": ["pass", "unavailable"]
+}

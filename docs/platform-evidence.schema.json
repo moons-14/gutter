@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Gutter platform gate evidence",
+  "type": "object",
+  "required": ["schemaVersion", "platform", "status", "command"],
+  "properties": {
+    "schemaVersion": { "const": "gutter.platform-gate.v1" },
+    "platform": { "type": "string", "minLength": 1 },
+    "docker": { "type": ["string", "null"] },
+    "compose": { "type": ["string", "null"] },
+    "status": { "enum": ["pass", "fail", "unavailable"] },
+    "command": { "type": "string", "minLength": 1 },
+    "reason": { "type": ["string", "null"] },
+    "observations": { "type": "array", "items": { "type": "string" } }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "unavailable" } } },
+      "then": { "required": ["reason"] }
+    }
+  ],
+  "additionalProperties": false
+}

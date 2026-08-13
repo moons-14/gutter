@@ -27,6 +27,7 @@
     "build": "turbo run build",
     "generate:pwa-icons": "node scripts/generate-pwa-icons.mjs",
     "audit:licenses": "node scripts/audit-licenses.mjs",
+    "verify:release-gate": "node scripts/verify-release-gate.mjs",
     "check:openapi-compat": "node scripts/check-openapi-compat.mjs docs/openapi-v1.baseline.json docs/openapi-v1.yaml docs/openapi-v1.json",
     "dev": "docker compose up --build",
     "migrate": "pnpm --filter @gutter/db migrate",
