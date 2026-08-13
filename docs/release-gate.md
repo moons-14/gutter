@@ -33,6 +33,10 @@ Compose examples. A missing or disconnected mount is an unavailable source: scan
 items deleted or mutate projections; follow the NAS-unavailable runbook in
 `docs/operations-runbook.md`.
 
+`scripts/nas-source-oracle.sh` is the mandatory Linux local-source check: it attempts a mutation
+against a read-only fixture, verifies the source hash is unchanged, and emits typed NFS/SMB
+best-effort unavailable records with the exact host probe command required for an operator mount.
+
 ## Required exact-tree evidence
 
 The release record must contain the commit SHA, `pnpm-lock.yaml` checksum, image references and

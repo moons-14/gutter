@@ -21,6 +21,10 @@ const safeArtifact = async (file) => {
   return readFile(target);
 };
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
+const assertKeys = (value, allowed, label) => {
+  for (const key of Object.keys(value ?? {}))
+    if (!allowed.includes(key)) throw new Error(`unexpected ${label} property: ${key}`);
+};
 const mode = process.argv[2] ?? 'contract';
 if (!['contract', 'final'].includes(mode))
   throw new Error('usage: verify-release-gate.mjs [contract|final] [evidence.json]');
@@ -100,6 +104,13 @@ const evidencePath = process.argv[3];
 if (!evidencePath) throw new Error('final mode requires evidence.json');
 const evidence = JSON.parse(await safeArtifact(evidencePath));
 assert.equal(evidence.schemaVersion, 'gutter.release-evidence.v1');
+assertKeys(
+  evidence,
+  ['schemaVersion', 'exactTree', 'images', 'gates', 'platforms', 'references', 'threatClaims'],
+  'evidence',
+);
+assertKeys(evidence.exactTree, ['commit', 'lockfileSha256'], 'exactTree');
+assertKeys(evidence.references, ['issue26', 'issue27'], 'references');
 assert.ok(Array.isArray(evidence.images) && evidence.images.length > 0, 'images are required');
 assert.ok(Array.isArray(evidence.gates) && evidence.gates.length > 0, 'gates are required');
 assert.ok(
@@ -138,6 +149,7 @@ assert.equal(
 assert.equal(evidence.references.issue26.length > 0, true);
 assert.equal(evidence.references.issue27.length > 0, true);
 for (const gate of evidence.gates) {
+  assertKeys(gate, ['id', 'status', 'command', 'commandHash', 'artifacts'], 'gate');
   assert.ok(
     gate.id && gate.command.trim() && Array.isArray(gate.artifacts) && gate.artifacts.length > 0,
     `gate evidence incomplete: ${gate.id}`,
@@ -145,10 +157,20 @@ for (const gate of evidence.gates) {
   if (gate.status !== 'pass')
     throw new Error(`release gate is not pass: ${gate.id}=${gate.status}`);
   for (const artifact of gate.artifacts) {
+    assertKeys(artifact, ['path', 'sha256'], 'artifact');
+    const canonical = manifest.gateCommands[gate.id];
+    assert.equal(gate.command, canonical, `non-canonical command: ${gate.id}`);
+    assert.equal(gate.commandHash, sha256(gate.command), `command hash mismatch: ${gate.id}`);
+    assert.match(artifact.sha256, /^[0-9a-f]{64}$/, `invalid artifact checksum: ${gate.id}`);
     const bytes = await safeArtifact(artifact.path);
     assert.equal(sha256(bytes), artifact.sha256, `artifact checksum mismatch: ${artifact.path}`);
   }
 }
+assert.deepEqual(
+  evidence.threatClaims,
+  manifest.threatClaims,
+  'threat claim mapping is incomplete or altered',
+);
 const represented = new Set(
   evidence.gates.flatMap((gate) => gate.artifacts.map((artifact) => artifact.path)),
 );
@@ -167,6 +189,7 @@ for (const required of manifest.requiredArtifacts) {
 if (evidence.platforms.find((platform) => platform.name === 'linux')?.status !== 'pass')
   throw new Error('Linux platform must pass');
 for (const platform of evidence.platforms) {
+  assertKeys(platform, ['name', 'status', 'command', 'reason'], 'platform');
   assert.ok(
     platform.name && platform.command.trim(),
     'platform evidence requires name and command',
@@ -201,6 +224,7 @@ for (const platform of evidence.platforms) {
     throw new Error(`unavailable platform has no reason: ${platform.name}`);
 }
 for (const image of evidence.images) {
+  assertKeys(image, ['reference', 'digest'], 'image');
   assert.match(image.reference, /@sha256:[0-9a-f]{64}$/);
   assert.match(image.digest, /^sha256:[0-9a-f]{64}$/);
   assert.ok(

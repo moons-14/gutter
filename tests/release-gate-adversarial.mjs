@@ -26,3 +26,10 @@ test('tree references remain digest and commit pinned', async () => {
   const { stdout } = await exec(process.execPath, ['scripts/verify-release-gate.mjs', 'contract']);
   assert.match(stdout, /contract structure passed/);
 });
+
+test('evidence generator rejects missing runner results instead of inventing pass', async () => {
+  await assert.rejects(
+    exec(process.execPath, ['scripts/generate-release-evidence.mjs', 'missing-runner.tsv', 'missing-evidence.json']),
+    /ENOENT|runner result missing/,
+  );
+});

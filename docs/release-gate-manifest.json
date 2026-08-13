@@ -9,9 +9,10 @@
     "scripts/compose-restore-drill.sh",
     "scripts/migration-compatibility-oracle.sh",
     "scripts/run-release-gates.sh",
+    "scripts/nas-source-oracle.sh",
     "docs/release-notes.md",
-    "docs/release-tool-refs.json"
-    ,".github/workflows/release.yml"
+    "docs/release-tool-refs.json",
+    ".github/workflows/release.yml"
   ],
   "requiredGateIds": [
     "dependencies",
@@ -25,6 +26,7 @@
     "build",
     "compose-config",
     "operations",
+    "nas-source",
     "containers",
     "sbom",
     "provenance",
@@ -37,5 +39,36 @@
   ],
   "requiredPlatformNames": ["linux", "macos-docker", "windows-docker"],
   "requiredImageNames": ["node", "postgres", "caddy"],
+  "threatClaims": {
+    "archive-path-containment": "page-validation",
+    "acl-pat": "operations",
+    "proxy-boundary": "operations",
+    "cache-redaction": "operations",
+    "source-immutability": "backup-restore",
+    "no-saas": "release-contract"
+  },
+  "gateCommands": {
+    "dependencies": "corepack pnpm install --frozen-lockfile",
+    "licenses": "corepack pnpm audit:licenses",
+    "secrets": "gitleaks detect --source . --redact",
+    "release-contract": "node scripts/verify-release-gate.mjs contract",
+    "format": "corepack pnpm check",
+    "openapi": "corepack pnpm check:openapi-compat",
+    "unit": "corepack pnpm unit",
+    "lint": "corepack pnpm lint",
+    "typecheck": "corepack pnpm typecheck",
+    "build": "corepack pnpm build",
+    "browser-e2e": "corepack pnpm --filter @gutter/web test:e2e",
+    "migrations": "./scripts/migration-compatibility-oracle.sh",
+    "compose-config": "docker compose config",
+    "compose-smoke": "docker compose up --abort-on-container-exit --exit-code-from test test",
+    "operations": "node scripts/verify-operations.mjs",
+    "backup-restore": "./scripts/compose-restore-drill.sh",
+    "nas-source": "./scripts/nas-source-oracle.sh",
+    "containers": "trivy image pinned release refs",
+    "sbom": "syft pinned release refs cyclonedx",
+    "provenance": "cosign pinned release refs slsaprovenance",
+    "scale-concurrency": "GUTTER_SCALE_ORACLE=1 SCALE_FULL=1 scale oracle"
+  },
   "deferredUntil": { "scale-concurrency": "#26 merge" }
 }
