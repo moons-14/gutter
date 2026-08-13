@@ -4,16 +4,24 @@
   "type": "object",
   "oneOf": [
     {
+      "type": "object",
+      "required": ["status", "worker"],
       "properties": {
         "status": { "const": "pass" },
-        "worker": { "properties": { "queueCompletedRuns": { "const": 3 } } }
+        "worker": {
+          "type": "object",
+          "properties": { "queueCompletedRuns": { "const": 3 } }
+        }
       }
     },
     {
+      "type": "object",
+      "required": ["status", "unavailablePlatformReason", "worker"],
       "properties": {
         "status": { "const": "unavailable" },
         "unavailablePlatformReason": { "type": "string", "minLength": 1 },
         "worker": {
+          "type": "object",
           "properties": {
             "queueCompletedRuns": { "const": 0 },
             "runs": { "type": "object", "additionalProperties": false }
@@ -137,10 +145,9 @@
       "type": "object",
       "required": ["queueCompletedRuns", "runs"],
       "properties": {
-        "queueCompletedRuns": { "type": "integer", "minimum": 1 },
+        "queueCompletedRuns": { "type": "integer", "minimum": 0 },
         "runs": {
           "type": "object",
-          "required": ["first", "noChange", "changed"],
           "properties": {
             "first": { "$ref": "#/$defs/run" },
             "noChange": { "$ref": "#/$defs/run" },
@@ -149,7 +156,25 @@
           "additionalProperties": false
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["queueCompletedRuns", "runs"],
+          "properties": {
+            "queueCompletedRuns": { "const": 3 },
+            "runs": { "required": ["first", "noChange", "changed"] }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["queueCompletedRuns", "runs"],
+          "properties": {
+            "queueCompletedRuns": { "const": 0 },
+            "runs": { "maxProperties": 0 }
+          }
+        }
+      ]
     },
     "sparse": {
       "type": "object",
@@ -225,7 +250,7 @@
       "properties": {
         "p50": { "type": "number", "minimum": 0 },
         "p95": { "type": "number", "minimum": 0 },
-        "count": { "type": "integer", "minimum": 1 }
+        "count": { "type": "integer", "minimum": 0 }
       },
       "additionalProperties": false
     }

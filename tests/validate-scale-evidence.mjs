@@ -8,20 +8,18 @@ const report = JSON.parse(await readFile(path, 'utf8'));
 const schema = JSON.parse(
   await readFile(new URL('../docs/scale-oracle-evidence.schema.json', import.meta.url), 'utf8'),
 );
-const unavailableMode = report.status === 'unavailable';
 function validate(value, rule, path = '$', root = schema) {
-  if (rule.oneOf)
-    assert.ok(
-      rule.oneOf.some((candidate) => {
-        try {
-          validate(value, candidate, path, root);
-          return true;
-        } catch {
-          return false;
-        }
-      }),
-      `${path} oneOf`,
-    );
+  if (rule.oneOf) {
+    const matches = rule.oneOf.filter((candidate) => {
+      try {
+        validate(value, candidate, path, root);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+    assert.equal(matches.length, 1, `${path} oneOf (${matches.length} matches)`);
+  }
   if (rule.$ref) return validate(value, root.$defs[rule.$ref.split('/').pop()], path, root);
   if (rule.const !== undefined) assert.deepEqual(value, rule.const, `${path} const`);
   if (rule.enum) assert.ok(rule.enum.includes(value), `${path} enum`);
@@ -42,17 +40,23 @@ function validate(value, rule, path = '$', root = schema) {
     );
     assert.ok(ok, `${path} type`);
   }
-  if (rule.minimum !== undefined && !(unavailableMode && path.startsWith('$.worker')))
-    assert.ok(value >= rule.minimum, `${path} minimum`);
+  if (rule.minimum !== undefined) assert.ok(value >= rule.minimum, `${path} minimum`);
   if (rule.minLength !== undefined)
     assert.ok(typeof value === 'string' && value.length >= rule.minLength, `${path} minLength`);
   if (rule.pattern) assert.match(value, new RegExp(rule.pattern), `${path} pattern`);
   if (rule.minItems !== undefined)
     assert.ok(Array.isArray(value) && value.length >= rule.minItems, `${path} minItems`);
+  if (rule.maxProperties !== undefined)
+    assert.ok(
+      value &&
+        typeof value === 'object' &&
+        !Array.isArray(value) &&
+        Object.keys(value).length <= rule.maxProperties,
+      `${path} maxProperties`,
+    );
   if (rule.required)
     for (const key of rule.required)
-      if (!(unavailableMode && path !== '$' && !Object.hasOwn(value, key)))
-        assert.ok(Object.hasOwn(value, key), `${path}.${key} required`);
+      assert.ok(value && Object.hasOwn(value, key), `${path}.${key} required`);
   if (rule.type === 'object' && rule.properties) {
     if (rule.additionalProperties === false)
       for (const key of Object.keys(value))
@@ -87,6 +91,7 @@ if (report.status === 'unavailable') {
   assert.equal(typeof report.baselineComparison.baselineSha256, 'string');
 }
 validate(report, schema);
+const unavailableMode = report.status === 'unavailable';
 if (unavailableMode) {
   console.log('SCALE_EVIDENCE_SCHEMA_RESULT pass');
   process.exit(0);
