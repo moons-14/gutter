@@ -160,7 +160,16 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
-    profiles: [integration]
+    profiles: [integration, scale]
+    networks: [internal]
+  scale-oracles:
+    build: { context: ., target: build }
+    command: [pnpm, integration:scale-oracles]
+    environment:
+      GUTTER_SCALE_ORACLE: '1'
+      DATABASE_URL: 'postgresql://gutter:${POSTGRES_PASSWORD:-}@integration-db:5432/gutter_integration'
+    depends_on: { integration-db: { condition: service_healthy } }
+    profiles: [scale]
     networks: [internal]
 volumes:
   db-data:
