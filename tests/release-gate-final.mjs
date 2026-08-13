@@ -112,7 +112,12 @@ function scaleEvidence(baselineSha256) {
         changed: run('changed', 1, 0),
       },
     },
-    sparse: { logicalBytes: 20 * 1024 ** 4, allocatedBlocks: 1 },
+    sparse: {
+      logicalBytes: 20 * 1024 ** 4,
+      allocatedBlocks: 1,
+      fileCount: 2,
+      maxFileLogicalBytes: 10 * 1024 ** 4,
+    },
     baselineComparison: {
       baseline: 'docs/scale-oracle-baseline.json',
       baselineSha256,

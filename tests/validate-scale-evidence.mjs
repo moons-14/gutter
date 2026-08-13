@@ -114,6 +114,8 @@ for (const name of ['first', 'noChange', 'changed']) {
 }
 assert.equal(report.sparse.logicalBytes, 20 * 1024 ** 4);
 assert.ok(report.sparse.allocatedBlocks <= report.thresholds.sparseAllocatedBlocksMax);
+assert.equal(report.sparse.fileCount, 2);
+assert.equal(report.sparse.maxFileLogicalBytes, 10 * 1024 ** 4);
 assert.match(report.baselineComparison.baselineSha256, /^[0-9a-f]{64}$/);
 const baselineBytes = await readFile(
   new URL('../docs/scale-oracle-baseline.json', import.meta.url),

@@ -69,6 +69,8 @@ const validateScaleEvidence = async (artifact) => {
   assert.equal(report.cache.pressure.reclaimedBytes > 0, true);
   assert.equal(report.sparse.logicalBytes, 20 * 1024 ** 4);
   assert.equal(report.sparse.allocatedBlocks < 1024, true);
+  assert.equal(report.sparse.fileCount, 2);
+  assert.equal(report.sparse.maxFileLogicalBytes, 10 * 1024 ** 4);
   assert.equal(report.environment.setupDatabaseRole, 'gutter');
   assert.equal(report.environment.workerDatabaseRole, 'gutter_worker');
   assert.equal(report.environment.sourceMount, 'read-only');

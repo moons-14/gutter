@@ -4,7 +4,6 @@ import {
   mkdir,
   mkdtemp,
   stat,
-  truncate,
   rm,
   writeFile,
   lstat,
@@ -16,6 +15,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { crc32 } from 'node:zlib';
+import { probeSparseCapacity, SPARSE_FILE_COUNT } from '../sparse-capacity.mts';
 import { DerivedCache, cacheIdentity } from '../../packages/derived-cache/src/index.ts';
 import { openReaderStream } from '../../packages/reader-stream/src/index.ts';
 import { scanRootBatched, type ScanItem } from '../../packages/discovery-scanner/src/index.ts';
@@ -150,9 +150,16 @@ function validateEvidence(report: Record<string, unknown>) {
   assert.equal(runs.first.summary?.updated, 1000);
   assert.equal(runs.noChange.summary?.unchanged, 1000);
   assert.equal(runs.changed.summary?.updated, 1);
-  const sparse = report.sparse as { logicalBytes?: unknown; allocatedBlocks?: unknown };
+  const sparse = report.sparse as {
+    logicalBytes?: unknown;
+    allocatedBlocks?: unknown;
+    fileCount?: unknown;
+    maxFileLogicalBytes?: unknown;
+  };
   assert.ok(Number.isInteger(sparse.logicalBytes) && Number(sparse.logicalBytes) > 0);
   assert.ok(Number.isInteger(sparse.allocatedBlocks) && Number(sparse.allocatedBlocks) >= 0);
+  assert.equal(sparse.fileCount, 2);
+  assert.equal(sparse.maxFileLogicalBytes, 10 * 1024 ** 4);
 }
 
 async function timedQuery(text: string, values: unknown[] = []) {
@@ -570,13 +577,11 @@ try {
   protectedEntry.release();
 
   const sparseRoot = await mkdtemp(join(tmpdir(), 'gutter-scale-sparse-'));
-  const sparsePath = join(sparseRoot, 'capacity.bin');
-  await writeFile(sparsePath, '');
-  await truncate(sparsePath, 20 * 1024 ** 4);
-  const sparse = await stat(sparsePath);
-  assert.equal(sparse.size, 20 * 1024 ** 4);
-  assert.ok(sparse.blocks < 1024, 'sparse capacity probe must not allocate 20 TB');
-  await rm(sparseRoot, { recursive: true, force: true });
+  const sparse = await probeSparseCapacity(sparseRoot).finally(() =>
+    rm(sparseRoot, { recursive: true, force: true }),
+  );
+  assert.equal(sparse.fileCount, SPARSE_FILE_COUNT);
+  assert.ok(sparse.allocatedBlocks < 1024, 'sparse capacity probe must not allocate 20 TiB');
 
   const report = {
     schemaVersion: 'gutter.scale-oracle.v1',
@@ -627,7 +632,7 @@ try {
         (run) => run?.state === 'completed',
       ).length,
     },
-    sparse: { logicalBytes: sparse.size, allocatedBlocks: sparse.blocks },
+    sparse,
     baselineComparison: {
       baseline: 'docs/scale-oracle-baseline.json',
       baselineSha256,
@@ -637,7 +642,7 @@ try {
         books * pagesPerBook ===
           (full ? baseline.portable.fullPages : baseline.portable.defaultPages) &&
         producers === baseline.portable.coldProducerCount &&
-        Number(sparse.blocks) <= baseline.portable.sparseAllocatedBlocksMax
+        sparse.allocatedBlocks <= baseline.portable.sparseAllocatedBlocksMax
           ? 'pass'
           : 'fail',
       hardwareAdvisory: {

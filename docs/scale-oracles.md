@@ -14,7 +14,8 @@ The oracle hard-fails on exact row counts, the production catalog/search query s
 joined plan (`catalog_series_list_state`, publications, releases, and source items), five-reader
 producer coalescing, warm-cache hits, a successful quota-preserving GC result, native scanner and
 reconciliation outcomes (`updated=N`, then `unchanged=N`, then exactly one changed manifest), and
-a sparse 20-TB logical file whose allocated blocks remain negligible. Its 1,000-file Compose
+20 TiB of aggregate sparse logical capacity, split across two 10-TiB files so the probe also runs
+on filesystems with a 16-TiB per-file limit, while allocated blocks remain negligible. Its 1,000-file Compose
 fixture writes valid one-page CBZs under the disposable `scale-source` volume, runs the real
 discovery scanner/reconciler, starts the production worker entrypoint with its PgBoss
 reconciliation queue, verifies a queue-completed scan, validates a page through `page-validator`,
@@ -24,8 +25,9 @@ diagnosis only; timing is not a correctness gate because CI hardware is variable
 regression baseline is exact counts, zero quarantines, one cold producer for five readers, a true
 within-quota GC result, required production joins in both plans, and fewer than 1,024 allocated
 filesystem blocks for the sparse probe. The report records Node/PostgreSQL versions, seed,
-run ID, dataset sizes, query shape, queue completion, cache pressure/reclamation, and sparse
-allocation. It is emitted as a JSON line and written to `SCALE_EVIDENCE_PATH` (or a temporary
+run ID, dataset sizes, query shape, queue completion, cache pressure/reclamation, and the sparse
+file count, maximum file size, aggregate logical size, and aggregate allocation. It is emitted as
+a JSON line and written to `SCALE_EVIDENCE_PATH` (or a temporary
 file); its committed schema and baseline are `docs/scale-oracle-evidence.schema.json` and
 `docs/scale-oracle-baseline.json`. Run on isolated disposable
 PostgreSQL storage; never point it at a user database.
