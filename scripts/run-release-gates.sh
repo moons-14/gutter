@@ -80,10 +80,17 @@ run_gate nas-source './scripts/nas-source-oracle.sh' ./scripts/nas-source-oracle
 application_image_refs=''
 api_subject=''; worker_subject=''; web_subject=''
 if [ -n "${RELEASE_PREPARED_SUBJECTS:-}" ]; then
-  test -s "$RELEASE_PREPARED_SUBJECTS"
-  cp "$RELEASE_PREPARED_SUBJECTS" "$out/application-subjects.json"
+  test -f "$RELEASE_PREPARED_SUBJECTS" ! -L "$RELEASE_PREPARED_SUBJECTS"
+  test "$(wc -c <"$RELEASE_PREPARED_SUBJECTS")" -le 65536
+  validated=$(node scripts/validate-application-subjects.mjs "$RELEASE_PREPARED_SUBJECTS" --allow-local)
+  source_real=$(realpath "$RELEASE_PREPARED_SUBJECTS")
+  target_real=$(realpath -m "$out/application-subjects.json")
+  if [ "$source_real" != "$target_real" ]; then printf '%s\n' "$validated" >"$out/application-subjects.json"; fi
   test -s "${RELEASE_PREPARED_SUBJECTS%.json}.tsv"
-  cp "${RELEASE_PREPARED_SUBJECTS%.json}.tsv" "$out/application-subjects.tsv"
+  test -f "${RELEASE_PREPARED_SUBJECTS%.json}.tsv" ! -L "${RELEASE_PREPARED_SUBJECTS%.json}.tsv"
+  if [ "$(realpath "${RELEASE_PREPARED_SUBJECTS%.json}.tsv")" != "$(realpath -m "$out/application-subjects.tsv")" ]; then
+    cp "${RELEASE_PREPARED_SUBJECTS%.json}.tsv" "$out/application-subjects.tsv"
+  fi
   while IFS="	" read -r service local_tag subject; do
     application_image_refs="$application_image_refs $subject"
     case "$service" in api) api_subject="$subject" ;; worker) worker_subject="$subject" ;; web) web_subject="$subject" ;; esac

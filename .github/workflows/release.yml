@@ -1,8 +1,9 @@
 name: Release evidence
 on:
   workflow_dispatch:
+    branches: [main]
   push:
-    tags: ['v*']
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
 jobs:
   release-evidence:
     runs-on: ubuntu-24.04
@@ -28,7 +29,7 @@ jobs:
           RELEASE_TRIVY_DB_REPOSITORY: ghcr.io/aquasecurity/trivy-db:2@sha256:182c8405cd03caefe80982cf39bf071c9176ca3b1d1018a6ac02706c4597c72e
           RELEASE_SYFT_IMAGE: docker.io/anchore/syft:v1.19.0@sha256:bc1ae555a43011d23bb011a4f50e175fc9a5984a008a3f8f2d692b211fcacd2a
           RELEASE_COSIGN_IMAGE: gcr.io/projectsigstore/cosign:v2.4.3@sha256:c77247c92f4dfea851c70555738226498393e34e2f9ca83cb959e51c230e4ad7
-          RELEASE_COSIGN_CERTIFICATE_IDENTITY_REGEXP: https://github.com/moons-14/gutter/.github/workflows/release.yml@refs/(tags/v[^/]+|heads/main)
+          RELEASE_COSIGN_CERTIFICATE_IDENTITY_REGEXP: '^https://github.com/moons-14/gutter/.github/workflows/release.yml@refs/(heads/main|tags/v[0-9]+\\.[0-9]+\\.[0-9]+)$'
           RELEASE_COSIGN_OIDC_ISSUER: https://token.actions.githubusercontent.com
         run: pnpm run:release-gates
       - name: Read application subjects
@@ -36,9 +37,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          node scripts/validate-application-subjects.mjs release-artifacts/application-subjects.json >/tmp/application-subjects.validated.json
           for service in api worker web; do
-            subject=$(jq -er --arg service "$service" '.[] | select(.service == $service) | .subject' release-artifacts/application-subjects.json)
-            case "$subject" in *"@sha256:"*) ;; *) echo "invalid subject for $service" >&2; exit 1 ;; esac
+            subject=$(node -e 'const fs=require("fs"); const a=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); const x=a.find(e=>e.service===process.argv[2]); if(!x) process.exit(1); process.stdout.write(x.subject)' /tmp/application-subjects.validated.json "$service")
             name=${subject%@*}
             digest=${subject#*@}
             printf '%s_name=%s\n' "$service" "$name" >> "$GITHUB_OUTPUT"
@@ -77,7 +78,7 @@ jobs:
           RELEASE_TRIVY_DB_REPOSITORY: ghcr.io/aquasecurity/trivy-db:2@sha256:182c8405cd03caefe80982cf39bf071c9176ca3b1d1018a6ac02706c4597c72e
           RELEASE_SYFT_IMAGE: docker.io/anchore/syft:v1.19.0@sha256:bc1ae555a43011d23bb011a4f50e175fc9a5984a008a3f8f2d692b211fcacd2a
           RELEASE_COSIGN_IMAGE: gcr.io/projectsigstore/cosign:v2.4.3@sha256:c77247c92f4dfea851c70555738226498393e34e2f9ca83cb959e51c230e4ad7
-          RELEASE_COSIGN_CERTIFICATE_IDENTITY_REGEXP: https://github.com/moons-14/gutter/.github/workflows/release.yml@refs/(tags/v[^/]+|heads/main)
+          RELEASE_COSIGN_CERTIFICATE_IDENTITY_REGEXP: '^https://github.com/moons-14/gutter/.github/workflows/release.yml@refs/(heads/main|tags/v[0-9]+\\.[0-9]+\\.[0-9]+)$'
           RELEASE_COSIGN_OIDC_ISSUER: https://token.actions.githubusercontent.com
         run: pnpm run:release-gates
       - name: Validate final evidence

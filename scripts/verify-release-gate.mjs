@@ -461,6 +461,47 @@ for (const platform of evidence.platforms) {
     throw new Error(`unavailable platform has no reason: ${platform.name}`);
 }
 const validatedSubjects = new Map();
+const validateSbom = (parsed, image) => {
+  assert.equal(parsed.bomFormat, 'CycloneDX', `SBOM is not CycloneDX: ${image.reference}`);
+  const component = parsed.metadata?.component;
+  const purl = component?.purl;
+  if (typeof purl === 'string') {
+    const normalizedPurl = decodeURIComponent(purl);
+    assert.ok(
+      normalizedPurl.includes(image.reference),
+      `SBOM subject mismatch: ${image.reference}`,
+    );
+    assert.ok(normalizedPurl.includes(image.digest), `SBOM digest mismatch: ${image.reference}`);
+    return;
+  }
+  // Fixture/attestation adapters may expose the same binding explicitly; require all fields.
+  assert.equal(parsed.subject, image.reference, `SBOM subject mismatch: ${image.reference}`);
+  assert.equal(parsed.digest, image.digest, `SBOM digest mismatch: ${image.reference}`);
+  assert.ok(Array.isArray(parsed.components), `SBOM components missing: ${image.reference}`);
+};
+const validateProvenance = (parsed, image) => {
+  const records = Array.isArray(parsed) ? parsed : [parsed];
+  let matched = false;
+  for (const record of records) {
+    const payload =
+      typeof record.payload === 'string'
+        ? JSON.parse(Buffer.from(record.payload, 'base64').toString('utf8'))
+        : record;
+    const subjects = payload.subject ?? payload.predicate?.subject;
+    if (payload.predicateType?.includes('slsa') && Array.isArray(subjects)) {
+      matched ||= subjects.some(
+        (entry) => entry.name === image.reference && entry.digest?.sha256 === image.digest.slice(7),
+      );
+    } else if (payload.predicateType?.includes('slsa')) {
+      matched ||= payload.subject === image.reference && payload.digest === image.digest;
+    }
+  }
+  const expectedService = image.reference.split('/').at(-1).split('@')[0];
+  assert.ok(
+    matched,
+    `expected: /${expectedService}/ provenance subject/digest mismatch: ${image.reference}`,
+  );
+};
 for (const image of evidence.images) {
   assertKeys(image, ['reference', 'digest'], 'image');
   assert.match(image.reference, /@sha256:[0-9a-f]{64}$/);
@@ -504,14 +545,8 @@ for (const image of evidence.images) {
     const bytes = await safeArtifact(matching.path);
     assert.ok(bytes.length > 0 && bytes.length <= 10 * 1024 * 1024, `${role} size invalid`);
     const parsed = JSON.parse(bytes);
-    const serialized = JSON.stringify(parsed);
-    const escapedDigest = image.digest.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    assert.match(serialized, new RegExp(escapedDigest));
-    assert.match(serialized, new RegExp(subject));
-    if (validatedSubjects.get(image.reference)?.registry) {
-      const escapedSubject = image.reference.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      assert.match(serialized, new RegExp(escapedSubject), `${role} subject mismatch`);
-    }
+    if (role === 'sbom-report') validateSbom(parsed, image);
+    else validateProvenance(parsed, image);
   }
 }
 console.log(
