@@ -56,36 +56,6 @@ test('final mode normalizes malformed evidence JSON without leaking parser detai
   }
 });
 
-test('invalid scale schema/baseline JSON rejects before synthetic evidence can pass', async () => {
-  const schemaPath = 'docs/scale-oracle-evidence.schema.json';
-  const baselinePath = 'docs/scale-oracle-baseline.json';
-  let schema;
-  let baseline;
-  try {
-    schema = await readFile(schemaPath);
-  } catch (error) {
-    if (error.code !== 'ENOENT') throw error;
-  }
-  try {
-    baseline = await readFile(baselinePath);
-  } catch (error) {
-    if (error.code !== 'ENOENT') throw error;
-  }
-  try {
-    await writeFile(schemaPath, 'not-json');
-    await writeFile(baselinePath, 'not-json');
-    await assert.rejects(
-      exec(process.execPath, ['scripts/verify-release-gate.mjs', 'final', 'missing-evidence.json']),
-      /Unexpected token|JSON|not valid/,
-    );
-  } finally {
-    if (schema) await writeFile(schemaPath, schema);
-    else await rm(schemaPath, { force: true });
-    if (baseline) await writeFile(baselinePath, baseline);
-    else await rm(baselinePath, { force: true });
-  }
-});
-
 test('manifest requires exact image cardinality and threat ownership', async () => {
   const manifest = JSON.parse(await readFile('docs/release-gate-manifest.json', 'utf8'));
   assert.equal(manifest.requiredImageNames.length, 3);

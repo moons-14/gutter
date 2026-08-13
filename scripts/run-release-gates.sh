@@ -8,7 +8,11 @@ out=${RELEASE_ARTIFACT_DIR:?set RELEASE_ARTIFACT_DIR to a disposable evidence di
 mkdir -p "$out"
 gitleaks_image=${RELEASE_GITLEAKS_IMAGE:?set RELEASE_GITLEAKS_IMAGE to the digest-pinned tool ref}
 trivy_image=${RELEASE_TRIVY_IMAGE:?set RELEASE_TRIVY_IMAGE to the digest-pinned tool ref}
-trivy_db_repository=${RELEASE_TRIVY_DB_REPOSITORY:-ghcr.io/aquasecurity/trivy-db:2}
+trivy_db_repository=${RELEASE_TRIVY_DB_REPOSITORY:?set RELEASE_TRIVY_DB_REPOSITORY to the immutable digest-pinned Trivy DB ref}
+case "$trivy_db_repository" in
+  ghcr.io/aquasecurity/trivy-db:2@sha256:[0-9a-f][0-9a-f]*) ;;
+  *) echo 'RELEASE_TRIVY_DB_REPOSITORY must be the pinned official trivy-db:2 digest' >&2; exit 2 ;;
+esac
 syft_image=${RELEASE_SYFT_IMAGE:?set RELEASE_SYFT_IMAGE to the digest-pinned tool ref}
 cosign_image=${RELEASE_COSIGN_IMAGE:?set RELEASE_COSIGN_IMAGE to the digest-pinned tool ref}
 cosign_identity=${RELEASE_COSIGN_CERTIFICATE_IDENTITY_REGEXP:?set RELEASE_COSIGN_CERTIFICATE_IDENTITY_REGEXP to the GitHub OIDC identity regexp}
@@ -16,6 +20,22 @@ cosign_issuer=${RELEASE_COSIGN_OIDC_ISSUER:?set RELEASE_COSIGN_OIDC_ISSUER to th
 results="$out/runner-results.tsv"
 : >"$results"
 failed=0
+generated_secrets=''
+cleanup_generated_secrets() {
+  if [ -n "$generated_secrets" ]; then
+    rm -f $generated_secrets
+  fi
+}
+trap cleanup_generated_secrets EXIT INT TERM
+umask 077
+mkdir -p secrets
+for secret in api_db_password worker_db_password better_auth_secret reader_capability_secret; do
+  path="secrets/$secret"
+  if [ ! -s "$path" ]; then
+    od -An -N32 -tx1 /dev/urandom | tr -d ' \n' >"$path"
+    generated_secrets="$generated_secrets $path"
+  fi
+done
 run_gate() {
   id=$1
   shift
@@ -52,7 +72,7 @@ run_gate containers 'trivy image pinned release refs' sh -ec 'for image in $RELE
 run_gate sbom 'syft pinned release refs cyclonedx' sh -ec 'for image in $RELEASE_IMAGE_REFS; do name=$(printf "%s" "$image" | tr "/:@" "___"); docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "$RELEASE_SYFT_IMAGE" "$image" -o cyclonedx-json >"$RELEASE_ARTIFACT_DIR/$name.sbom.json"; sha256sum "$RELEASE_ARTIFACT_DIR/$name.sbom.json" >"$RELEASE_ARTIFACT_DIR/$name.sbom.json.sha256"; done'
 run_gate provenance 'cosign pinned release refs slsaprovenance' sh -ec 'for image in $RELEASE_IMAGE_REFS; do docker run --rm "$RELEASE_COSIGN_IMAGE" verify-attestation --type slsaprovenance --certificate-identity-regexp "$RELEASE_COSIGN_CERTIFICATE_IDENTITY_REGEXP" --certificate-oidc-issuer "$RELEASE_COSIGN_OIDC_ISSUER" "$image"; done'
 if [ -f docs/scale-oracle-evidence.schema.json ]; then
-  run_gate scale-concurrency 'GUTTER_SCALE_ORACLE=1 SCALE_FULL=1 scale oracle' sh -ec 'GUTTER_SCALE_ORACLE=1 SCALE_FULL=1 SCALE_EVIDENCE_PATH="$RELEASE_ARTIFACT_DIR/scale-evidence.json" corepack pnpm --filter @gutter/db exec tsx ../../tests/integration/scale-oracles.mts'
+  run_gate scale-concurrency 'SCALE_FULL=1 production Compose scale oracle' env SCALE_FULL=1 SCALE_EVIDENCE_PATH="$RELEASE_ARTIFACT_DIR/scale-evidence.json" ./scripts/run-scale-oracle.sh
 else
   echo '#26 scale oracle is not present; final release remains blocked' >"$out/scale-concurrency.blocked"
   sha256sum "$out/scale-concurrency.blocked" >"$out/scale-concurrency.blocked.sha256"

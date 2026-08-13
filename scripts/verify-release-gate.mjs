@@ -173,6 +173,13 @@ if (
 for (const [name, ref] of Object.entries(toolRefs.images))
   if (!/@sha256:[0-9a-f]{64}$/.test(ref))
     throw new Error(`release tool is not digest pinned: ${name}`);
+assert.equal(
+  process.env.RELEASE_TRIVY_DB_REPOSITORY ??
+    'ghcr.io/aquasecurity/trivy-db:2@sha256:182c8405cd03caefe80982cf39bf071c9176ca3b1d1018a6ac02706c4597c72e',
+  toolRefs.images.trivyDb,
+  'Trivy DB repository must match the immutable tool reference',
+);
+assert.match(actionWorkflow, new RegExp(toolRefs.images.trivyDb.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
 
 if (mode === 'contract') {
   console.log(
@@ -346,6 +353,25 @@ if (
 if (scaleGate.status === 'pass') {
   const scaleArtifact = scaleGate.artifacts.find((artifact) => artifact.role === 'scale-evidence');
   const report = await validateScaleEvidence(scaleArtifact);
+  execFileSync(process.execPath, ['tests/validate-scale-evidence.mjs', scaleArtifact.path], {
+    cwd: root,
+    stdio: 'pipe',
+  });
+  assert.deepEqual(
+    [...new Set(['first', 'noChange', 'changed'].map((key) => report.worker.runs[key].requestId))].length,
+    3,
+    'scale request IDs must be distinct',
+  );
+  assert.deepEqual(
+    [...new Set(['first', 'noChange', 'changed'].map((key) => report.worker.runs[key].id))].length,
+    3,
+    'scale run IDs must be distinct',
+  );
+  assert.deepEqual(
+    [...new Set(['first', 'noChange', 'changed'].map((key) => report.worker.runs[key].pgBossJobId))].length,
+    3,
+    'scale PgBoss job IDs must be distinct',
+  );
   assert.equal(report.baselineComparison.baseline, 'docs/scale-oracle-baseline.json');
   assert.ok(report.thresholds.advisoryCatalogP95Ms <= scaleBaseline.advisoryHardware.catalogP95Ms);
   assert.ok(report.thresholds.advisorySearchP95Ms <= scaleBaseline.advisoryHardware.searchP95Ms);

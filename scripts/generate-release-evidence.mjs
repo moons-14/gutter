@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, writeFile, readdir } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { resolve } from 'node:path';
 
@@ -71,6 +71,18 @@ const gates = [...results.values()].map((result) => ({
 }));
 for (const artifact of requiredArtifacts)
   gates.find((gate) => gate.id === artifact.gate).artifacts.push(artifact);
+const artifactDir = resolve(root, process.env.RELEASE_ARTIFACT_DIR ?? 'release-artifacts');
+for (const name of await readdir(artifactDir).catch(() => [])) {
+  const gateId = name.endsWith('.sbom.json') ? 'sbom' : name.endsWith('.provenance.json') ? 'provenance' : null;
+  if (!gateId) continue;
+  const bytes = await readFile(resolve(artifactDir, name));
+  gates.find((gate) => gate.id === gateId).artifacts.push({
+    path: `${process.env.RELEASE_ARTIFACT_DIR ?? 'release-artifacts'}/${name}`,
+    role: gateId === 'sbom' ? 'sbom-report' : 'provenance-attestation',
+    gate: gateId,
+    sha256: sha(bytes),
+  });
+}
 const scaleEvidencePath = 'release-artifacts/scale-evidence.json';
 try {
   const scaleGate = gates.find((gate) => gate.id === 'scale-concurrency');
@@ -95,16 +107,16 @@ const evidence = {
   platforms: [
     { name: 'linux', status: 'pass', command: 'release workflow' },
     {
-      name: 'macos-docker',
+      name: 'nfs',
       status: 'unavailable',
       command: 'release workflow',
-      reason: 'not available on Linux runner',
+      reason: 'NFS capability requires a configured NFS server/export',
     },
     {
-      name: 'windows-docker',
+      name: 'smb',
       status: 'unavailable',
       command: 'release workflow',
-      reason: 'not available on Linux runner',
+      reason: 'SMB capability requires a configured SMB server/share',
     },
   ],
   references: {

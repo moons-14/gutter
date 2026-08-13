@@ -22,7 +22,7 @@ jobs:
           RELEASE_IMAGE_REFS: docker.io/library/node:24.19.0-bookworm-slim@sha256:3638d9a6fe4030bd716be989438248074489337ba3275657f93595428be4fc03 docker.io/library/postgres:18.1@sha256:1090bc3a8ccfb0b55f78a494d76f8d603434f7e4553543d6e807bc7bd6bbd17f docker.io/library/caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
           RELEASE_GITLEAKS_IMAGE: docker.io/zricethezav/gitleaks:v8.24.2@sha256:b5918eb91b8d2473cec722f066abb4352e4ffdc4ec9f4283ec143aba9ec9ebc4
           RELEASE_TRIVY_IMAGE: docker.io/aquasec/trivy:0.59.1@sha256:029e990b328d149bf0a9ffe355919041e1f86192db2df47e217f8a36dd42ceac
-          RELEASE_TRIVY_DB_REPOSITORY: ghcr.io/aquasecurity/trivy-db:2
+          RELEASE_TRIVY_DB_REPOSITORY: ghcr.io/aquasecurity/trivy-db:2@sha256:182c8405cd03caefe80982cf39bf071c9176ca3b1d1018a6ac02706c4597c72e
           RELEASE_SYFT_IMAGE: docker.io/anchore/syft:v1.19.0@sha256:bc1ae555a43011d23bb011a4f50e175fc9a5984a008a3f8f2d692b211fcacd2a
           RELEASE_COSIGN_IMAGE: gcr.io/projectsigstore/cosign:v2.4.3@sha256:c77247c92f4dfea851c70555738226498393e34e2f9ca83cb959e51c230e4ad7
           RELEASE_COSIGN_CERTIFICATE_IDENTITY_REGEXP: https://github.com/moons-14/gutter/.github/workflows/release.yml@refs/tags/v.*

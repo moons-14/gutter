@@ -57,7 +57,7 @@
     "backup-restore",
     "scale-concurrency"
   ],
-  "requiredPlatformNames": ["linux", "macos-docker", "windows-docker"],
+  "requiredPlatformNames": ["linux", "nfs", "smb"],
   "requiredImageNames": ["node", "postgres", "caddy"],
   "threatClaims": {
     "archive-path-containment": "unit",
@@ -88,7 +88,7 @@
     "containers": "trivy image pinned release refs",
     "sbom": "syft pinned release refs cyclonedx",
     "provenance": "cosign pinned release refs slsaprovenance",
-    "scale-concurrency": "GUTTER_SCALE_ORACLE=1 SCALE_FULL=1 scale oracle"
+    "scale-concurrency": "SCALE_FULL=1 production Compose scale oracle"
   },
   "deferredUntil": { "scale-concurrency": "#26 merge" }
 }
