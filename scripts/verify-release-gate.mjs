@@ -240,8 +240,8 @@ assert.ok(
 );
 assert.deepEqual(
   [...new Set(evidence.images.map((image) => imageName(image.reference)))].sort(),
-  [...manifest.requiredImageNames].sort(),
-  'evidence image set is incomplete or duplicated',
+  [...manifest.requiredApplicationImageNames].sort(),
+  'evidence application image set is incomplete or duplicated',
 );
 assert.equal(
   evidence.images.length,
@@ -401,14 +401,26 @@ for (const image of evidence.images) {
   assert.match(image.reference, /@sha256:[0-9a-f]{64}$/);
   assert.match(image.digest, /^sha256:[0-9a-f]{64}$/);
   assert.ok(
-    new Set(allImages.map(normalizeImageRef)).has(normalizeImageRef(image.reference)),
-    `evidence image is not pinned in tree: ${image.reference}`,
+    /^gutter-release-(api|worker|web):local@sha256:[0-9a-f]{64}$/.test(image.reference),
+    `evidence image is not a deterministic local application subject: ${image.reference}`,
   );
   assert.equal(
     image.reference.slice(image.reference.indexOf('@') + 1),
     image.digest,
     `image digest mismatch: ${image.reference}`,
   );
+}
+for (const image of evidence.images) {
+  const subject = image.reference.slice(0, image.reference.indexOf('@')).replaceAll(':', '_');
+  for (const role of ['sbom-report', 'provenance-attestation']) {
+    const gateId = role === 'sbom-report' ? 'sbom' : 'provenance';
+    assert.ok(
+      evidence.gates
+        .find((gate) => gate.id === gateId)
+        .artifacts.some((artifact) => artifact.role === role && artifact.path.includes(subject)),
+      `${role} missing for ${image.reference}`,
+    );
+  }
 }
 console.log(
   `release gate final evidence passed (${evidence.gates.length} gates, ${evidence.platforms.length} platforms)`,

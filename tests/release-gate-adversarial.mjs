@@ -29,7 +29,11 @@ test('tree references remain digest and commit pinned', async () => {
 
 test('workflow image refs normalize docker.io/library and contract passes', async () => {
   const workflow = await readFile('.github/workflows/release.yml', 'utf8');
-  assert.match(workflow, /RELEASE_IMAGE_REFS: docker\.io\/library\/node:/);
+  assert.doesNotMatch(workflow, /RELEASE_IMAGE_REFS:/);
+  assert.match(
+    await readFile('scripts/run-release-gates.sh', 'utf8'),
+    /docker compose build api worker web/,
+  );
   const { stdout } = await exec(process.execPath, ['scripts/verify-release-gate.mjs', 'contract']);
   assert.match(stdout, /contract structure passed/);
 });

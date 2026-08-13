@@ -59,6 +59,7 @@
   ],
   "requiredPlatformNames": ["linux", "nfs", "smb"],
   "requiredImageNames": ["node", "postgres", "caddy"],
+  "requiredApplicationImageNames": ["api", "worker", "web"],
   "threatClaims": {
     "archive-path-containment": "unit",
     "acl-pat": "operations",

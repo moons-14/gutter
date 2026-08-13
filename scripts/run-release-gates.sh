@@ -67,10 +67,18 @@ run_gate compose-smoke 'docker compose up --abort-on-container-exit --exit-code-
 run_gate operations 'node scripts/verify-operations.mjs' node scripts/verify-operations.mjs
 run_gate backup-restore './scripts/compose-restore-drill.sh' ./scripts/compose-restore-drill.sh
 run_gate nas-source './scripts/nas-source-oracle.sh' ./scripts/nas-source-oracle.sh
-: "${RELEASE_IMAGE_REFS:?set RELEASE_IMAGE_REFS to the digest-pinned images built for this tree}"
-run_gate containers 'trivy image pinned release refs' sh -ec 'for image in $RELEASE_IMAGE_REFS; do docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "$RELEASE_TRIVY_IMAGE" image --db-repository "$RELEASE_TRIVY_DB_REPOSITORY" --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed "$image"; done'
-run_gate sbom 'syft pinned release refs cyclonedx' sh -ec 'for image in $RELEASE_IMAGE_REFS; do name=$(printf "%s" "$image" | tr "/:@" "___"); docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "$RELEASE_SYFT_IMAGE" "$image" -o cyclonedx-json >"$RELEASE_ARTIFACT_DIR/$name.sbom.json"; sha256sum "$RELEASE_ARTIFACT_DIR/$name.sbom.json" >"$RELEASE_ARTIFACT_DIR/$name.sbom.json.sha256"; done'
-run_gate provenance 'cosign pinned release refs slsaprovenance' sh -ec 'for image in $RELEASE_IMAGE_REFS; do docker run --rm "$RELEASE_COSIGN_IMAGE" verify-attestation --type slsaprovenance --certificate-identity-regexp "$RELEASE_COSIGN_CERTIFICATE_IDENTITY_REGEXP" --certificate-oidc-issuer "$RELEASE_COSIGN_OIDC_ISSUER" "$image"; done'
+docker compose build api worker web
+application_image_refs=''
+for service in api worker web; do
+  image_id=$(docker compose images -q "$service" | head -n 1)
+  case "$image_id" in sha256:[0-9a-f][0-9a-f]*) ;; *) echo "missing immutable image ID for $service" >&2; exit 1 ;; esac
+  docker tag "$image_id" "gutter-release-$service:local"
+  application_image_refs="$application_image_refs gutter-release-$service:local@$image_id"
+done
+export RELEASE_IMAGE_REFS="$application_image_refs"
+run_gate containers 'trivy built application image IDs' sh -ec 'for image in $RELEASE_IMAGE_REFS; do docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "$RELEASE_TRIVY_IMAGE" image --db-repository "$RELEASE_TRIVY_DB_REPOSITORY" --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed "${image%%@*}"; done'
+run_gate sbom 'syft built application image IDs cyclonedx' sh -ec 'for image in $RELEASE_IMAGE_REFS; do name=$(printf "%s" "$image" | tr "/:@" "___"); docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "$RELEASE_SYFT_IMAGE" "${image%%@*}" -o cyclonedx-json >"$RELEASE_ARTIFACT_DIR/$name.sbom.json"; sha256sum "$RELEASE_ARTIFACT_DIR/$name.sbom.json" >"$RELEASE_ARTIFACT_DIR/$name.sbom.json.sha256"; done'
+run_gate provenance 'cosign built application image attestations' sh -ec 'for image in $RELEASE_IMAGE_REFS; do name=$(printf "%s" "$image" | tr "/:@" "___"); docker run --rm "$RELEASE_COSIGN_IMAGE" verify-attestation --type slsaprovenance --certificate-identity-regexp "$RELEASE_COSIGN_CERTIFICATE_IDENTITY_REGEXP" --certificate-oidc-issuer "$RELEASE_COSIGN_OIDC_ISSUER" "${image%%@*}" --output json >"$RELEASE_ARTIFACT_DIR/$name.provenance.json"; done'
 if [ -f docs/scale-oracle-evidence.schema.json ]; then
   run_gate scale-concurrency 'SCALE_FULL=1 production Compose scale oracle' env SCALE_FULL=1 SCALE_EVIDENCE_PATH="$RELEASE_ARTIFACT_DIR/scale-evidence.json" ./scripts/run-scale-oracle.sh
 else
