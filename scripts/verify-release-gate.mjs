@@ -170,6 +170,24 @@ if (mode === 'contract') {
   process.exit(0);
 }
 
+let scaleSchema;
+let scaleBaseline;
+try {
+  scaleSchema = JSON.parse(await read('docs/scale-oracle-evidence.schema.json'));
+  scaleBaseline = JSON.parse(await read('docs/scale-oracle-baseline.json'));
+  assert.equal(scaleSchema.schemaVersion, 'gutter.scale-oracle.v1');
+  assert.ok(scaleSchema.required.includes('schemaVersion') && scaleSchema.required.includes('status'));
+  assert.equal(scaleSchema.additionalProperties, true);
+  assert.equal(scaleBaseline.schemaVersion, 'gutter.scale-oracle.v1');
+  assert.equal(scaleBaseline.portable.defaultBooks, 1000);
+  assert.equal(scaleBaseline.portable.defaultPages, 10000);
+  assert.equal(scaleBaseline.portable.tinyCbzCount, 10000);
+  for (const value of Object.values(scaleBaseline.portable)) assert.ok(Number.isFinite(value));
+} catch (error) {
+  if (error?.code === 'ENOENT') { scaleSchema = undefined; scaleBaseline = undefined; }
+  else throw error;
+}
+
 const evidencePath = process.argv[3];
 if (!evidencePath) throw new Error('final mode requires evidence.json');
 const evidence = JSON.parse(await safeArtifact(evidencePath));
@@ -290,18 +308,7 @@ for (const platform of evidence.platforms) {
     throw new Error(`unavailable platform has no reason: ${platform.name}`);
 }
 const scaleGate = evidence.gates.find((gate) => gate.id === 'scale-concurrency');
-const hasScaleSchema = await Promise.all(
-  ['docs/scale-oracle-evidence.schema.json', 'docs/scale-oracle-baseline.json'].map(
-    async (file) => {
-      try {
-        await read(file);
-        return true;
-      } catch {
-        return false;
-      }
-    },
-  ),
-).then((values) => values.every(Boolean));
+const hasScaleSchema = Boolean(scaleSchema && scaleBaseline);
 if (manifest.deferredUntil['scale-concurrency'] && (!hasScaleSchema || scaleGate.status !== 'pass'))
   throw new Error('scale-concurrency cannot pass until #26 schema, baseline, and evidence exist');
 if (
@@ -315,7 +322,11 @@ if (
   throw new Error('scale-concurrency pass requires scale-evidence artifact');
 if (scaleGate.status === 'pass') {
   const scaleArtifact = scaleGate.artifacts.find((artifact) => artifact.role === 'scale-evidence');
-  await validateScaleEvidence(scaleArtifact);
+  const report = await validateScaleEvidence(scaleArtifact);
+  assert.equal(report.baselineComparison.baseline, 'docs/scale-oracle-baseline.json');
+  assert.ok(report.thresholds.advisoryCatalogP95Ms <= scaleBaseline.advisoryHardware.catalogP95Ms);
+  assert.ok(report.thresholds.advisorySearchP95Ms <= scaleBaseline.advisoryHardware.searchP95Ms);
+  assert.ok(report.thresholds.advisoryScanP95Ms <= scaleBaseline.advisoryHardware.scanP95Ms);
 }
 const nasGate = evidence.gates.find((gate) => gate.id === 'nas-source');
 if (nasGate.status === 'pass')
@@ -336,7 +347,7 @@ for (const image of evidence.images) {
   assert.match(image.reference, /@sha256:[0-9a-f]{64}$/);
   assert.match(image.digest, /^sha256:[0-9a-f]{64}$/);
   assert.ok(
-    allImages.includes(image.reference),
+    new Set(allImages.map(normalizeImageRef)).has(normalizeImageRef(image.reference)),
     `evidence image is not pinned in tree: ${image.reference}`,
   );
   assert.equal(
