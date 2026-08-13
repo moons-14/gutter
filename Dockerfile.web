@@ -8,7 +8,7 @@ RUN tar -xzf /tmp/caddy.tar.gz --strip-components=1 -C /src \
   && go mod edit -require=google.golang.org/grpc@v1.82.1 \
   && go mod tidy \
   && go mod verify \
-  && CGO_ENABLED=0 GO111MODULE=on go build -trimpath -mod=readonly -ldflags='-s -w' -tags='nobadger nomysql nopgx' -o /out/caddy ./cmd/caddy \
+  && CGO_ENABLED=0 GO111MODULE=on go build -trimpath -mod=readonly -ldflags='-s -w -X github.com/caddyserver/caddy/v2.CustomVersion=v2.11.4' -tags='nobadger nomysql nopgx' -o /out/caddy ./cmd/caddy \
   && go version -m /out/caddy > /out/caddy.buildinfo
 
 FROM node:24.19.0-bookworm-slim@sha256:3638d9a6fe4030bd716be989438248074489337ba3275657f93595428be4fc03 AS build
@@ -23,10 +23,10 @@ RUN addgroup -S -g 10001 gutter \
   && mkdir -p /config /data \
   && chown gutter:gutter /config /data
 COPY --chown=root:gutter Caddyfile /etc/caddy/Caddyfile
-RUN caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 COPY --from=caddy-build --chown=root:root /out/caddy /usr/bin/caddy
 COPY --from=caddy-build --chown=root:root /out/caddy.buildinfo /usr/share/caddy.buildinfo
-RUN chmod 0755 /usr/bin/caddy \
+RUN apk --no-network del curl \
+  && chmod 0755 /usr/bin/caddy \
   && setcap cap_net_bind_service=+ep /usr/bin/caddy \
   && caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 COPY --from=build --chown=root:root /src/apps/web/build /srv

@@ -80,6 +80,25 @@ test('custom Caddy build inputs are immutable and narrowly patched', async () =>
   );
   assert.match(dockerfile, /go mod verify/);
   assert.match(dockerfile, /-tags='nobadger nomysql nopgx'/);
+  assert.match(
+    dockerfile,
+    /-ldflags='-s -w -X github\.com\/caddyserver\/caddy\/v2\.CustomVersion=v2\.11\.4'/,
+  );
+  assert.match(dockerfile, /apk --no-network del curl/);
+  assert.doesNotMatch(dockerfile, /apk (?:upgrade|add|update|fix|--no-cache)/);
+  assert.ok(
+    dockerfile.indexOf('COPY --from=caddy-build --chown=root:root /out/caddy /usr/bin/caddy') <
+      dockerfile.indexOf('apk --no-network del curl'),
+  );
+  assert.ok(
+    dockerfile.indexOf('apk --no-network del curl') <
+      dockerfile.indexOf('setcap cap_net_bind_service=+ep /usr/bin/caddy'),
+  );
+  assert.ok(
+    dockerfile.indexOf('setcap cap_net_bind_service=+ep /usr/bin/caddy') <
+      dockerfile.indexOf('caddy validate --config /etc/caddy/Caddyfile'),
+  );
+  assert.equal(refs.caddySource.customVersion, 'v2.11.4');
   assert.deepEqual(refs.caddySource.moduleRequirements, {
     'golang.org/x/net': 'v0.56.0',
     'golang.org/x/text': 'v0.39.0',

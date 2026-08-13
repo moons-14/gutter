@@ -199,6 +199,7 @@ assert.match(
   'release workflow must attest with the tracked immutable action',
 );
 assert.equal(toolRefs.caddySource?.version, 'v2.11.4');
+assert.equal(toolRefs.caddySource?.customVersion, 'v2.11.4');
 assert.equal(toolRefs.caddySource?.commit, 'e2eee6a7fce366321294c9c2a79f3146891dcbdf');
 assert.equal(
   toolRefs.caddySource?.archiveSha256,
@@ -224,7 +225,24 @@ assert.match(webDockerfile, /go mod tidy/);
 assert.match(webDockerfile, /go mod verify/);
 assert.match(
   webDockerfile,
-  /-trimpath -mod=readonly -ldflags='-s -w' -tags='nobadger nomysql nopgx'/,
+  /-trimpath -mod=readonly -ldflags='-s -w -X github\.com\/caddyserver\/caddy\/v2\.CustomVersion=v2\.11\.4' -tags='nobadger nomysql nopgx'/,
+);
+assert.match(webDockerfile, /apk --no-network del curl/);
+assert.doesNotMatch(webDockerfile, /apk (?:upgrade|add|update|fix|--no-cache)/);
+assert.ok(
+  webDockerfile.indexOf('COPY --from=caddy-build --chown=root:root /out/caddy /usr/bin/caddy') <
+    webDockerfile.indexOf('apk --no-network del curl'),
+  'curl removal must follow the custom Caddy copy',
+);
+assert.ok(
+  webDockerfile.indexOf('apk --no-network del curl') <
+    webDockerfile.indexOf('setcap cap_net_bind_service=+ep /usr/bin/caddy'),
+  'setcap must follow offline curl removal',
+);
+assert.ok(
+  webDockerfile.indexOf('setcap cap_net_bind_service=+ep /usr/bin/caddy') <
+    webDockerfile.indexOf('caddy validate --config /etc/caddy/Caddyfile'),
+  'Caddy validation must follow the final binary setup',
 );
 assert.equal(
   process.env.RELEASE_TRIVY_DB_REPOSITORY ??

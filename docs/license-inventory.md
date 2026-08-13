@@ -20,6 +20,9 @@
 | Drizzle/pg/pg-boss           | 0.45.2 / 8.22.0 / 12.27.0                  | Apache-2.0 / MIT / MIT                   | drizzle.team / brianc/node-postgres / tomekbuszewski/pg-boss                                                            |
 | Pino/prom-client/sharp       | 10.3.1 / 15.1.3 / 0.35.3                   | MIT / Apache-2.0 / Apache-2.0            | pinojs / siimon/prom-client / lovell/sharp                                                                              |
 
+The final runtime removes the unused base-image `curl` dependency chain with deterministic,
+offline apk metadata; this does not add scanner exclusions or mutable package operations.
+
 ## Local PWA icon provenance
 
 `scripts/pwa-icon.svg` is the sole canonical source for the committed
