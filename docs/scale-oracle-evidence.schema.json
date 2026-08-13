@@ -42,8 +42,11 @@
     "cache": { "type": "object" },
     "worker": {
       "type": "object",
-      "required": ["queueCompletedRuns"],
-      "properties": { "queueCompletedRuns": { "type": "integer", "minimum": 1 } },
+      "required": ["queueCompletedRuns", "runs"],
+      "properties": {
+        "queueCompletedRuns": { "type": "integer", "minimum": 1 },
+        "runs": { "type": "object", "required": ["first", "noChange", "changed"], "additionalProperties": false }
+      },
       "additionalProperties": false
     },
     "sparse": {

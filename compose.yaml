@@ -166,6 +166,8 @@ services:
     command: [pnpm, integration:scale-oracles]
     environment:
       GUTTER_SCALE_ORACLE: '1'
+      SCALE_RUN_ID: '${SCALE_RUN_ID:-local}'
+      SCALE_ROOT_ID: '${SCALE_ROOT_ID:-scale-worker-root}'
       SCALE_SOURCE_ROOT: /scale-source
       DATABASE_URL: 'postgresql://gutter:${POSTGRES_PASSWORD:-}@integration-db:5432/gutter_integration'
     depends_on:
@@ -175,6 +177,7 @@ services:
     profiles: [scale]
     volumes:
       - scale-source:/scale-source
+      - scale-cache:/cache
     networks: [internal]
   scale-worker:
     build: { context: ., target: worker }

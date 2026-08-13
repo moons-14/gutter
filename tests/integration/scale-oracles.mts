@@ -51,6 +51,8 @@ const books = Number(process.env.SCALE_BOOKS ?? (full ? 100_000 : 1_000));
 const pagesPerBook = Number(process.env.SCALE_PAGES_PER_BOOK ?? (full ? 20 : 10));
 assert.ok(Number.isInteger(books) && books >= 1 && books <= 100_000);
 assert.ok(Number.isInteger(pagesPerBook) && pagesPerBook >= 1 && pagesPerBook <= 100);
+// Keep the catalog benchmark (books x pages) separate from the mounted 1k source fixture;
+// both IDs are unique per run, and the worker root is explicitly passed by Compose.
 const rootId = `scale-${createHash('sha256').update(`${seed}:${runId}:${books}:${pagesPerBook}`).digest('hex').slice(0, 24)}`;
 const scanRootId = process.env.SCALE_ROOT_ID ?? `scale-worker-root-${runId}`;
 const identity = (n: number) => createHash('sha256').update(`${seed}:${n}`).digest('hex');
@@ -76,16 +78,36 @@ const samples = (values: number[]) => {
     sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))] ?? 0;
   return { p50: percentile(0.5), p95: percentile(0.95), count: sorted.length };
 };
-async function cacheEntryCount(root: string): Promise<number> {
-  let count = 0;
+async function cacheUsage(root: string): Promise<{ entries: number; bytes: number }> {
+  let entries = 0;
+  let bytes = 0;
   for (const entry of await readdir(root, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
     const children = await readdir(join(root, entry.name), { withFileTypes: true }).catch(() => []);
-    count += children.some((child) => child.isFile() && child.name === 'body')
-      ? 1
-      : await cacheEntryCount(join(root, entry.name));
+    if (children.some((child) => child.isFile() && child.name === 'body')) {
+      entries++;
+      bytes += Number((await stat(join(root, entry.name, 'body'))).size);
+    } else {
+      const nested = await cacheUsage(join(root, entry.name));
+      entries += nested.entries;
+      bytes += nested.bytes;
+    }
   }
-  return count;
+  return { entries, bytes };
+}
+
+function validateEvidence(report: Record<string, unknown>) {
+  const required = ['schemaVersion', 'status', 'unavailablePlatformReason', 'seed', 'runId', 'dataset', 'thresholds', 'environment', 'timingsMs', 'plans', 'cache', 'worker', 'sparse', 'baselineComparison'];
+  for (const key of required) assert.ok(Object.hasOwn(report, key), `evidence requires ${key}`);
+  assert.equal(report.schemaVersion, 'gutter.scale-oracle.v1');
+  assert.ok(report.status === 'pass' || report.status === 'fail' || report.status === 'unavailable');
+  assert.equal(typeof report.seed, 'string');
+  assert.equal(typeof report.runId, 'string');
+  const worker = report.worker as { queueCompletedRuns?: unknown };
+  assert.ok(Number.isInteger(worker.queueCompletedRuns) && Number(worker.queueCompletedRuns) >= 1);
+  const sparse = report.sparse as { logicalBytes?: unknown; allocatedBlocks?: unknown };
+  assert.ok(Number.isInteger(sparse.logicalBytes) && Number(sparse.logicalBytes) > 0);
+  assert.ok(Number.isInteger(sparse.allocatedBlocks) && Number(sparse.allocatedBlocks) >= 0);
 }
 
 async function timedQuery(text: string, values: unknown[] = []) {
@@ -216,16 +238,18 @@ try {
     scopeHash: 'a'.repeat(64),
   };
   const firstRequest = await requestRootScan(scanRootId, 'startup');
-  const workerDeadline = Date.now() + 300_000;
+  const waitDeadline = () => Date.now() + 300_000;
   let workerRun: {
     id: string;
     requestId: string;
+    pgBossJobId: string | null;
     state: string;
     summary: { updated?: number; unchanged?: number } | null;
   } | null = null;
-  while (Date.now() < workerDeadline) {
+  const firstDeadline = waitDeadline();
+  while (Date.now() < firstDeadline) {
     const result = await pool.query<typeof workerRun & {}>(
-      `select r.id::text,r.scan_request_id as "requestId",r.state,r.summary
+      `select r.id::text,r.scan_request_id as "requestId",r.pg_boss_job_id as "pgBossJobId",r.state,r.summary
          from scan_runs r where r.root_id=$1 and r.scan_request_id=$2 order by r.id desc limit 1`,
       [scanRootId, firstRequest.id],
     );
@@ -246,9 +270,10 @@ try {
   const noChangeStarted = performance.now();
   const secondRequest = await requestRootScan(scanRootId, 'watcher');
   let secondRun: typeof workerRun = null;
-  while (Date.now() < workerDeadline + 30_000) {
+  const secondDeadline = waitDeadline();
+  while (Date.now() < secondDeadline) {
     const result = await pool.query<typeof workerRun & {}>(
-      `select r.id::text,r.scan_request_id as "requestId",r.state,r.summary from scan_runs r where r.root_id=$1 and r.scan_request_id=$2 order by r.id desc limit 1`,
+      `select r.id::text,r.scan_request_id as "requestId",r.pg_boss_job_id as "pgBossJobId",r.state,r.summary from scan_runs r where r.root_id=$1 and r.scan_request_id=$2 order by r.id desc limit 1`,
       [scanRootId, secondRequest.id],
     );
     secondRun = result.rows[0] ?? null;
@@ -272,9 +297,10 @@ try {
   const changedStarted = performance.now();
   const changedRequest = await requestRootScan(scanRootId, 'watcher');
   let changedRun: typeof workerRun = null;
-  while (Date.now() < workerDeadline + 60_000) {
+  const changedDeadline = waitDeadline();
+  while (Date.now() < changedDeadline) {
     const result = await pool.query<typeof workerRun & {}>(
-      `select r.id::text,r.scan_request_id as "requestId",r.state,r.summary from scan_runs r where r.root_id=$1 and r.scan_request_id=$2 order by r.id desc limit 1`,
+      `select r.id::text,r.scan_request_id as "requestId",r.pg_boss_job_id as "pgBossJobId",r.state,r.summary from scan_runs r where r.root_id=$1 and r.scan_request_id=$2 order by r.id desc limit 1`,
       [scanRootId, changedRequest.id],
     );
     changedRun = result.rows[0] ?? null;
@@ -359,6 +385,18 @@ try {
   );
   assert.equal(firstPage.items.length, 0, 'search filter excludes non-matching results');
   assert.equal(firstPage.nextCursor, null, 'empty search result has no cursor');
+  const pageOne = await listCatalogSeries({ libraryId: rootId, limit: 10 }, adminScope);
+  assert.equal(pageOne.items.length, 10);
+  assert.ok(pageOne.nextCursor, 'production list returns a cursor for the next page');
+  assert.deepEqual(
+    pageOne.items.map((item) => Number(item.displayName.replace('Scale book ', ''))),
+    [...pageOne.items]
+      .map((item) => Number(item.displayName.replace('Scale book ', '')))
+      .sort((a, b) => a - b),
+    'production list ordering is stable',
+  );
+  const pageTwo = await listCatalogSeries({ libraryId: rootId, limit: 10, cursor: pageOne.nextCursor! }, adminScope);
+  assert.ok(pageTwo.items.every((item) => !pageOne.items.some((other) => other.id === item.id)), 'cursor pages do not overlap');
 
   const listTimes: number[] = [];
   const searchTimes: number[] = [];
@@ -366,7 +404,8 @@ try {
     listTimes.push((await timedQuery(productionQuery.text, productionQuery.values)).elapsedMs);
     searchTimes.push((await timedQuery(searchQuery.text, searchQuery.values)).elapsedMs);
   }
-  cacheRoot = await mkdtemp(join(tmpdir(), 'gutter-scale-cache-'));
+  cacheRoot = join(process.env.GUTTER_DERIVED_CACHE_ROOT ?? (await mkdtemp(join(tmpdir(), 'gutter-scale-cache-'))), runId);
+  await mkdir(cacheRoot, { recursive: true });
   const cache = new DerivedCache({ root: cacheRoot, quotaBytes: 5 * 1024, maxQueue: 8 });
   const descriptor = (n: number) => ({
     source: { root: rootId, item: `scale-${n}.cbz`, observation: { seed } },
@@ -409,14 +448,16 @@ try {
   await pressureCache.getOrCreate(descriptor(1), async () => sourcePayload);
   const protectedEntry = await pressureCache.lease(descriptor(2), async () => sourcePayload);
   await pressureCache.getOrCreate(descriptor(3), async () => sourcePayload);
-  const pressureBefore = await cacheEntryCount(pressureRoot);
+  const pressureBefore = await cacheUsage(pressureRoot);
   const reclaimed = await pressureCache.gc();
   assert.equal(reclaimed, true);
   await assert.rejects(stat(pressurePath(1)), { code: 'ENOENT' });
   await stat(pressurePath(2));
   await stat(pressurePath(3));
-  const pressureAfter = await cacheEntryCount(pressureRoot);
-  assert.ok(pressureAfter < pressureBefore, 'GC reclaimed an evictable cache entry');
+  const pressureAfter = await cacheUsage(pressureRoot);
+  assert.ok(pressureAfter.entries < pressureBefore.entries, 'GC reclaimed an evictable cache entry');
+  const reclaimedBytes = pressureBefore.bytes - pressureAfter.bytes;
+  assert.ok(reclaimedBytes > 0, 'GC reclaimed measured bytes');
   protectedEntry.release();
 
   const sparseRoot = await mkdtemp(join(tmpdir(), 'gutter-scale-sparse-'));
@@ -463,15 +504,24 @@ try {
       gc: gcOk,
       pressure: {
         quotaBytes: sourcePayload.length * 2,
-        reclaimedBytes: sourcePayload.length,
+        reclaimedBytes,
         protectedLiveEntry: true,
       },
     },
-    worker: { queueCompletedRuns: [firstRequest.id, secondRequest.id, changedRequest.id].length },
+    worker: {
+      runs: { first: { requestId: firstRequest.id, ...workerRun }, noChange: { requestId: secondRequest.id, ...secondRun }, changed: { requestId: changedRequest.id, ...changedRun } },
+      queueCompletedRuns: [workerRun, secondRun, changedRun].filter((run) => run?.state === 'completed').length,
+    },
     sparse: { logicalBytes: sparse.size, allocatedBlocks: sparse.blocks },
     baselineComparison: {
       baseline: 'docs/scale-oracle-baseline.json',
-      portable: 'pass',
+      portable:
+        books === baseline.portable.defaultBooks &&
+        books * pagesPerBook === baseline.portable.defaultPages &&
+        producers === baseline.portable.coldProducerCount &&
+        Number(sparse.blocks) <= baseline.portable.sparseAllocatedBlocksMax
+          ? 'pass'
+          : 'fail',
       hardwareAdvisory: {
         catalogP95Ms:
           samples(listTimes).p95 <= thresholds.advisoryCatalogP95Ms ? 'pass' : 'advisory-fail',
@@ -484,6 +534,8 @@ try {
       },
     },
   };
+  report.status = report.baselineComparison.portable === 'pass' ? 'pass' : 'fail';
+  validateEvidence(report);
   const evidencePath =
     process.env.SCALE_EVIDENCE_PATH ?? join(tmpdir(), 'gutter-scale-evidence.json');
   await writeFile(evidencePath, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
