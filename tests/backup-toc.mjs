@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { promisify } from 'node:util';
+import { execFile } from 'node:child_process';
 import { compareManifestAndToc, parseManifest, parseToc } from '../scripts/compare-backup-manifest.mjs';
+
+const execFileAsync = promisify(execFile);
 
 // Realistic pg_restore --list output: data rows are numeric entries, while comments
 // begin with ';'. Reserved identifiers may be quoted (notably the Better Auth "user" table).
@@ -39,4 +45,19 @@ test('accepts the checked-in current manifest and rejects a TOC that omits one r
   const expected = parseManifest(manifest);
   assert.ok(expected.length > 20);
   assert.throws(() => compareManifestAndToc(manifest, fixture), /mismatch/);
+});
+
+test('executes the POSIX comparator used inside the postgres image, including quoted names', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'gutter-backup-toc-'));
+  try {
+    const manifest = join(root, 'manifest');
+    const toc = join(root, 'toc');
+    await writeFile(manifest, '"a b"\nuser\n');
+    await writeFile(toc, '1; 0 0 TABLE public user owner\n2; 0 0 TABLE public "a b" owner\n');
+    await execFileAsync('sh', ['scripts/compare-backup-manifest.sh', manifest, toc]);
+    await writeFile(toc, '1; 0 0 TABLE public user owner\n1; 0 0 TABLE public user owner\n');
+    await assert.rejects(execFileAsync('sh', ['scripts/compare-backup-manifest.sh', manifest, toc]), /duplicate/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

@@ -1,6 +1,7 @@
 import { PgBoss } from 'pg-boss';
 import { databaseUrl, secret } from '@gutter/config';
 import { migrateSchema, pool } from './index.js';
+import { readFile } from 'node:fs/promises';
 
 await migrateSchema();
 
@@ -8,6 +9,13 @@ await migrateSchema();
 // or own database objects.
 const boss = new PgBoss({ connectionString: await databaseUrl() });
 await boss.start();
+// Reapply the canonical policy after pg-boss has created its queue schema. The same SQL file is
+// applied by Drizzle and by the post-restore bootstrap script.
+const runtimeAclPolicy = await readFile(
+  new URL('../drizzle/0011_runtime_acl_bootstrap.sql', import.meta.url),
+  'utf8',
+);
+await pool.query(runtimeAclPolicy);
 await boss.stop({ graceful: true, timeout: 30_000 });
 
 const apiPassword = await secret('GUTTER_API_DB_PASSWORD');
@@ -22,11 +30,4 @@ for (const [role, password] of [
   );
   await pool.query(formatted.rows[0]!.statement);
 }
-await pool.query(`grant usage on schema pgboss to gutter_worker`);
-await pool.query(
-  `grant select, insert, update, delete on all tables in schema pgboss to gutter_worker`,
-);
-await pool.query(`grant usage, select, update on all sequences in schema pgboss to gutter_worker`);
-await pool.query(`grant execute on all functions in schema pgboss to gutter_worker`);
-await pool.query(`grant select on gutter_schema to gutter_api`);
 await pool.end();

@@ -17,6 +17,9 @@ printf '*:*:*:%s:%s\n' "$GUTTER_BACKUP_ROLE" "$(tr -d '\r\n' < "$GUTTER_BACKUP_P
 export PGPASSFILE="$pgpass"
 role_flags=$(psql "$GUTTER_DATABASE_URL" --username "$GUTTER_BACKUP_ROLE" -AtX -v ON_ERROR_STOP=1 -c "select rolcanlogin, rolsuper, rolreplication from pg_roles where rolname='${GUTTER_BACKUP_ROLE}'")
 test "$role_flags" = 't|f|f' || { echo "backup role must be login-enabled, non-superuser, and non-replication: $GUTTER_BACKUP_ROLE" >&2; exit 1; }
+for schema in public drizzle; do
+  test "$(psql "$GUTTER_DATABASE_URL" --username "$GUTTER_BACKUP_ROLE" -AtX -v ON_ERROR_STOP=1 -c "select has_schema_privilege(current_user, '$schema', 'USAGE')")" = t || { echo "backup role lacks USAGE on schema: $schema" >&2; exit 1; }
+done
 while IFS= read -r table; do
   test -n "$table"
   test "$(psql "$GUTTER_DATABASE_URL" --username "$GUTTER_BACKUP_ROLE" -AtX -c "select has_table_privilege(current_user, 'public.\"$table\"', 'SELECT')")" = t || { echo "backup role lacks SELECT on $table" >&2; exit 1; }
@@ -24,13 +27,13 @@ done < "$GUTTER_BACKUP_MANIFEST"
 umask 077
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
 archive="$GUTTER_BACKUP_DIR/gutter-$stamp.dump"
-pg_dump --format=custom --no-owner --no-privileges --username "$GUTTER_BACKUP_ROLE" --file "$archive" "$GUTTER_DATABASE_URL"
+pg_dump --format=custom --no-owner --no-privileges --schema=public --schema=drizzle --username "$GUTTER_BACKUP_ROLE" --file "$archive" "$GUTTER_DATABASE_URL"
 pg_restore --list "$archive" >/dev/null
 sha256sum "$archive" > "$archive.sha256"
 toc=$(mktemp "${TMPDIR:-/tmp}/gutter-backup-toc.XXXXXX")
 trap 'rm -f "$pgpass" "$toc"' EXIT INT TERM
 pg_restore --list "$archive" > "$toc"
-node "$(dirname "$0")/compare-backup-manifest.mjs" "$GUTTER_BACKUP_MANIFEST" "$toc"
+sh "$(dirname "$0")/compare-backup-manifest.sh" "$GUTTER_BACKUP_MANIFEST" "$toc"
 cp "$toc" "$archive.toc"
 cp "$GUTTER_BACKUP_MANIFEST" "$archive.manifest"
 printf '%s\n' "$archive"

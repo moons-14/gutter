@@ -272,7 +272,23 @@ for table in catalog_libraries catalog_series catalog_publications catalog_relea
   test "$(drill_psql "$project_b" "select count(*) from public.\"$table\"")" -eq 0
 done
 docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker node --import tsx src/scan.ts scan enqueue --root drill-root >/dev/null
-for attempt in 1 2 3 4 5 6 7 8 9 10; do state=$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker node --import tsx src/scan.ts scan status --root drill-root | tr -d '\r' | sed -n 's/.*"state":"\([^"]*\)".*/\1/p' | head -1); [ "$state" = completed ] && break; [ "$state" = failed ] && exit 1; sleep 2; done
+echo "scan enqueue submitted" >&2
+for attempt in 1 2 3 4 5 6 7 8 9 10; do
+  scan_status=$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker node --import tsx src/scan.ts scan status --root drill-root | tr -d '\r')
+  state=$(printf '%s\n' "$scan_status" | node --input-type=module -e "let input=''; for await (const chunk of process.stdin) input += chunk; const rows=JSON.parse(input); if (rows[0]?.state) process.stdout.write(String(rows[0].state));")
+  echo "scan poll attempt=$attempt state=${state:-missing}" >&2
+  [ "$state" = completed ] && break
+  if [ "$state" = failed ]; then
+    echo "scan failed; status=$scan_status" >&2
+    docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T db psql -U gutter -d gutter -x -c "select id,root_id,trigger,state,scan_run_id,error_code,created_at,started_at,finished_at from scan_requests where root_id='drill-root' order by created_at desc limit 5; select * from scan_runs where root_id='drill-root' order by id desc limit 5" >&2 || true
+    docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T db psql -U gutter -d gutter -x -c "select id,name,state,retry_count,retry_limit,output from pgboss.job where id in (select pg_boss_job_id from scan_runs where root_id='drill-root') order by created_on desc" >&2 || true
+    echo 'scan failed; worker log follows' >&2
+    docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" logs --tail=80 worker >&2 || true
+    exit 1
+  fi
+  sleep 2
+done
+echo "scan polling ended state=${state:-missing}" >&2
 [ "${state:-}" = completed ]
 validation_row=missing
 for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
@@ -318,12 +334,12 @@ done
 test "$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T db psql -U gutter -d gutter -Atc "select count(*) from user_progress where user_id='drill-user' and revision=3")" -eq 1
 test "$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T db psql -U gutter -d gutter -Atc "select count(*) from user_target_state where target_key='visible' and hidden")" -eq 0
 test "$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T db psql -U gutter -d gutter -Atc "select count(*) from user_target_state where target_key='retired' and hidden")" -eq 1
-test "$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker sh -c 'test -d /drill-source && test ! -w /drill-source && test -d /cache/derived')"
+docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker sh -c 'test -d /drill-source && test ! -w /drill-source && test -d /cache/derived'
 test "$(sha256sum "$root/source/title/001.png" | cut -d' ' -f1)" = "$source_sha"
 mapped_port=$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" config --format json | node --input-type=module -e "let input=''; for await (const chunk of process.stdin) input += chunk; const config=JSON.parse(input); const published=config.services?.web?.ports?.find((port) => port.target === 8080)?.published; if (published) process.stdout.write(String(published));" | tr -d '\r')
 test "$mapped_port" = "$web_port"
 docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T web wget -q -O /tmp/drill-web-home http://127.0.0.1:8080/
-metrics_status=$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T web sh -c 'wget -q -O /dev/null http://127.0.0.1:8080/api/metrics; echo $?' | tr -d '\r')
-test "$metrics_status" -ne 0
+metrics_status=$(docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T web sh -c 'wget -q -S -O /dev/null http://127.0.0.1:8080/api/metrics 2>&1 | awk '\''/HTTP\// { code=$2 } END { print code }'\''' | tr -d '\r')
+test "$metrics_status" = 404
 docker compose -p "$project_b" -f compose.yaml -f "$root/override.yaml" exec -T worker node --input-type=module -e "try { const ready = await fetch('http://127.0.0.1:9090/ready'); if (!ready.ok) process.exit(1); const metrics = await fetch('http://127.0.0.1:9090/metrics'); if (!metrics.ok || !(await metrics.text()).includes('gutter_worker_cache_used_bytes')) process.exit(1); } catch { process.exit(1); }"
 echo "restore drill passed: project=$project_b durable_user=1 acl_audit=1 user_state=1 source_sha256=$source_sha cache_sha_before=$cache_sha cache_sha_after=$cache_sha_regenerated source=read-only validation=$validation_state/$validation_valid"
