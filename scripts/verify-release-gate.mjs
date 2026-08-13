@@ -418,6 +418,7 @@ for (const platform of evidence.platforms) {
   if (platform.status === 'unavailable' && !platform.reason)
     throw new Error(`unavailable platform has no reason: ${platform.name}`);
 }
+const validatedSubjects = new Map();
 for (const image of evidence.images) {
   assertKeys(image, ['reference', 'digest'], 'image');
   assert.match(image.reference, /@sha256:[0-9a-f]{64}$/);
@@ -433,6 +434,10 @@ for (const image of evidence.images) {
     localSubject || registrySubject,
     `evidence image is not an immutable application subject: ${image.reference}`,
   );
+  validatedSubjects.set(image.reference, {
+    service: localSubject?.[1] ?? registrySubject?.[1],
+    registry: Boolean(registrySubject),
+  });
   assert.equal(
     image.reference.slice(image.reference.indexOf('@') + 1),
     image.digest,
@@ -440,7 +445,7 @@ for (const image of evidence.images) {
   );
 }
 for (const image of evidence.images) {
-  const subject = image.reference.match(/(?:api|worker|web)(?=@sha256)/)?.[0];
+  const subject = validatedSubjects.get(image.reference)?.service;
   assert.ok(subject, `application subject name missing: ${image.reference}`);
   for (const role of ['sbom-report', 'provenance-attestation']) {
     const gateId = role === 'sbom-report' ? 'sbom' : 'provenance';
@@ -461,7 +466,7 @@ for (const image of evidence.images) {
     const escapedDigest = image.digest.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     assert.match(serialized, new RegExp(escapedDigest));
     assert.match(serialized, new RegExp(subject));
-    if (registrySubject) {
+    if (validatedSubjects.get(image.reference)?.registry) {
       const escapedSubject = image.reference.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       assert.match(serialized, new RegExp(escapedSubject), `${role} subject mismatch`);
     }
