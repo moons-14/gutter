@@ -69,11 +69,23 @@ run_gate backup-restore './scripts/compose-restore-drill.sh' ./scripts/compose-r
 run_gate nas-source './scripts/nas-source-oracle.sh' ./scripts/nas-source-oracle.sh
 docker compose build api worker web
 application_image_refs=''
+if [ -n "${RELEASE_IMAGE_REGISTRY:-}" ]; then
+  : "${GITHUB_TOKEN:?GITHUB_TOKEN is required when publishing application subjects}"
+  printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io -u "${GITHUB_ACTOR:?GITHUB_ACTOR is required}" --password-stdin
+fi
 for service in api worker web; do
   image_id=$(docker compose images -q "$service" | head -n 1)
   case "$image_id" in sha256:[0-9a-f][0-9a-f]*) ;; *) echo "missing immutable image ID for $service" >&2; exit 1 ;; esac
   docker tag "$image_id" "gutter-release-$service:local"
-  application_image_refs="$application_image_refs gutter-release-$service:local@$image_id"
+  if [ -n "${RELEASE_IMAGE_REGISTRY:-}" ]; then
+    published="$RELEASE_IMAGE_REGISTRY/$service:${GITHUB_SHA:?GITHUB_SHA is required}"
+    docker tag "$image_id" "$published"
+    docker push "$published" >/dev/null
+    digest=$(docker image inspect --format '{{index .RepoDigests 0}}' "$published")
+    case "$digest" in *@sha256:[0-9a-f][0-9a-f]*) application_image_refs="$application_image_refs $digest" ;; *) echo "missing registry digest for $service" >&2; exit 1 ;; esac
+  else
+    application_image_refs="$application_image_refs gutter-release-$service:local@$image_id"
+  fi
 done
 export RELEASE_IMAGE_REFS="$application_image_refs"
 run_gate containers 'trivy built application image IDs' sh -ec 'for image in $RELEASE_IMAGE_REFS; do docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "$RELEASE_TRIVY_IMAGE" image --db-repository "$RELEASE_TRIVY_DB_REPOSITORY" --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed "${image%%@*}"; done'

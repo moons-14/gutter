@@ -8,6 +8,7 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
+      packages: write
       id-token: write
       attestations: write
     steps:
@@ -19,6 +20,7 @@ jobs:
       - name: Execute release gates
         env:
           RELEASE_ARTIFACT_DIR: release-artifacts
+          RELEASE_IMAGE_REGISTRY: ghcr.io/${{ github.repository }}
           RELEASE_GITLEAKS_IMAGE: docker.io/zricethezav/gitleaks:v8.24.2@sha256:b5918eb91b8d2473cec722f066abb4352e4ffdc4ec9f4283ec143aba9ec9ebc4
           RELEASE_TRIVY_IMAGE: docker.io/aquasec/trivy:0.59.1@sha256:029e990b328d149bf0a9ffe355919041e1f86192db2df47e217f8a36dd42ceac
           RELEASE_TRIVY_DB_REPOSITORY: ghcr.io/aquasecurity/trivy-db:2@sha256:182c8405cd03caefe80982cf39bf071c9176ca3b1d1018a6ac02706c4597c72e

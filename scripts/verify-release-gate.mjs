@@ -239,7 +239,7 @@ assert.ok(
   'platforms are required',
 );
 assert.deepEqual(
-  [...new Set(evidence.images.map((image) => imageName(image.reference)))].sort(),
+  [...new Set(evidence.images.map((image) => imageName(image.reference).replace(/^gutter-release-/, '')))].sort(),
   [...manifest.requiredApplicationImageNames].sort(),
   'evidence application image set is incomplete or duplicated',
 );
@@ -401,8 +401,8 @@ for (const image of evidence.images) {
   assert.match(image.reference, /@sha256:[0-9a-f]{64}$/);
   assert.match(image.digest, /^sha256:[0-9a-f]{64}$/);
   assert.ok(
-    /^gutter-release-(api|worker|web):local@sha256:[0-9a-f]{64}$/.test(image.reference),
-    `evidence image is not a deterministic local application subject: ${image.reference}`,
+    /^(?:gutter-release-(?:api|worker|web):local|ghcr\.io\/[^@/]+\/[^@/]+\/(?:api|worker|web):[^@]+)@sha256:[0-9a-f]{64}$/.test(image.reference),
+    `evidence image is not an immutable application subject: ${image.reference}`,
   );
   assert.equal(
     image.reference.slice(image.reference.indexOf('@') + 1),
