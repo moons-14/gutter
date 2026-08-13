@@ -198,10 +198,7 @@ archive=$(find "$root/artifacts" -maxdepth 1 -name 'gutter-*.dump' -type f | sor
 test -n "$archive"
 archive_name=$(basename "$archive")
 docker compose -p "$project_a" -f compose.yaml -f "$root/override.yaml" cp "db:/drill-artifacts/$archive_name" "$root/artifacts/backup.dump"
-sha256sum "$root/artifacts/backup.dump" > "$root/artifacts/backup.dump.sha256"
-# sha256sum writes the digest first and the absolute filename second.  The
-# restore container sees this bind-mounted artifact at the stable name below.
-sed -i 's#  .*#  backup.dump#' "$root/artifacts/backup.dump.sha256"
+(cd "$root/artifacts" && sha256sum backup.dump) > "$root/artifacts/backup.dump.sha256"
 chmod 0644 "$root/artifacts/backup.dump" "$root/artifacts/backup.dump.sha256"
 docker compose -p "$project_a" -f compose.yaml -f "$root/override.yaml" cp "db:/drill-artifacts/$archive_name.manifest" "$root/artifacts/backup.dump.manifest"
 docker compose -p "$project_a" -f compose.yaml -f "$root/override.yaml" down -v --remove-orphans
@@ -241,6 +238,7 @@ begin
   if has_table_privilege('gutter_worker','public."user"','SELECT') then raise exception 'worker auth read granted'; end if;
   if has_table_privilege('gutter_worker','public.user_target_state','INSERT') then raise exception 'worker user-state write granted'; end if;
   if has_table_privilege('gutter_worker','public.library_access_grants','DELETE') then raise exception 'worker ACL write granted'; end if;
+  if has_table_privilege('gutter_worker','public.global_source_suppressions','INSERT') or has_table_privilege('gutter_worker','public.global_source_suppressions','UPDATE') or has_table_privilege('gutter_worker','public.global_source_suppressions','DELETE') then raise exception 'worker suppression write granted'; end if;
   if has_table_privilege('gutter_worker','public.gutter_public_api_tokens','SELECT') then raise exception 'worker PAT read granted'; end if;
   if not has_function_privilege('gutter_worker','public.gutter_user_can_read_release(text,bigint)','EXECUTE') then raise exception 'worker reader predicate denied'; end if;
   if not has_table_privilege('gutter_api','public.user_progress','INSERT') then raise exception 'api user-state write denied'; end if;

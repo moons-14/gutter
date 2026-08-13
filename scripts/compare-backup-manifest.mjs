@@ -3,7 +3,8 @@ import { readFile } from 'node:fs/promises';
 function parseIdentifier(value) {
   const trimmed = value.trim();
   if (trimmed.startsWith('"')) {
-    if (!trimmed.endsWith('"') || trimmed.length < 2) throw new Error(`invalid quoted identifier: ${value}`);
+    if (!trimmed.endsWith('"') || trimmed.length < 2)
+      throw new Error(`invalid quoted identifier: ${value}`);
     return trimmed.slice(1, -1).replaceAll('""', '"');
   }
   if (!/^[A-Za-z_][A-Za-z0-9_$]*$/.test(trimmed)) throw new Error(`invalid identifier: ${value}`);
@@ -11,11 +12,15 @@ function parseIdentifier(value) {
 }
 
 export function parseManifest(text) {
-  const names = text.replace(/\r?\n$/, '').split(/\r?\n/).map((line) => line.trim());
+  const names = text
+    .replace(/\r?\n$/, '')
+    .split(/\r?\n/)
+    .map((line) => line.trim());
   if (names.some((name) => name === '')) throw new Error('manifest contains a blank entry');
   const parsed = names.map(parseIdentifier);
   if (parsed.length === 0) throw new Error('manifest is empty');
-  if (new Set(parsed).size !== parsed.length) throw new Error('manifest contains duplicate entries');
+  if (new Set(parsed).size !== parsed.length)
+    throw new Error('manifest contains duplicate entries');
   return parsed.sort();
 }
 
@@ -35,7 +40,9 @@ export function compareManifestAndToc(manifestText, tocText) {
   const expected = parseManifest(manifestText);
   const observed = parseToc(tocText);
   if (expected.length !== observed.length || expected.some((name, i) => name !== observed[i])) {
-    throw new Error(`table set mismatch: expected=${expected.join(',')} observed=${observed.join(',')}`);
+    throw new Error(
+      `table set mismatch: expected=${expected.join(',')} observed=${observed.join(',')}`,
+    );
   }
   return expected;
 }

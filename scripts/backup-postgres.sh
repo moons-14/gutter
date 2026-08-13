@@ -29,7 +29,8 @@ stamp=$(date -u +%Y%m%dT%H%M%SZ)
 archive="$GUTTER_BACKUP_DIR/gutter-$stamp.dump"
 pg_dump --format=custom --no-owner --no-privileges --schema=public --schema=drizzle --username "$GUTTER_BACKUP_ROLE" --file "$archive" "$GUTTER_DATABASE_URL"
 pg_restore --list "$archive" >/dev/null
-sha256sum "$archive" > "$archive.sha256"
+archive_name=$(basename "$archive")
+(cd "$GUTTER_BACKUP_DIR" && sha256sum "$archive_name") > "$archive.sha256"
 toc=$(mktemp "${TMPDIR:-/tmp}/gutter-backup-toc.XXXXXX")
 trap 'rm -f "$pgpass" "$toc"' EXIT INT TERM
 pg_restore --list "$archive" > "$toc"

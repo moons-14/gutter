@@ -93,6 +93,13 @@
       "when": 1787180400000,
       "tag": "0013_runtime_acl_bootstrap",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1787266800000,
+      "tag": "0014_qualified_progress_digest",
+      "breakpoints": true
     }
   ]
 }

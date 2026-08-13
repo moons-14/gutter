@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import test from 'node:test';
 import { Pool } from 'pg';
@@ -54,6 +54,24 @@ async function assertLookupOracle(pool: Pool): Promise<void> {
      select $1,'source-'||g||'.cbz','cbz',1,g,1,true,$2 from generate_series(1,2500) g`,
     [rootId, 'b'.repeat(64)],
   );
+  const triggerPath = 'runtime-trigger.cbz';
+  const triggerKey = `source:${createHash('sha256')
+    .update(`${rootId}\u0000${triggerPath}`)
+    .digest('base64url')}`;
+  await pool.query('begin');
+  try {
+    await pool.query('set local role gutter_worker');
+    const inserted = await pool.query<{ public_progress_key: string }>(
+      `insert into source_items(root_id,relative_path,kind,size_bytes,mtime_ms,page_count,active,manifest_sha256)
+       values($1,$2,'cbz',1,1,1,true,$3) returning public_progress_key`,
+      [rootId, triggerPath, 'c'.repeat(64)],
+    );
+    assert.equal(inserted.rows[0]?.public_progress_key, triggerKey);
+    await pool.query('rollback');
+  } catch (error) {
+    await pool.query('rollback').catch(() => undefined);
+    throw error;
+  }
   const sourceKey = `source:${Buffer.from(
     await (async () => {
       const crypto = await import('node:crypto');
@@ -95,17 +113,22 @@ async function assertLookupOracle(pool: Pool): Promise<void> {
 const migrationOptions = databaseUrl ? {} : { skip: skipReason };
 
 test(
-  'fresh migration registers 0013, creates pgcrypto and a real source_items index',
+  'fresh migration registers 0014, creates pgcrypto and a real source_items index',
   migrationOptions,
   async () => {
     await withDatabase(async (url, pool) => {
       await applyMigrations(url, migrationsFolder);
       const versions = await pool.query<{ version: string }>(
-        `select version from gutter_schema where version in ('0011_public_api_tokens','0012_public_progress_lookup','0013_runtime_acl_bootstrap') order by version`,
+        `select version from gutter_schema where version in ('0011_public_api_tokens','0012_public_progress_lookup','0013_runtime_acl_bootstrap','0014_qualified_progress_digest') order by version`,
       );
       assert.deepEqual(
         versions.rows.map((row) => row.version),
-        ['0011_public_api_tokens', '0012_public_progress_lookup', '0013_runtime_acl_bootstrap'],
+        [
+          '0011_public_api_tokens',
+          '0012_public_progress_lookup',
+          '0013_runtime_acl_bootstrap',
+          '0014_qualified_progress_digest',
+        ],
       );
       assert.equal(
         (await pool.query(`select 1 from pg_extension where extname='pgcrypto'`)).rowCount,
@@ -129,7 +152,7 @@ test(
 );
 
 test(
-  '0011 to 0013 upgrade applies through the committed Drizzle journal',
+  '0011 to 0014 upgrade applies through the committed Drizzle journal',
   migrationOptions,
   async () => {
     const temporary = await mkdtemp('/tmp/gutter-migrations-');
@@ -148,6 +171,14 @@ test(
         await applyMigrations(url, migrationsFolder);
         assert.equal(
           (await pool.query(`select 1 from pg_extension where extname='pgcrypto'`)).rowCount,
+          1,
+        );
+        assert.equal(
+          (
+            await pool.query(
+              `select count(*)::int as count from "drizzle"."__drizzle_migrations" where created_at=1787266800000`,
+            )
+          ).rows[0]?.count,
           1,
         );
         assert.equal(
