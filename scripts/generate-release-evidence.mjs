@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { readFile, writeFile, readdir } from 'node:fs/promises';
+import { lstat, readFile, writeFile, readdir } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { relative, resolve } from 'node:path';
 
@@ -18,6 +18,7 @@ const safeRepoPath = (value) => {
   return candidate;
 };
 const safeRunnerLogPath = (value, gateId) => {
+  if (value.startsWith('/')) throw new Error(`unsafe runner log path: ${value}`);
   const candidate = safeRepoPath(value);
   if (candidate !== `release-artifacts/${gateId}.log`)
     throw new Error(`unsafe runner log path: ${value}`);
@@ -30,7 +31,7 @@ const lines = (await readFile(resolve(root, resultsPath), 'utf8'))
 const results = new Map(
   lines.map((line) => {
     const [id, command, commandHash, status, log, logHash] = line.split('\t');
-    if (!/^\d+$/.test(status)) throw new Error(`malformed runner status: ${id}`);
+    if (!/^(0|[1-9][0-9]*)$/.test(status)) throw new Error(`malformed runner status: ${id}`);
     return [id, { id, command, commandHash, status: Number(status), log, logHash }];
   }),
 );
@@ -48,6 +49,12 @@ for (const result of results.values()) {
     result.log.split('/').includes('..')
   )
     throw new Error(`unsafe runner log path: ${result.id}`);
+  const logPath = resolve(root, result.log);
+  const logStat = await lstat(logPath);
+  if (!logStat.isFile() || logStat.isSymbolicLink())
+    throw new Error(`unsafe runner log path: ${result.id}`);
+  if (sha(await readFile(logPath)) !== result.logHash)
+    throw new Error(`runner log hash mismatch: ${result.id}`);
 }
 if (lines.some((line) => line.split('\t').length !== 6))
   throw new Error('malformed runner TSV field count');
