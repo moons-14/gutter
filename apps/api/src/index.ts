@@ -188,6 +188,11 @@ export type ApiDeps = Readonly<{
   changeLibraryAccess?: typeof changeLibraryAccess;
   listAdminUsers?: typeof listAdminUsers;
   getReaderPublicationSessionByIdentity?: typeof getReaderPublicationSessionByIdentity;
+  authenticatePublicApiToken?: typeof authenticatePublicApiToken;
+  libraryAccessScope?: typeof libraryAccessScope;
+  canAccessLibrary?: typeof canAccessLibrary;
+  readerRootForRequestPath?: typeof readerRootForRequestPath;
+  fetchReader?: typeof fetch;
   resolvePublicProgressTarget?: typeof resolvePublicProgressTarget;
   resolvePublicTarget?: typeof resolvePublicTarget;
   resolvePublicCollectionId?: typeof resolvePublicCollectionId;
@@ -219,6 +224,11 @@ export const productionDeps: Required<ApiDeps> = {
   changeLibraryAccess,
   listAdminUsers,
   getReaderPublicationSessionByIdentity,
+  authenticatePublicApiToken,
+  libraryAccessScope,
+  canAccessLibrary,
+  readerRootForRequestPath,
+  fetchReader: fetch,
   resolvePublicProgressTarget,
   resolvePublicTarget,
   resolvePublicCollectionId,
@@ -253,6 +263,11 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
     changeLibraryAccess,
     listAdminUsers,
     getReaderPublicationSessionByIdentity,
+    authenticatePublicApiToken,
+    libraryAccessScope,
+    canAccessLibrary,
+    readerRootForRequestPath,
+    fetchReader,
     resolvePublicProgressTarget,
     resolvePublicTarget,
     resolvePublicCollectionId,
@@ -333,7 +348,7 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
   const publicError = (
     c: any,
     error: string,
-    status: 400 | 401 | 403 | 404 | 405 | 409 | 413 | 429 | 500 | 503 | 504,
+    status: 400 | 401 | 403 | 404 | 405 | 409 | 413 | 429 | 499 | 500 | 503 | 504,
   ) =>
     c.json(
       {
@@ -369,27 +384,41 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
     publicPath: string,
     principal: PublicPrincipal,
   ): Promise<Response> => {
-    if (!response.ok && publicPath.startsWith('/api/v1/page/')) {
-      const error =
-        response.status === 404
-          ? 'not_found'
-          : response.status === 504
-            ? 'timeout'
-            : response.status === 503
-              ? 'reader_unavailable'
-              : response.status === 409
-                ? 'reader_conflict'
-                : 'reader_error';
-      return new Response(
-        JSON.stringify({
-          error,
-          requestId: c.res.headers.get('x-request-id') ?? c.req.header('x-request-id') ?? '',
-        }),
-        {
-          status: response.status,
+    if (publicPath.startsWith('/api/v1/page/')) {
+      const requestId = c.res.headers.get('x-request-id') ?? c.req.header('x-request-id') ?? '';
+      if (response.status === 304) return response;
+      if (!response.ok) {
+        const status = [404, 409, 416, 499, 500, 503, 504].includes(response.status)
+          ? response.status
+          : response.status >= 500
+            ? 503
+            : 500;
+        const error =
+          status === 404
+            ? 'not_found'
+            : status === 409
+              ? 'reader_conflict'
+              : status === 416
+                ? 'range_not_satisfiable'
+                : status === 499
+                  ? 'reader_cancelled'
+                  : status === 503
+                    ? 'reader_unavailable'
+                    : status === 504
+                      ? 'timeout'
+                      : 'reader_error';
+        const headers = new Headers({ 'content-type': 'application/json; charset=utf-8' });
+        const contentRange = response.headers.get('content-range');
+        if (contentRange) headers.set('content-range', contentRange);
+        return new Response(JSON.stringify({ error, requestId }), { status, headers });
+      }
+      if (response.headers.get('content-type')?.includes('application/json')) {
+        return new Response(JSON.stringify({ error: 'reader_error', requestId }), {
+          status: 500,
           headers: new Headers({ 'content-type': 'application/json; charset=utf-8' }),
-        },
-      );
+        });
+      }
+      return response;
     }
     if (!response.headers.get('content-type')?.includes('application/json')) return response;
     const text = await response.text();
@@ -636,7 +665,7 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
         .catch((error) => {
           if (error instanceof Error && error.message === 'public_timeout')
             return publicError(c, 'timeout', 504);
-          throw error;
+          return publicError(c, 'reader_unavailable', 503);
         });
     }
     const target = aliases[path]!;
@@ -904,11 +933,19 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
         aclRevision: scope.revision,
       }),
     );
-    const upstream = await fetch(`http://worker:3001${pathname}`, {
+    const upstream = await fetchReader(`http://worker:3001${pathname}`, {
       method: c.req.method,
       headers,
       signal: c.req.raw.signal,
-    });
+    }).catch(() => null);
+    if (!upstream)
+      return c.json(
+        {
+          error: 'reader_unavailable',
+          requestId: c.res.headers.get('x-request-id') ?? c.req.header('x-request-id') ?? '',
+        },
+        503,
+      );
     const responseHeaders = new Headers();
     for (const name of [
       'accept-ranges',
@@ -1100,7 +1137,14 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
       });
       return result.ok
         ? c.json({ progress: publicProgress(result.current) }, 200)
-        : c.json({ error: 'progress_conflict', progress: publicProgress(result.current) }, 409);
+        : c.json(
+            {
+              error: 'progress_conflict',
+              progress: publicProgress(result.current),
+              requestId: c.res.headers.get('x-request-id') ?? c.req.header('x-request-id') ?? '',
+            },
+            409,
+          );
     } catch (error) {
       return userStateError(c, error);
     }
@@ -1227,7 +1271,16 @@ export function createApp(deps: ApiDeps = productionDeps): OpenAPIHono {
     if (!body || !hasOnlyKeys(body, ['name']) || typeof body.name !== 'string')
       return c.json({ error: 'invalid_collection_name' }, 400);
     try {
-      return c.json({ collection: await createUserCollection(user.id, body.name) }, 201);
+      const collection = await createUserCollection(user.id, body.name);
+      if (!collection)
+        return c.json(
+          {
+            error: 'collection_conflict',
+            requestId: c.res.headers.get('x-request-id') ?? c.req.header('x-request-id') ?? '',
+          },
+          409,
+        );
+      return c.json({ collection }, 201);
     } catch (error) {
       return userStateError(c, error);
     }

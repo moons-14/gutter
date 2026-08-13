@@ -288,6 +288,7 @@ export const userStateProgressConflictResponse = z
   .object({
     error: z.literal('progress_conflict'),
     progress: z.record(z.string(), z.unknown()).nullable(),
+    requestId: z.string().min(1).max(128),
   })
   .strict();
 const stateErrorResponse = {
@@ -435,6 +436,19 @@ export const userStateCollectionPostRoute = createRoute({
       description: 'created collection',
       content: {
         'application/json': { schema: z.object({ collection: stateItem.nullable() }).strict() },
+      },
+    },
+    409: {
+      description: 'collection name already exists',
+      content: {
+        'application/json': {
+          schema: z
+            .object({
+              error: z.literal('collection_conflict'),
+              requestId: z.string().min(1).max(128),
+            })
+            .strict(),
+        },
       },
     },
     ...stateErrorResponse,

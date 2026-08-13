@@ -90,6 +90,16 @@ services:
         node -e "Promise.all(['http://web:8080/api/health','http://web:8080/manifest.webmanifest','http://web:8080/service-worker.js'].map(url=>fetch(url))).then(async rs=>{if(!rs.every(r=>r.ok))throw Error('smoke response');if(!(await rs[1].text()).includes('192x192'))throw Error('manifest');}).catch(e=>{console.error(e);process.exit(1)})"
     depends_on: { api: { condition: service_healthy }, web: { condition: service_healthy } }
     networks: [internal]
+  public-api-test:
+    build: { context: ., target: auth-test }
+    command: [pnpm, test:public]
+    environment:
+      PUBLIC_API_BASE_URL: http://web:8080
+      PUBLIC_API_ORIGIN: http://localhost:8080
+      DATABASE_URL: 'postgresql://gutter:${POSTGRES_PASSWORD:-}@db:5432/gutter'
+    depends_on: { web: { condition: service_healthy } }
+    profiles: [public-api]
+    networks: [internal]
   auth-test:
     build: { context: ., target: auth-test }
     command: [node, --import, tsx, --test, --test-reporter=spec, tests/auth-runtime.mts]

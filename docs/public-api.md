@@ -3,7 +3,9 @@
 The selected public surface is [`openapi-v1.yaml`](./openapi-v1.yaml), under `/api/v1`.
 Unlisted `/catalog`, `/user-state`, `/admin`, `/api/auth`, and `/api/reader` routes are internal.
 
-Errors are `{ "error": "code", "requestId": "..." }`. Cursors are opaque and list limits are
+Errors are `{ "error": "code", "requestId": "..." }`; compare-and-set progress conflicts include
+the same `requestId`, and duplicate collection names return `409 collection_conflict` rather than a
+null collection. Cursors are opaque and list limits are
 30 by default, 100 maximum. JSON bodies are limited to 16 top-level properties and 256 KiB;
 requests time out after 10 seconds. Clients should remain below 60 requests/minute per PAT.
 Only the web/reverse-proxy service is exposed; API and worker stay on the private Compose network,
@@ -12,6 +14,9 @@ show once, and support explicit revocation. No OAuth server or public admin API 
 
 V1 permits additive changes. Removing or narrowing a path, method, parameter, response, or enum
 requires a new major version after deprecation. CI blocks removal against the previous artifact.
+Reader pages preserve successful `200`/`206` binary bodies and conditional `304` responses. Reader
+`409`, `416`, `499`, `500`, `503`, and `504` failures use the JSON error envelope; `416` also
+preserves `Content-Range`.
 
 The committed compatibility oracle is `docs/openapi-v1.baseline.json`; it is never generated from
 the candidate. `docs/openapi-v1.yaml` is the reviewed source contract and
@@ -21,3 +26,7 @@ an intentional v1 contract change, review the source and served artifact togethe
 fixture suite (`pnpm exec tsx --test tests/openapi-compat.mts`), then replace the baseline with the
 last reviewed release artifact in a separately reviewed commit. Never update the baseline from the
 candidate as part of an ordinary CI run.
+
+The focused runtime oracle is `pnpm test:public`. In CI it runs hermetic contract/proxy tests; the
+Compose `public-api` profile runs the same suite against real PostgreSQL, the migrated API, and
+Caddy (`docker compose --profile public-api run --rm public-api-test`).

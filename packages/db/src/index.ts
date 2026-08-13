@@ -202,16 +202,19 @@ export async function authorizeUserStateResource(
 ): Promise<boolean> {
   const scope = await libraryAccessScope(userId);
   if (!canAccessLibrary(scope, rootId)) return false;
-  const releaseVisibility = options.includeHidden
-    ? `and not exists (select 1 from global_source_suppressions gs where gs.source_item_id=i.id)`
-    : `and gutter_user_can_read_release($1,r.id)`;
+  const releaseVisibility = (userParameter: string) =>
+    options.includeHidden
+      ? `and not exists (select 1 from global_source_suppressions gs where gs.source_item_id=i.id)`
+      : `and gutter_user_can_read_release(${userParameter},r.id)`;
   if (kind === 'progress' || kind === 'check' || kind === 'source')
     return Boolean(
       (
         await pool.query(
           `select 1 from visible_source_items i join catalog_releases r on r.source_item_id=i.id
-             where i.root_id=$1 and i.relative_path=$2 and i.active and i.quarantine_reason is null ${releaseVisibility} limit 1`,
-          [rootId, normalizeUserSourceKey(key)],
+             where i.root_id=$1 and i.relative_path=$2 and i.active and i.quarantine_reason is null ${releaseVisibility('$3')} limit 1`,
+          options.includeHidden
+            ? [rootId, normalizeUserSourceKey(key)]
+            : [rootId, normalizeUserSourceKey(key), userId],
         )
       ).rowCount,
     );
@@ -219,8 +222,8 @@ export async function authorizeUserStateResource(
     return Boolean(
       (
         await pool.query(
-          `select 1 from catalog_series s where s.library_id=$1 and s.identity_key=$2 and exists (select 1 from catalog_publications p join catalog_releases r on r.publication_id=p.id join visible_source_items i on i.id=r.source_item_id and i.quarantine_reason is null where p.series_id=s.id ${releaseVisibility})`,
-          [rootId, key],
+          `select 1 from catalog_series s where s.library_id=$1 and s.identity_key=$2 and exists (select 1 from catalog_publications p join catalog_releases r on r.publication_id=p.id join visible_source_items i on i.id=r.source_item_id and i.quarantine_reason is null where p.series_id=s.id ${releaseVisibility('$3')})`,
+          options.includeHidden ? [rootId, key] : [rootId, key, userId],
         )
       ).rowCount,
     );
@@ -229,8 +232,8 @@ export async function authorizeUserStateResource(
   return Boolean(
     (
       await pool.query(
-        `select 1 from catalog_publications p join catalog_series s on s.id=p.series_id where s.library_id=$1 and s.identity_key=$2 and p.identity_key=$3 and exists (select 1 from catalog_releases r join visible_source_items i on i.id=r.source_item_id and i.quarantine_reason is null where r.publication_id=p.id ${releaseVisibility})`,
-        [rootId, split[0], split[1]],
+        `select 1 from catalog_publications p join catalog_series s on s.id=p.series_id where s.library_id=$1 and s.identity_key=$2 and p.identity_key=$3 and exists (select 1 from catalog_releases r join visible_source_items i on i.id=r.source_item_id and i.quarantine_reason is null where r.publication_id=p.id ${releaseVisibility('$4')})`,
+        options.includeHidden ? [rootId, split[0], split[1]] : [rootId, split[0], split[1], userId],
       )
     ).rowCount,
   );
@@ -2634,10 +2637,10 @@ export async function resolvePublicProgressTarget(
   if (!/^source:[A-Za-z0-9_-]{1,128}$/.test(progressKey)) return null;
   const result = await pool.query<{ root_id: string; relative_path: string }>(
     `select i.root_id,i.relative_path
-       from visible_source_items i
+       from public_progress_source_items i
        join catalog_releases r on r.source_item_id=i.id
        where gutter_user_can_read_release($1,r.id)
-         and 'source:' || translate(rtrim(replace(encode(digest(i.root_id || chr(0) || i.relative_path, 'sha256'), 'base64'), E'\\n', ''), '='), '+/', '-_') = $2
+         and i.public_progress_key = $2
        limit 1`,
     [userId, progressKey],
   );
@@ -2761,15 +2764,13 @@ export async function getReaderReleaseDescriptor(
           )
           and exists (
             select 1 from catalog_releases next_release
-            join source_items next_item on next_item.id=next_release.source_item_id
-            join page_validation_runs next_run on next_run.source_item_id=next_item.id
-              and next_run.manifest_sha256=next_item.manifest_sha256
-              and next_run.generation=next_item.validation_generation and next_run.state='completed'
-            join source_pages next_page on next_page.source_item_id=next_item.id
-            join page_validation_results next_result on next_result.source_item_id=next_item.id
-              and next_result.locator=next_page.locator and next_result.manifest_sha256=next_item.manifest_sha256
-              and next_result.generation=next_item.validation_generation and next_result.state='valid'
-        where next_release.publication_id=next_publication.id and gutter_user_can_read_release($2,next_release.id) and next_item.active
+            join visible_source_items next_item on next_item.id=next_release.source_item_id
+            join public_reader_source_pages next_page on next_page.source_item_id=next_item.id
+              and next_page.manifest_sha256=next_item.manifest_sha256
+              and next_page.validation_generation=next_item.validation_generation
+            where next_release.publication_id=next_publication.id
+              and gutter_user_can_read_release($2,next_release.id)
+              and next_item.active
               and next_item.quarantine_reason is null
               and exists (select 1 from library_roots next_root where next_root.id=next_item.root_id and next_root.active)
           )
@@ -2778,12 +2779,9 @@ export async function getReaderReleaseDescriptor(
       ) as next_publication_id
      from catalog_releases r
      join catalog_publications p on p.id=r.publication_id
-     join source_items i on i.id=r.source_item_id
-     join page_validation_runs run on run.source_item_id=i.id and run.manifest_sha256=i.manifest_sha256
-       and run.generation=i.validation_generation and run.state='completed'
-     join source_pages sp on sp.source_item_id=i.id
-     join page_validation_results result on result.source_item_id=i.id and result.locator=sp.locator
-       and result.manifest_sha256=i.manifest_sha256 and result.generation=i.validation_generation and result.state='valid'
+     join visible_source_items i on i.id=r.source_item_id
+     join public_reader_source_pages sp on sp.source_item_id=i.id
+       and sp.manifest_sha256=i.manifest_sha256 and sp.validation_generation=i.validation_generation
      where r.id=$1 and gutter_user_can_read_release($2,r.id) and i.active and i.quarantine_reason is null
        and exists (select 1 from library_roots root where root.id=i.root_id and root.active)
      group by i.manifest_sha256,i.validation_generation,i.root_id,i.relative_path,p.series_id,p.sort_key,p.id`,
@@ -2812,12 +2810,9 @@ export async function getReaderPublicationSession(
     `select r.id::text as id
      from catalog_releases r
      join catalog_publications p on p.id=r.publication_id
-     join source_items i on i.id=r.source_item_id
-     join page_validation_runs run on run.source_item_id=i.id and run.manifest_sha256=i.manifest_sha256
-       and run.generation=i.validation_generation and run.state='completed'
-     join source_pages sp on sp.source_item_id=i.id
-     join page_validation_results result on result.source_item_id=i.id and result.locator=sp.locator
-       and result.manifest_sha256=i.manifest_sha256 and result.generation=i.validation_generation and result.state='valid'
+     join visible_source_items i on i.id=r.source_item_id
+     join public_reader_source_pages sp on sp.source_item_id=i.id
+       and sp.manifest_sha256=i.manifest_sha256 and sp.validation_generation=i.validation_generation
      left join catalog_preferred_release_overrides o on o.root_id=r.root_id
        and o.publication_identity_key=p.identity_key and o.preferred_source_item_id=i.id
      where p.id=$1 and gutter_user_can_read_release($2,r.id) and i.active and i.quarantine_reason is null
@@ -2875,18 +2870,11 @@ export async function getAuthorizedReaderPage(
     `select i.root_id,i.relative_path,i.kind,p.ordinal,p.locator,p.observed,i.size_bytes,i.mtime_ms,
             i.manifest_sha256,i.validation_generation
        from catalog_releases r
-       join source_items i on i.id=r.source_item_id
-       join source_pages p on p.source_item_id=i.id and p.ordinal=$2
-       join page_validation_results vr on vr.source_item_id=i.id and vr.locator=p.locator
-         and vr.manifest_sha256=i.manifest_sha256 and vr.generation=i.validation_generation
-         and vr.state='valid'
+       join visible_source_items i on i.id=r.source_item_id
+       join public_reader_source_pages p on p.source_item_id=i.id and p.ordinal=$2
+         and p.manifest_sha256=i.manifest_sha256 and p.validation_generation=i.validation_generation
       where r.id=$1 and gutter_user_can_read_release($3,r.id) and i.active and i.quarantine_reason is null
-        and exists (select 1 from library_roots lr where lr.id=i.root_id and lr.active)
-        and exists (
-          select 1 from page_validation_runs run
-           where run.source_item_id=i.id and run.manifest_sha256=i.manifest_sha256
-             and run.generation=i.validation_generation and run.state='completed'
-        )`,
+        and exists (select 1 from library_roots lr where lr.id=i.root_id and lr.active)`,
     [releaseId, ordinal, userId],
   );
   const row = result.rows[0];

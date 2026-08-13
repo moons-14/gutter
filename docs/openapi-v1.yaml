@@ -99,6 +99,17 @@
                   '500': { '$ref': '#/components/responses/ReaderError' },
                   '503': { '$ref': '#/components/responses/ReaderUnavailable' },
                   '504': { '$ref': '#/components/responses/ReaderTimeout' },
+                  '304':
+                    {
+                      'description': 'Conditional request not modified; no body',
+                      'headers':
+                        {
+                          'ETag': { 'schema': { 'type': 'string' } },
+                          'Last-Modified': { 'schema': { 'type': 'string' } },
+                        },
+                    },
+                  '416': { '$ref': '#/components/responses/ReaderRange' },
+                  '499': { '$ref': '#/components/responses/ReaderCancelled' },
                 },
             },
         },
@@ -302,6 +313,15 @@
                   '400': { '$ref': '#/components/responses/BadRequest' },
                   '401': { '$ref': '#/components/responses/Unauthorized' },
                   '429': { '$ref': '#/components/responses/RateLimited' },
+                  '409':
+                    {
+                      'description': 'Collection name already exists',
+                      'content':
+                        {
+                          'application/json':
+                            { 'schema': { '$ref': '#/components/schemas/CollectionConflict' } },
+                        },
+                    },
                 },
             },
         },
@@ -377,6 +397,9 @@
                           'reader_unavailable',
                           'reader_conflict',
                           'reader_error',
+                          'collection_conflict',
+                          'range_not_satisfiable',
+                          'reader_cancelled',
                           'progress_conflict',
                         ],
                     },
@@ -457,12 +480,13 @@
           'ProgressConflict':
             {
               'type': 'object',
-              'required': ['error', 'progress'],
+              'required': ['error', 'progress', 'requestId'],
               'properties':
                 {
                   'error': { 'const': 'progress_conflict' },
                   'progress':
                     { 'anyOf': [{ '$ref': '#/components/schemas/Progress' }, { 'type': 'null' }] },
+                  'requestId': { 'type': 'string', 'minLength': 1, 'maxLength': 128 },
                 },
               'additionalProperties': false,
             },
@@ -566,6 +590,17 @@
               'properties': { 'collection': { '$ref': '#/components/schemas/Collection' } },
               'additionalProperties': false,
             },
+          'CollectionConflict':
+            {
+              'type': 'object',
+              'required': ['error', 'requestId'],
+              'properties':
+                {
+                  'error': { 'const': 'collection_conflict' },
+                  'requestId': { 'type': 'string', 'minLength': 1, 'maxLength': 128 },
+                },
+              'additionalProperties': false,
+            },
           'Changed':
             {
               'type': 'object',
@@ -629,6 +664,19 @@
           'ReaderError':
             {
               'description': 'Reader delegated error',
+              'content':
+                { 'application/json': { 'schema': { '$ref': '#/components/schemas/Error' } } },
+            },
+          'ReaderRange':
+            {
+              'description': 'Requested byte range is not satisfiable',
+              'headers': { 'Content-Range': { 'schema': { 'type': 'string' } } },
+              'content':
+                { 'application/json': { 'schema': { '$ref': '#/components/schemas/Error' } } },
+            },
+          'ReaderCancelled':
+            {
+              'description': 'Reader request was cancelled',
               'content':
                 { 'application/json': { 'schema': { '$ref': '#/components/schemas/Error' } } },
             },

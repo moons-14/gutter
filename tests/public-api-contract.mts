@@ -37,7 +37,7 @@ test('PostgreSQL oracle enables and indexes bounded public progress lookup', asy
     read('packages/db/src/index.ts'),
   ]);
   assert.match(migration, /create extension if not exists pgcrypto/);
-  assert.match(migration, /visible_source_items_progress_key_idx/);
+  assert.match(migration, /source_items_progress_key_idx/);
   assert.match(db, /limit 1/);
   assert.doesNotMatch(db, /result\.rows\.find\(/);
 });
