@@ -179,7 +179,10 @@ assert.equal(
   toolRefs.images.trivyDb,
   'Trivy DB repository must match the immutable tool reference',
 );
-assert.match(actionWorkflow, new RegExp(toolRefs.images.trivyDb.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+assert.match(
+  actionWorkflow,
+  new RegExp(toolRefs.images.trivyDb.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+);
 
 if (mode === 'contract') {
   console.log(
@@ -358,7 +361,8 @@ if (scaleGate.status === 'pass') {
     stdio: 'pipe',
   });
   assert.deepEqual(
-    [...new Set(['first', 'noChange', 'changed'].map((key) => report.worker.runs[key].requestId))].length,
+    [...new Set(['first', 'noChange', 'changed'].map((key) => report.worker.runs[key].requestId))]
+      .length,
     3,
     'scale request IDs must be distinct',
   );
@@ -368,7 +372,8 @@ if (scaleGate.status === 'pass') {
     'scale run IDs must be distinct',
   );
   assert.deepEqual(
-    [...new Set(['first', 'noChange', 'changed'].map((key) => report.worker.runs[key].pgBossJobId))].length,
+    [...new Set(['first', 'noChange', 'changed'].map((key) => report.worker.runs[key].pgBossJobId))]
+      .length,
     3,
     'scale PgBoss job IDs must be distinct',
   );

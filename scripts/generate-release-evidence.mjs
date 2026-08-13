@@ -73,15 +73,21 @@ for (const artifact of requiredArtifacts)
   gates.find((gate) => gate.id === artifact.gate).artifacts.push(artifact);
 const artifactDir = resolve(root, process.env.RELEASE_ARTIFACT_DIR ?? 'release-artifacts');
 for (const name of await readdir(artifactDir).catch(() => [])) {
-  const gateId = name.endsWith('.sbom.json') ? 'sbom' : name.endsWith('.provenance.json') ? 'provenance' : null;
+  const gateId = name.endsWith('.sbom.json')
+    ? 'sbom'
+    : name.endsWith('.provenance.json')
+      ? 'provenance'
+      : null;
   if (!gateId) continue;
   const bytes = await readFile(resolve(artifactDir, name));
-  gates.find((gate) => gate.id === gateId).artifacts.push({
-    path: `${process.env.RELEASE_ARTIFACT_DIR ?? 'release-artifacts'}/${name}`,
-    role: gateId === 'sbom' ? 'sbom-report' : 'provenance-attestation',
-    gate: gateId,
-    sha256: sha(bytes),
-  });
+  gates
+    .find((gate) => gate.id === gateId)
+    .artifacts.push({
+      path: `${process.env.RELEASE_ARTIFACT_DIR ?? 'release-artifacts'}/${name}`,
+      role: gateId === 'sbom' ? 'sbom-report' : 'provenance-attestation',
+      gate: gateId,
+      sha256: sha(bytes),
+    });
 }
 const scaleEvidencePath = 'release-artifacts/scale-evidence.json';
 try {
