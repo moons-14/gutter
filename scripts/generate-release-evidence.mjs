@@ -17,6 +17,16 @@ const safeRepoPath = (value) => {
     throw new Error(`unsafe evidence path: ${value}`);
   return candidate;
 };
+const safeRunnerLogPath = (value, gateId) => {
+  // Older runner TSVs emitted the gate identifier in the log column while the
+  // log itself was stored at the canonical artifact location. Normalize that
+  // observed shape without broadening path acceptance.
+  if (value === gateId) return `release-artifacts/${gateId}.log`;
+  const candidate = safeRepoPath(value);
+  if (!candidate.startsWith('release-artifacts/') || !candidate.endsWith('.log'))
+    throw new Error(`unsafe runner log path: ${value}`);
+  return candidate;
+};
 const lines = (await readFile(resolve(root, resultsPath), 'utf8'))
   .trim()
   .split('\n')
@@ -68,7 +78,7 @@ const gates = [...results.values()].map((result) => ({
   commandHash: result.commandHash,
   artifacts: [
     {
-      path: safeRepoPath(result.log),
+      path: safeRunnerLogPath(result.log, result.id),
       role: result.id === 'nas-source' ? 'nas-evidence' : 'runner-log',
       gate: result.id,
       sha256: result.logHash,
