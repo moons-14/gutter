@@ -42,6 +42,7 @@
     collectionsLoaded = false;
     cursor = null;
     message = '';
+    error = '';
     collectionError = '';
     loading = false;
     loadingMore = false;

@@ -53,3 +53,17 @@ test('Chrome admin settings selects a user and grants then revokes library acces
   ]);
   await expect(page.getByLabel(/ユーザーID|内部ID/)).toHaveCount(0);
 });
+
+test('admin settings refuses anonymous access', async ({ page }) => {
+  await page.route('**/api/auth/get-session', (route) =>
+    route.fulfill({ contentType: 'application/json', body: JSON.stringify(null) }),
+  );
+  await page.goto('/settings/admin');
+  const adminLogin = page.getByRole('region', { name: '管理者設定' });
+  await expect(adminLogin.getByRole('heading', { name: '管理者設定' })).toBeVisible();
+  await expect(adminLogin.getByText('管理者としてログインしてください。')).toBeVisible();
+  await expect(adminLogin.getByRole('link', { name: 'ログイン', exact: true })).toHaveAttribute(
+    'href',
+    /\/login\?next=/,
+  );
+});

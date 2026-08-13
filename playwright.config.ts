@@ -4,6 +4,8 @@ const chromeExecutable = process.env.GUTTER_CHROME_EXECUTABLE;
 
 export default defineConfig({
   testDir: './tests/e2e',
+  // Four workers is the validated cap for the shared Vite web server and hydration.
+  workers: 4,
   use: { baseURL: 'http://127.0.0.1:4173', serviceWorkers: 'block' },
   webServer: {
     command: 'pnpm --filter @gutter/web exec vite dev --host 127.0.0.1 --port 4173',
@@ -15,7 +17,9 @@ export default defineConfig({
       name: 'chrome',
       use: {
         ...devices['Desktop Chrome'],
-        ...(chromeExecutable ? { launchOptions: { executablePath: chromeExecutable } } : {}),
+        ...(chromeExecutable
+          ? { launchOptions: { executablePath: chromeExecutable } }
+          : { channel: 'chrome' }),
       },
     },
   ],

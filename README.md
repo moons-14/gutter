@@ -115,8 +115,11 @@ Compose command above. Run the PostgreSQL reconciliation oracle with
 `docker compose --profile integration run --rm --build integration`; it uses a dedicated
 `gutter_integration` database and requires its test-only environment sentinel.
 
-Reader browser checks cover Chromium desktop and Pixel. WebKit iPhone coverage is best effort
-browser emulation only, not a native-mobile claim.
+End-to-end browser checks run in one Playwright Google Chrome project. Locally, Playwright uses
+the installed Chrome Stable channel; set `GUTTER_CHROME_EXECUTABLE` to an explicit Chrome binary
+when the channel is not discoverable. CI installs the Chrome channel before running the suite.
+This is a desktop browser test boundary: it does not claim Firefox, WebKit, device emulation,
+native-mobile, or PWA-install coverage.
 
 Reader URLs make identity explicit: `/reader/releases/<release-id>` opens an opaque release, while
 `/reader/publications/<publication-id>` resolves the worker-owned current reader session. Next-work

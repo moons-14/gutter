@@ -272,4 +272,24 @@ describe('settings surface', () => {
       expect(screen.getByText('B private')).toBeTruthy();
     });
   });
+
+  it('clears a previous error when the session switches', async () => {
+    session.set({ loading: false, user: { id: 'user-a', name: 'A' } });
+    let collectionCalls = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        collectionCalls++;
+        return collectionCalls === 1
+          ? new Response('{}', { status: 503 })
+          : new Response(JSON.stringify({ items: [], nextCursor: null }));
+      }),
+    );
+    render(SettingsPage);
+    await screen.findByRole('alert');
+    session.set({ loading: false, user: { id: 'user-b', name: 'B' } });
+    await waitFor(() => expect(collectionCalls).toBe(2));
+    await screen.findByText('コレクションはありません。');
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
 });
