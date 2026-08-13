@@ -8,8 +8,11 @@ out=${RELEASE_ARTIFACT_DIR:?set RELEASE_ARTIFACT_DIR to a disposable evidence di
 mkdir -p "$out"
 gitleaks_image=${RELEASE_GITLEAKS_IMAGE:?set RELEASE_GITLEAKS_IMAGE to the digest-pinned tool ref}
 trivy_image=${RELEASE_TRIVY_IMAGE:?set RELEASE_TRIVY_IMAGE to the digest-pinned tool ref}
+trivy_db_repository=${RELEASE_TRIVY_DB_REPOSITORY:-ghcr.io/aquasecurity/trivy-db:2}
 syft_image=${RELEASE_SYFT_IMAGE:?set RELEASE_SYFT_IMAGE to the digest-pinned tool ref}
 cosign_image=${RELEASE_COSIGN_IMAGE:?set RELEASE_COSIGN_IMAGE to the digest-pinned tool ref}
+cosign_identity=${RELEASE_COSIGN_CERTIFICATE_IDENTITY_REGEXP:?set RELEASE_COSIGN_CERTIFICATE_IDENTITY_REGEXP to the GitHub OIDC identity regexp}
+cosign_issuer=${RELEASE_COSIGN_OIDC_ISSUER:?set RELEASE_COSIGN_OIDC_ISSUER to the GitHub OIDC issuer}
 results="$out/runner-results.tsv"
 : >"$results"
 failed=0
@@ -45,9 +48,9 @@ run_gate operations 'node scripts/verify-operations.mjs' node scripts/verify-ope
 run_gate backup-restore './scripts/compose-restore-drill.sh' ./scripts/compose-restore-drill.sh
 run_gate nas-source './scripts/nas-source-oracle.sh' ./scripts/nas-source-oracle.sh
 : "${RELEASE_IMAGE_REFS:?set RELEASE_IMAGE_REFS to the digest-pinned images built for this tree}"
-run_gate containers 'trivy image pinned release refs' sh -ec 'for image in $RELEASE_IMAGE_REFS; do docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "$RELEASE_TRIVY_IMAGE" image --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed "$image"; done'
+run_gate containers 'trivy image pinned release refs' sh -ec 'for image in $RELEASE_IMAGE_REFS; do docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "$RELEASE_TRIVY_IMAGE" image --db-repository "$RELEASE_TRIVY_DB_REPOSITORY" --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed "$image"; done'
 run_gate sbom 'syft pinned release refs cyclonedx' sh -ec 'for image in $RELEASE_IMAGE_REFS; do name=$(printf "%s" "$image" | tr "/:@" "___"); docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "$RELEASE_SYFT_IMAGE" "$image" -o cyclonedx-json >"$RELEASE_ARTIFACT_DIR/$name.sbom.json"; sha256sum "$RELEASE_ARTIFACT_DIR/$name.sbom.json" >"$RELEASE_ARTIFACT_DIR/$name.sbom.json.sha256"; done'
-run_gate provenance 'cosign pinned release refs slsaprovenance' sh -ec 'for image in $RELEASE_IMAGE_REFS; do docker run --rm "$RELEASE_COSIGN_IMAGE" verify-attestation --type slsaprovenance "$image"; done'
+run_gate provenance 'cosign pinned release refs slsaprovenance' sh -ec 'for image in $RELEASE_IMAGE_REFS; do docker run --rm "$RELEASE_COSIGN_IMAGE" verify-attestation --type slsaprovenance --certificate-identity-regexp "$RELEASE_COSIGN_CERTIFICATE_IDENTITY_REGEXP" --certificate-oidc-issuer "$RELEASE_COSIGN_OIDC_ISSUER" "$image"; done'
 if [ -f docs/scale-oracle-evidence.schema.json ]; then
   run_gate scale-concurrency 'GUTTER_SCALE_ORACLE=1 SCALE_FULL=1 scale oracle' sh -ec 'GUTTER_SCALE_ORACLE=1 SCALE_FULL=1 SCALE_EVIDENCE_PATH="$RELEASE_ARTIFACT_DIR/scale-evidence.json" corepack pnpm --filter @gutter/db exec tsx ../../tests/integration/scale-oracles.mts'
 else
