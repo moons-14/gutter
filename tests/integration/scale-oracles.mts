@@ -49,6 +49,7 @@ if (full)
   );
 const books = Number(process.env.SCALE_BOOKS ?? (full ? 100_000 : 1_000));
 const pagesPerBook = Number(process.env.SCALE_PAGES_PER_BOOK ?? (full ? 20 : 10));
+const selectiveSearchTerm = `Scale book ${books === 100_000 ? 99_999 : 999}`;
 assert.ok(Number.isInteger(books) && books >= 1 && books <= 100_000);
 assert.ok(Number.isInteger(pagesPerBook) && pagesPerBook >= 1 && pagesPerBook <= 100);
 // Keep the catalog benchmark (books x pages) separate from the mounted 1k source fixture;
@@ -414,7 +415,7 @@ try {
     productionQuery.values,
   );
   const searchQuery = catalogSeriesListQuery(
-    { libraryId: rootId, q: 'Scale book 1', limit: 10 },
+    { libraryId: rootId, q: selectiveSearchTerm, limit: 10 },
     adminScope,
   );
   const searchPlan = await pool.query(
@@ -434,11 +435,11 @@ try {
   assert.match(listPlans, /catalog_series_list_state_library_name_idx/);
   assert.match(searchPlans, /catalog_series_list_state_search_trgm_idx/);
   const firstPage = await listCatalogSeries(
-    { libraryId: rootId, q: 'Scale book 1', limit: 10 },
+    { libraryId: rootId, q: selectiveSearchTerm, limit: 10 },
     adminScope,
   );
-  assert.ok(firstPage.items.length > 0, 'positive search returns matching results');
-  assert.ok(firstPage.items.every((item) => String(item.displayName).toLowerCase().includes('scale book 1')));
+  assert.equal(firstPage.items.length, 1, 'selective search result count');
+  assert.equal(String(firstPage.items[0].displayName), selectiveSearchTerm);
   const pageOne = await listCatalogSeries({ libraryId: rootId, limit: 10 }, adminScope);
   assert.equal(pageOne.items.length, 10);
   assert.ok(pageOne.nextCursor, 'production list returns a cursor for the next page');
