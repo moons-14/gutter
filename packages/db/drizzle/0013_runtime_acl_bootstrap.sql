@@ -51,7 +51,7 @@ grant execute on function gutter_change_library_access(text, text, text, text, t
 -- SECURITY DEFINER predicate above, which exposes only its boolean result.
 grant select, insert, update on library_roots, scan_requests, scan_runs to gutter_worker;
 grant select, insert, update on source_items, source_metadata, source_metadata_issues,
-  global_source_suppressions, validation_intents to gutter_worker;
+  validation_intents to gutter_worker;
 grant delete on validation_intents to gutter_worker;
 grant select, insert, update, delete on source_pages, source_page_annotations to gutter_worker;
 grant select, insert, update, delete on page_validation_runs, page_validation_results to gutter_worker;
@@ -63,6 +63,8 @@ to gutter_worker;
 grant select on gutter_schema, catalog_preferred_release_overrides, visible_source_items,
   reader_eligible_source_pages to gutter_worker;
 grant execute on function gutter_user_can_read_release(text, bigint) to gutter_worker;
+-- The progress-key trigger runs as the runtime worker and resolves this exact pgcrypto overload.
+grant execute on function public.digest(bytea, text) to gutter_worker;
 grant usage, select on scan_runs_id_seq, source_items_id_seq, page_validation_runs_id_seq,
   catalog_series_id_seq, catalog_publications_id_seq, catalog_releases_id_seq,
   catalog_entities_id_seq to gutter_worker;

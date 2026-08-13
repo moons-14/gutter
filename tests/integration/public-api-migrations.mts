@@ -10,6 +10,10 @@ import { migrate } from '../../packages/db/node_modules/drizzle-orm/node-postgre
 const databaseUrl = process.env.DATABASE_URL;
 const migrationsFolder = resolve(process.cwd(), 'packages/db/drizzle');
 const skipReason = 'real PostgreSQL migration oracle requires DATABASE_URL';
+const runtimeAclPolicy = await readFile(
+  new URL('../../packages/db/drizzle/0013_runtime_acl_bootstrap.sql', import.meta.url),
+  'utf8',
+);
 
 async function withDatabase<T>(fn: (url: string, pool: Pool) => Promise<T>): Promise<T> {
   assert.ok(databaseUrl);
@@ -110,6 +114,24 @@ async function assertLookupOracle(pool: Pool): Promise<void> {
   await pool.query('reset enable_seqscan');
 }
 
+async function assertCanonicalRuntimePolicy(pool: Pool): Promise<void> {
+  await pool.query(runtimeAclPolicy);
+  const privileges = await pool.query<{ insert: boolean; update: boolean; delete: boolean }>(
+    `select has_table_privilege('gutter_worker','public.global_source_suppressions','INSERT') as insert,
+            has_table_privilege('gutter_worker','public.global_source_suppressions','UPDATE') as update,
+            has_table_privilege('gutter_worker','public.global_source_suppressions','DELETE') as delete`,
+  );
+  assert.deepEqual(privileges.rows[0], { insert: false, update: false, delete: false });
+  assert.equal(
+    (
+      await pool.query(
+        `select has_function_privilege('gutter_worker','public.digest(bytea,text)','EXECUTE') as allowed`,
+      )
+    ).rows[0]?.allowed,
+    true,
+  );
+}
+
 const migrationOptions = databaseUrl ? {} : { skip: skipReason };
 
 test(
@@ -146,6 +168,7 @@ test(
           .rows[0]?.relkind,
         'v',
       );
+      await assertCanonicalRuntimePolicy(pool);
       await assertLookupOracle(pool);
     });
   },
@@ -197,6 +220,7 @@ test(
           ).rows[0]?.count,
           1,
         );
+        await assertCanonicalRuntimePolicy(pool);
         await assertLookupOracle(pool);
       });
     } finally {
