@@ -7,6 +7,7 @@ import { dirname, relative, resolve, sep } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 
 const root = resolve(process.env.RELEASE_GATE_ROOT ?? new URL('..', import.meta.url).pathname);
+const allowLocalEvidence = process.env.RELEASE_GATE_TEST_MODE === '1' && root.startsWith('/tmp/');
 const read = (file) => readFile(resolve(root, file), 'utf8');
 const safeArtifact = async (file) => {
   if (!file || file.includes('\\') || file.startsWith('/') || file.split('/').includes('..'))
@@ -153,7 +154,9 @@ const fromRefs = [...`${dockerfile}\n${webDockerfile}`.matchAll(/^FROM\s+([^\s]+
 );
 const allImages = [
   ...imageRefs.filter((image) => !image.startsWith('gutter-release-')),
-  ...fromRefs.filter((image) => image.includes(':')),
+  ...fromRefs.filter(
+    (image) => image.includes(':') && image !== toolRefs.caddySource?.builderImage,
+  ),
 ];
 for (const image of allImages)
   if (!/@sha256:[0-9a-f]{64}$/.test(image)) throw new Error(`image is not digest pinned: ${image}`);
@@ -185,6 +188,62 @@ if (
 for (const [name, ref] of Object.entries(toolRefs.images))
   if (!/@sha256:[0-9a-f]{64}$/.test(ref))
     throw new Error(`release tool is not digest pinned: ${name}`);
+assert.equal(
+  toolRefs.actions?.attest,
+  'actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6',
+  'actions/attest must be pinned to the reviewed immutable commit',
+);
+assert.match(
+  actionWorkflow,
+  /uses:\s*actions\/attest@1e69f48acb82d1966a394da916b4c1698aa569d6\b/,
+  'release workflow must attest with the tracked immutable action',
+);
+assert.equal(toolRefs.caddySource?.version, 'v2.11.4');
+assert.equal(toolRefs.caddySource?.customVersion, 'v2.11.4');
+assert.equal(toolRefs.caddySource?.commit, 'e2eee6a7fce366321294c9c2a79f3146891dcbdf');
+assert.equal(
+  toolRefs.caddySource?.archiveSha256,
+  '2c3d02078286a6282cdb4d1d8744077788d556659dac0b64d8ed5886a7e5aeb9',
+);
+assert.equal(
+  toolRefs.caddySource?.builderImage,
+  'golang:1.26.5-alpine3.23@sha256:622e56dbc11a8cfe87cafa2331e9a201877271cbff918af53d3be315f3da88cc',
+);
+assert.deepEqual(toolRefs.caddySource?.moduleRequirements, {
+  'golang.org/x/net': 'v0.56.0',
+  'golang.org/x/text': 'v0.39.0',
+  'google.golang.org/grpc': 'v1.82.1',
+});
+assert.match(webDockerfile, /FROM golang:1\.26\.5-alpine3\.23@sha256:[0-9a-f]{64} AS caddy-build/);
+assert.match(
+  webDockerfile,
+  new RegExp(
+    `ADD --checksum=sha256:${toolRefs.caddySource.archiveSha256} https://github\\.com/caddyserver/caddy/archive/refs/tags/v2\\.11\\.4\\.tar\\.gz`,
+  ),
+);
+assert.match(webDockerfile, /go mod tidy/);
+assert.match(webDockerfile, /go mod verify/);
+assert.match(
+  webDockerfile,
+  /-trimpath -mod=readonly -ldflags='-s -w -X github\.com\/caddyserver\/caddy\/v2\.CustomVersion=v2\.11\.4' -tags='nobadger nomysql nopgx'/,
+);
+assert.match(webDockerfile, /apk --no-network del curl/);
+assert.doesNotMatch(webDockerfile, /apk (?:upgrade|add|update|fix|--no-cache)/);
+assert.ok(
+  webDockerfile.indexOf('COPY --from=caddy-build --chown=root:root /out/caddy /usr/bin/caddy') <
+    webDockerfile.indexOf('apk --no-network del curl'),
+  'curl removal must follow the custom Caddy copy',
+);
+assert.ok(
+  webDockerfile.indexOf('apk --no-network del curl') <
+    webDockerfile.indexOf('setcap cap_net_bind_service=+ep /usr/bin/caddy'),
+  'setcap must follow offline curl removal',
+);
+assert.ok(
+  webDockerfile.indexOf('setcap cap_net_bind_service=+ep /usr/bin/caddy') <
+    webDockerfile.indexOf('caddy validate --config /etc/caddy/Caddyfile'),
+  'Caddy validation must follow the final binary setup',
+);
 assert.equal(
   process.env.RELEASE_TRIVY_DB_REPOSITORY ??
     'ghcr.io/aquasecurity/trivy-db:2@sha256:182c8405cd03caefe80982cf39bf071c9176ca3b1d1018a6ac02706c4597c72e',
@@ -421,14 +480,55 @@ for (const platform of evidence.platforms) {
     throw new Error(`unavailable platform has no reason: ${platform.name}`);
 }
 const validatedSubjects = new Map();
+const validateSbom = (parsed, image) => {
+  assert.equal(parsed.bomFormat, 'CycloneDX', `SBOM is not CycloneDX: ${image.reference}`);
+  const component = parsed.metadata?.component;
+  const purl = component?.purl;
+  if (typeof purl === 'string') {
+    const normalizedPurl = decodeURIComponent(purl);
+    assert.ok(
+      normalizedPurl.includes(image.reference),
+      `SBOM subject mismatch: ${image.reference}`,
+    );
+    assert.ok(normalizedPurl.includes(image.digest), `SBOM digest mismatch: ${image.reference}`);
+    return;
+  }
+  // Fixture/attestation adapters may expose the same binding explicitly; require all fields.
+  assert.equal(parsed.subject, image.reference, `SBOM subject mismatch: ${image.reference}`);
+  assert.equal(parsed.digest, image.digest, `SBOM digest mismatch: ${image.reference}`);
+  assert.ok(Array.isArray(parsed.components), `SBOM components missing: ${image.reference}`);
+};
+const validateProvenance = (parsed, image) => {
+  const records = Array.isArray(parsed) ? parsed : [parsed];
+  let matched = false;
+  for (const record of records) {
+    const payload =
+      typeof record.payload === 'string'
+        ? JSON.parse(Buffer.from(record.payload, 'base64').toString('utf8'))
+        : record;
+    const subjects = payload.subject ?? payload.predicate?.subject;
+    if (payload.predicateType?.includes('slsa') && Array.isArray(subjects)) {
+      matched ||= subjects.some(
+        (entry) => entry.name === image.reference && entry.digest?.sha256 === image.digest.slice(7),
+      );
+    } else if (payload.predicateType?.includes('slsa')) {
+      matched ||= payload.subject === image.reference && payload.digest === image.digest;
+    }
+  }
+  const expectedService = image.reference.split('/').at(-1).split('@')[0];
+  assert.ok(
+    matched,
+    `expected: /${expectedService}/ provenance subject/digest mismatch: ${image.reference}`,
+  );
+};
 for (const image of evidence.images) {
   assertKeys(image, ['reference', 'digest'], 'image');
   assert.match(image.reference, /@sha256:[0-9a-f]{64}$/);
   assert.match(image.digest, /^sha256:[0-9a-f]{64}$/);
   const appPrefix = manifest.applicationImageRegistry;
-  const localSubject = /^local\/gutter-release-(api|worker|web)@sha256:[0-9a-f]{64}$/.exec(
-    image.reference,
-  );
+  const localSubject = allowLocalEvidence
+    ? /^local\/gutter-release-(api|worker|web)@sha256:[0-9a-f]{64}$/.exec(image.reference)
+    : null;
   const registrySubject = new RegExp(
     `^${appPrefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\/(api|worker|web)@sha256:[0-9a-f]{64}$`,
   ).exec(image.reference);
@@ -464,14 +564,8 @@ for (const image of evidence.images) {
     const bytes = await safeArtifact(matching.path);
     assert.ok(bytes.length > 0 && bytes.length <= 10 * 1024 * 1024, `${role} size invalid`);
     const parsed = JSON.parse(bytes);
-    const serialized = JSON.stringify(parsed);
-    const escapedDigest = image.digest.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    assert.match(serialized, new RegExp(escapedDigest));
-    assert.match(serialized, new RegExp(subject));
-    if (validatedSubjects.get(image.reference)?.registry) {
-      const escapedSubject = image.reference.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      assert.match(serialized, new RegExp(escapedSubject), `${role} subject mismatch`);
-    }
+    if (role === 'sbom-report') validateSbom(parsed, image);
+    else validateProvenance(parsed, image);
   }
 }
 console.log(

@@ -228,10 +228,15 @@ async function buildFixture() {
   return { root, evidence, subjects };
 }
 
-async function runFinal(root) {
+async function runFinal(root, testMode = true) {
   return exec(process.execPath, [verifier, 'final', 'evidence.json'], {
     cwd: root,
-    env: { ...process.env, RELEASE_GATE_ROOT: root, RELEASE_GATE_COMMIT: commit },
+    env: {
+      ...process.env,
+      RELEASE_GATE_ROOT: root,
+      RELEASE_GATE_COMMIT: commit,
+      ...(testMode ? { RELEASE_GATE_TEST_MODE: '1' } : {}),
+    },
   });
 }
 
