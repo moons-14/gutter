@@ -10,6 +10,10 @@ const progressDigest = await readFile(
   new URL('../packages/db/drizzle/0014_qualified_progress_digest.sql', import.meta.url),
   'utf8',
 );
+const apiReaderPageAcl = await readFile(
+  new URL('../packages/db/drizzle/0015_api_reader_page_acl.sql', import.meta.url),
+  'utf8',
+);
 const bootstrap = await readFile(
   new URL('../scripts/bootstrap-runtime-acl.sh', import.meta.url),
   'utf8',
@@ -32,6 +36,8 @@ test('canonical runtime policy is reused by migration and restore bootstrap', ()
     /grant execute on function gutter_user_can_read_release\(text, bigint\) to gutter_worker;/,
   );
   assert.match(policy, /public_progress_source_items, public_reader_source_pages,/);
+  assert.match(policy, /visible_source_items, reader_eligible_source_pages,/);
+  assert.match(apiReaderPageAcl, /grant select on reader_eligible_source_pages to gutter_api/);
   assert.match(policy, /gutter_public_api_tokens, gutter_user_state_revisions/);
   assert.match(policy, /grant insert, update on gutter_public_api_tokens to gutter_api;/);
   assert.match(bootstrap, /0013_runtime_acl_bootstrap\.sql/);

@@ -37,10 +37,17 @@ if (/172\.30\.0\.0\/24|ipv4_address|(^|\n)[ \t]*subnet:/.test(compose + producti
   throw new Error('fixed_network_detected');
 if (
   !/^networks:\s*$/m.test(compose) ||
+  !/^  public:\s*$/m.test(compose) ||
   !/^  internal:\s*$/m.test(compose) ||
   !/^    internal: true\s*$/m.test(compose)
 )
   throw new Error('internal_network_definition_missing');
+if (
+  !/ports: \['127\.0\.0\.1:8080:8080'\]/.test(compose) ||
+  !/networks:\n      internal: \{\}\n      public: \{\}/.test(compose)
+)
+  throw new Error('web_public_network_missing');
+if (!caddy.includes('try_files {path} /200.html')) throw new Error('spa_fallback_mismatch');
 if (!drill.includes('internal: !override')) throw new Error('drill_network_override_missing');
 if (!drill.includes('compose_build_flags="--build"'))
   throw new Error('drill_exact_tree_build_missing');
@@ -83,7 +90,7 @@ if (!caddy.includes('handle /api/metrics') || !caddy.includes('respond 404'))
 if (!migration.includes('pg_restore --list') || !migration.includes('roll forward'))
   throw new Error('migration_oracle_missing');
 if (
-  !migrationFixture.includes('prior_tag=0013_runtime_acl_bootstrap') ||
+  !migrationFixture.includes('prior_tag=0014_qualified_progress_digest') ||
   !migrationFixture.includes('meta/_journal.json') ||
   !migrationFixture.includes('./scripts/migration-compatibility-oracle.sh')
 )

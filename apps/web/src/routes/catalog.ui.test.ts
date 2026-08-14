@@ -27,7 +27,7 @@ describe('catalog UI runtime states', () => {
     render(CatalogPage);
     await waitFor(() =>
       expect(screen.getByRole('link', { name: /リリース 42/ }).getAttribute('href')).toBe(
-        '/reader/releases/42',
+        '/reader/releases/42?resume=7',
       ),
     );
     expect(
@@ -64,7 +64,7 @@ describe('catalog UI runtime states', () => {
     ).toHaveLength(2);
   });
 
-  it('filters malformed resume release IDs before rendering links', async () => {
+  it('filters malformed resume entries while preserving zero-based page ordinals', async () => {
     session.set({ loading: false, user: { id: 'reader-1' } });
     vi.stubGlobal(
       'fetch',
@@ -76,6 +76,8 @@ describe('catalog UI runtime states', () => {
                 items: [
                   { releaseId: '-1', pageOrdinal: 1, completed: false },
                   { releaseId: '0', pageOrdinal: 1, completed: false },
+                  { releaseId: '1', pageOrdinal: 0, completed: false },
+                  { releaseId: '2', pageOrdinal: 1.5, completed: false },
                 ],
               }),
             }
@@ -83,8 +85,12 @@ describe('catalog UI runtime states', () => {
       ),
     );
     render(CatalogPage);
-    await waitFor(() => expect(screen.getByText('続きから読める作品はありません。')).toBeTruthy());
-    expect(screen.queryByRole('link', { name: /-1|0/ })).toBeNull();
+    await waitFor(() =>
+      expect(screen.getByRole('link', { name: /リリース 1/ }).getAttribute('href')).toBe(
+        '/reader/releases/1?resume=0',
+      ),
+    );
+    expect(screen.queryByRole('link', { name: /リリース 2/ })).toBeNull();
   });
 
   it('keeps loading separate from successful empty and offers retry after failure', async () => {

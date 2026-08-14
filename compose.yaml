@@ -77,13 +77,19 @@ services:
       context: .
       dockerfile: Dockerfile.web
     depends_on: { api: { condition: service_healthy } }
-    ports: ['8080:8080']
+    # Keep the default ingress host-local. Operators can put a reverse proxy or Tailscale in
+    # front without publishing the API or worker directly.
+    ports: ['127.0.0.1:8080:8080']
     healthcheck:
       test: [CMD-SHELL, 'wget -q -O /dev/null http://127.0.0.1:8080/']
       interval: 5s
       timeout: 3s
       retries: 20
-    networks: [internal]
+    # An internal-only Docker network cannot receive host-published traffic. Web straddles the
+    # public bridge and the Compose-internal application network; API and worker remain internal.
+    networks:
+      internal: {}
+      public: {}
   test:
     build: { context: ., target: api }
     profiles: [test]
@@ -143,7 +149,9 @@ services:
     networks: [internal]
   integration:
     build: { context: ., target: build }
-    command: [sh, -ec, 'pnpm unit && pnpm integration']
+    # Unit tests run in their own gate. This image intentionally has no Git binary, while a few
+    # release-evidence unit fixtures create temporary repositories.
+    command: [pnpm, integration]
     environment:
       DATABASE_URL: 'postgresql://gutter:${POSTGRES_PASSWORD:-}@integration-db:5432/gutter_integration'
       GUTTER_INTEGRATION_TEST: '1'
@@ -236,5 +244,6 @@ secrets:
   worker_db_password:
     file: ./secrets/worker_db_password
 networks:
+  public:
   internal:
     internal: true

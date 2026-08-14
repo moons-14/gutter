@@ -4,6 +4,24 @@ node_modules/
 dist/
 build/
 .svelte-kit/
+.vite/
+coverage/
+.nyc_output/
+test-results/
+playwright-report/
+*.tsbuildinfo
+.DS_Store
 .env
+.env.*
+!.env.example
 secrets/
 *.log
+
+# Local tooling and operator overrides.
+.codex/
+.gutter-admin.cookies
+compose.library.yaml
+
+# Release gates generate large, reproducible evidence locally and in CI.
+/release-artifacts/
+/release-evidence.json

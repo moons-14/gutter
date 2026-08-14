@@ -684,18 +684,26 @@ test('auth config permits insecure cookies only on localhost and binds the exact
 });
 
 test('auth proxy preserves the Better Auth path without stale fixed network identities', async () => {
-  const [caddy, compose] = await Promise.all([
+  const [caddy, compose, playwright] = await Promise.all([
     readFile(join(process.cwd(), 'Caddyfile'), 'utf8'),
     readFile(join(process.cwd(), 'compose.yaml'), 'utf8'),
+    readFile(join(process.cwd(), 'playwright.config.ts'), 'utf8'),
   ]);
   assert.match(caddy, /handle \/api\/auth\/\*/);
   assert.match(caddy, /handle \/api\/reader\/\*[\s\S]*?reverse_proxy api:3000/);
   assert.doesNotMatch(caddy, /handle \/api\/reader\/\*[\s\S]*?reverse_proxy worker:3001/);
+  assert.match(caddy, /try_files \{path\} \/200\.html/);
   assert.match(compose, /GUTTER_AUTH_TRUSTED_PROXIES_JSON: '\[\]'/);
   assert.match(compose, /DATABASE_USER: gutter_api/);
   assert.match(compose, /DATABASE_USER: gutter_worker/);
   assert.match(compose, /GUTTER_READER_CAPABILITY_SECRET_FILE/);
+  assert.match(compose, /command: \[pnpm, integration\]/);
+  assert.doesNotMatch(compose, /pnpm unit && pnpm integration/);
+  assert.match(compose, /ports: \['127\.0\.0\.1:8080:8080'\]/);
+  assert.match(compose, /networks:\n      internal: \{\}\n      public: \{\}/);
+  assert.match(compose, /^  public:\s*$/m);
   assert.doesNotMatch(compose, /ipv4_address:|subnet:/);
+  assert.match(playwright, /command: 'corepack pnpm --filter @gutter\/web exec vite dev/);
 });
 
 test('library-root parser normalizes paths and produces a stable generation', () => {

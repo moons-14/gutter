@@ -3,4 +3,14 @@ node_modules
 .turbo
 apps/web/build
 .env
+.env.*
+!.env.example
 secrets/
+.codex/
+.gutter-admin.cookies
+compose.library.yaml
+coverage/
+playwright-report/
+release-artifacts/
+release-evidence.json
+test-results/

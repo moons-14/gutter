@@ -133,7 +133,7 @@ test('release runtime gates use readable disposable secrets and isolated Compose
   assert.match(restore, /scan enqueue submitted request_id=\$scan_request_id/);
   assert.match(restore, /candidate\.id === process\.env\.DRILL_SCAN_REQUEST_ID/);
   assert.match(restore, /catalog projection is missing after the requested scan completed/);
-  assert.match(fixture, /prior_tag=0013_runtime_acl_bootstrap/);
+  assert.match(fixture, /prior_tag=0014_qualified_progress_digest/);
   assert.match(fixture, /meta\/_journal\.json/);
   assert.match(fixture, /postgres:18\.1@sha256:[0-9a-f]{64}/);
   assert.match(migration, /test ! -L "\$GUTTER_MIGRATION_DUMP"/);
