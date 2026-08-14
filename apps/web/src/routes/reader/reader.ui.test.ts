@@ -18,6 +18,7 @@ afterEach(() => {
   clearNextHandoff();
   vi.unstubAllGlobals();
   localStorage.clear();
+  window.history.replaceState({}, '', '/');
   session.set({ loading: true, user: null });
 });
 
@@ -76,6 +77,39 @@ describe('reader interaction UI', () => {
     );
     expect(screen.getByRole('combobox', { name: '表示形式' })).toBeTruthy();
     expect(screen.getByRole('button', { name: '全画面表示' })).toBeTruthy();
+  });
+
+  it('starts at a valid explicit resume ordinal and rejects invalid page requests', async () => {
+    window.history.replaceState({}, '', '/reader/releases/7?resume=3');
+    vi.stubGlobal('fetch', readerFetch());
+    render(Reader, { data: { id: '7' } });
+    await waitFor(() => expect(screen.getByText('2 / 3')).toBeTruthy());
+    expect(screen.queryByRole('button', { name: '続きから読む' })).toBeNull();
+
+    cleanup();
+    window.history.replaceState({}, '', '/reader/releases/7?resume=2');
+    localStorage.setItem(
+      'gutter.reader.progress.v1',
+      JSON.stringify({ 'opaque-key': { revision: 'sha:1', ordinal: 5 } }),
+    );
+    vi.stubGlobal('fetch', readerFetch());
+    render(Reader, { data: { id: '7' } });
+    await waitFor(() => expect(screen.getByText('1 / 3')).toBeTruthy());
+    expect(screen.queryByRole('button', { name: '続きから読む' })).toBeNull();
+
+    cleanup();
+    localStorage.clear();
+    window.history.replaceState({}, '', '/reader/releases/7?resume=0');
+    const zeroBasedRelease = { ...release, validOrdinals: [0, 2], validPageCount: 2 };
+    const zeroFetcher = vi.fn(async (input: string) =>
+      input.includes('/pages/')
+        ? { ok: true, status: 200, blob: async () => new Blob(['page']) }
+        : { ok: true, status: 200, json: async () => ({ release: zeroBasedRelease }) },
+    );
+    vi.stubGlobal('fetch', zeroFetcher);
+    render(Reader, { data: { id: '7' } });
+    await waitFor(() => expect(screen.getByText('1 / 2')).toBeTruthy());
+    expect(zeroFetcher.mock.calls.some(([url]) => String(url).includes('/pages/0'))).toBe(true);
   });
 
   it('keeps publication and release identities separate when their numeric IDs collide', async () => {

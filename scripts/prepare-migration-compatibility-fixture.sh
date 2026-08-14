@@ -8,7 +8,7 @@ root=$(mktemp -d "${TMPDIR:-/tmp}/gutter-migration-fixture.XXXXXX")
 container="gutter-migration-fixture-$$-$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"
 password="fixture-$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
 image='postgres:18.1@sha256:1090bc3a8ccfb0b55f78a494d76f8d603434f7e4553543d6e807bc7bd6bbd17f'
-prior_tag=0013_runtime_acl_bootstrap
+prior_tag=0014_qualified_progress_digest
 cleanup() {
   docker rm -f "$container" >/dev/null 2>&1 || true
   rm -rf "$root"

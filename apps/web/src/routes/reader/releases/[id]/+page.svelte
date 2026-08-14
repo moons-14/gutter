@@ -48,8 +48,25 @@
   let remoteAbortController: AbortController | null = null;
   let remotePutAbortController: AbortController | null = null;
   let descriptorGeneration = 0;
+  let explicitResumeRequested = false;
+  let explicitResumeOrdinal: number | null = null;
   const visibility = new Map<number, number>();
   const validReleaseId = (value: unknown): value is string => typeof value === 'string' && /^[1-9][0-9]*$/.test(value);
+  const requestedResumeOrdinal = (
+    descriptor: ReaderDescriptor,
+  ): { present: boolean; ordinal: number | null } => {
+    if (typeof window === 'undefined') return { present: false, ordinal: null };
+    const params = new URLSearchParams(window.location.search);
+    if (!params.has('resume')) return { present: false, ordinal: null };
+    const raw = params.get('resume') ?? '';
+    if (!/^(?:0|[1-9][0-9]*)$/.test(raw)) return { present: true, ordinal: null };
+    const ordinal = Number(raw);
+    return {
+      present: true,
+      ordinal:
+        Number.isSafeInteger(ordinal) && descriptor.validOrdinals.includes(ordinal) ? ordinal : null,
+    };
+  };
   function setResumeVisible(next: boolean) {
     if (next && !showResume && typeof document !== 'undefined') resumeFocusOrigin = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     showResume = next;
@@ -86,21 +103,24 @@
       }
       if (!validReleaseId(releaseId) || !descriptor) { errorKind = 'missing'; throw new Error('reader_missing'); }
       if (descriptor.validOrdinals.length === 0) { errorKind = 'empty'; throw new Error('reader_empty'); }
-      const saved = refresh ? null : loadProgress(descriptor);
+      const requestedResume = requestedResumeOrdinal(descriptor);
+      explicitResumeRequested = requestedResume.present;
+      explicitResumeOrdinal = requestedResume.ordinal;
+      const saved = refresh || explicitResumeRequested ? null : loadProgress(descriptor);
       state = {
         releaseId,
         descriptor,
-        ordinal: descriptor.validOrdinals[0]!,
+        ordinal: explicitResumeOrdinal ?? descriptor.validOrdinals[0]!,
         presentation: loadPresentation(),
-        persistProgress: saved === null,
+        persistProgress: saved === null || explicitResumeRequested,
       };
       incomingHandoff = publication ? takeNextHandoff(data.id) : null;
-      if (incomingHandoff && (incomingHandoff.releaseId !== releaseId || incomingHandoff.ordinal !== descriptor.validOrdinals[0])) {
+      if (incomingHandoff && (incomingHandoff.releaseId !== releaseId || incomingHandoff.ordinal !== state.ordinal)) {
         URL.revokeObjectURL(incomingHandoff.resource.url);
         incomingHandoff = null;
       }
-      pendingResume = saved;
-      setResumeVisible(saved !== null && saved !== state.ordinal);
+      pendingResume = explicitResumeRequested ? null : saved;
+      setResumeVisible(!explicitResumeRequested && saved !== null && saved !== state.ordinal);
       remoteLoaded = false;
       remoteStatus = '';
       remoteError = '';
@@ -141,12 +161,13 @@
       const revision = progress && typeof progress.revision === 'number' && Number.isInteger(progress.revision) && progress.revision >= 0 ? progress.revision : 0;
       remoteRevision = revision;
       const ordinal = progress?.pageOrdinal;
-      if (typeof ordinal === 'number' && Number.isInteger(ordinal) && descriptor.validOrdinals.includes(ordinal)) {
-        pendingResume = ordinal;
-        setResumeVisible(ordinal !== state.ordinal);
+      const remoteOrdinal = typeof ordinal === 'number' && Number.isInteger(ordinal) && descriptor.validOrdinals.includes(ordinal) ? ordinal : null;
+      if (remoteOrdinal !== null) {
+        pendingResume = explicitResumeRequested ? null : remoteOrdinal;
+        setResumeVisible(!explicitResumeRequested && remoteOrdinal !== state.ordinal);
         state = { ...state, persistProgress: true };
       }
-      lastRemoteOrdinal = state.ordinal;
+      lastRemoteOrdinal = explicitResumeRequested && remoteOrdinal !== null ? remoteOrdinal : state.ordinal;
       remoteLoaded = true;
     } catch {
       if (generation === descriptorGeneration && !controller.signal.aborted) remoteError = '読書位置を同期できませんでした。';

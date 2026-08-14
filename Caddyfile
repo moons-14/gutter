@@ -35,7 +35,8 @@
 		}
 	}
 	handle {
-		try_files {path} /index.html
+		# adapter-static emits 200.html as the SPA fallback. Preserve deep client routes on reload.
+		try_files {path} /200.html
 		file_server
 	}
 }

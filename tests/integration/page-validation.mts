@@ -284,6 +284,7 @@ try {
     )
   ).rows[0]!;
   assert.deepEqual(await getReaderReleaseDescriptor(release.id, readerUserId), {
+    rootId: release.root_id,
     progressKey: readerProgressKey(release.root_id, release.relative_path),
     revision: `${release.manifest_sha256}:3`,
     validOrdinals: [0],

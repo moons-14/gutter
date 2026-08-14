@@ -148,18 +148,26 @@ async function assertCanonicalRuntimePolicy(pool: Pool): Promise<void> {
     ).rows[0]?.allowed,
     true,
   );
+  assert.equal(
+    (
+      await pool.query(
+        `select has_table_privilege('gutter_api','public.reader_eligible_source_pages','SELECT') as allowed`,
+      )
+    ).rows[0]?.allowed,
+    true,
+  );
 }
 
 const migrationOptions = databaseUrl ? {} : { skip: skipReason };
 
 test(
-  'fresh migration registers 0014, creates pgcrypto and a real source_items index',
+  'fresh migration registers 0015, creates pgcrypto and a real source_items index',
   migrationOptions,
   async () => {
     await withDatabase(async (url, pool) => {
       await applyMigrations(url, migrationsFolder);
       const versions = await pool.query<{ version: string }>(
-        `select version from gutter_schema where version in ('0011_public_api_tokens','0012_public_progress_lookup','0013_runtime_acl_bootstrap','0014_qualified_progress_digest') order by version`,
+        `select version from gutter_schema where version in ('0011_public_api_tokens','0012_public_progress_lookup','0013_runtime_acl_bootstrap','0014_qualified_progress_digest','0015_api_reader_page_acl') order by version`,
       );
       assert.deepEqual(
         versions.rows.map((row) => row.version),
@@ -168,6 +176,7 @@ test(
           '0012_public_progress_lookup',
           '0013_runtime_acl_bootstrap',
           '0014_qualified_progress_digest',
+          '0015_api_reader_page_acl',
         ],
       );
       assert.equal(
@@ -193,7 +202,7 @@ test(
 );
 
 test(
-  '0011 to 0014 upgrade applies through the committed Drizzle journal',
+  '0011 to 0015 upgrade applies through the committed Drizzle journal',
   migrationOptions,
   async () => {
     const temporary = await mkdtemp('/tmp/gutter-migrations-');
@@ -218,6 +227,14 @@ test(
           (
             await pool.query(
               `select count(*)::int as count from "drizzle"."__drizzle_migrations" where created_at=1787266800000`,
+            )
+          ).rows[0]?.count,
+          1,
+        );
+        assert.equal(
+          (
+            await pool.query(
+              `select count(*)::int as count from "drizzle"."__drizzle_migrations" where created_at=1787353200000`,
             )
           ).rows[0]?.count,
           1,

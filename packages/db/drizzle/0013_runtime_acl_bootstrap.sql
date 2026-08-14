@@ -25,7 +25,7 @@ grant select on
   source_items, global_source_suppressions, page_validation_runs, page_validation_results,
   catalog_libraries, catalog_series, catalog_publications, catalog_releases, catalog_entities,
   catalog_credits, catalog_preferred_release_overrides, catalog_series_list_state,
-  visible_source_items,
+  visible_source_items, reader_eligible_source_pages,
   public_progress_source_items, public_reader_source_pages,
   "user", "session", account, verification, "twoFactor", passkey,
   gutter_auth_bootstrap, library_access_grants, gutter_acl_revisions,

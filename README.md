@@ -15,9 +15,11 @@ export POSTGRES_PASSWORD
 docker compose up --build
 ```
 
-Only the web service is published (`http://localhost:8080`). The web reverse-proxies `/api` to
-the internal API. Run `docker compose --profile test run --rm test` for the live-stack smoke
-after `docker compose up -d db migrate api web`.
+Only the web service is published, and the default binding is host-loopback only
+(`http://localhost:8080`). The web reverse-proxies `/api` to the internal API. Use an
+operator-managed reverse proxy or Tailscale for remote access rather than publishing API or worker.
+Run `docker compose --profile test run --rm test` for the live-stack smoke after
+`docker compose up -d db migrate api web`.
 
 For production, Docker Compose v2.24.4 or newer is required for the reset tags in the overlay.
 Create non-committed `secrets/postgres_password`, `secrets/database_url`,
@@ -123,4 +125,6 @@ native-mobile, or PWA-install coverage.
 
 Reader URLs make identity explicit: `/reader/releases/<release-id>` opens an opaque release, while
 `/reader/publications/<publication-id>` resolves the worker-owned current reader session. Next-work
-links use the publication form; a numeric publication ID is never treated as a release ID.
+links use the publication form; a numeric publication ID is never treated as a release ID. A
+validated `?resume=<page-ordinal>` query opens that readable page directly; malformed, out-of-range,
+or unavailable ordinals fall back to the first readable page.

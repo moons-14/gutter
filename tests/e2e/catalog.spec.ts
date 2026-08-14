@@ -87,6 +87,6 @@ test('signed-in catalog exposes resume entries that open the release reader', as
   await expect.poll(() => sessionRequests).toBeGreaterThan(0);
   await expect(page.getByRole('link', { name: /リリース 42/ })).toHaveAttribute(
     'href',
-    '/reader/releases/42',
+    '/reader/releases/42?resume=3',
   );
 });

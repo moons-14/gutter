@@ -7,6 +7,11 @@
   let items: Series[] = []; let nextCursor: string | null = null; let loading = true; let state: CatalogRequestState = 'success'; let query = ''; let libraryId = ''; let kind = ''; let creator = ''; let group = ''; let publisher = ''; let sort = 'name'; let direction = 'asc';
   let resumeItems: ResumeItem[] = []; let resumeLoading = false; let resumeState: 'idle' | 'success' | 'empty' | 'error' = 'idle'; let resumeUserId: string | null = null;
   let resumeController: AbortController | null = null; let resumeGeneration = 0;
+  const validResumeItem = (item: ResumeItem) =>
+    typeof item.releaseId === 'string' &&
+    /^[1-9][0-9]*$/.test(item.releaseId) &&
+    Number.isSafeInteger(item.pageOrdinal) &&
+    item.pageOrdinal >= 0;
   function queryParams(cursor?: string | null) {
     const params = new URLSearchParams({ limit: '30', sort, direction });
     if (query) params.set('q', query); if (libraryId) params.set('libraryId', libraryId); if (kind) params.set('kind', kind); if (creator) params.set('creator', creator); if (group) params.set('group', group); if (publisher) params.set('publisher', publisher);
@@ -35,7 +40,7 @@
       if (!response.ok) throw new Error('resume_unavailable');
       const body = (await response.json()) as { items?: ResumeItem[] };
       if (generation !== resumeGeneration || resumeUserId !== userId) return;
-      resumeItems = Array.isArray(body.items) ? body.items.filter((item) => typeof item.releaseId === 'string' && /^[1-9][0-9]*$/.test(item.releaseId)) : [];
+      resumeItems = Array.isArray(body.items) ? body.items.filter(validResumeItem) : [];
       resumeState = resumeItems.length ? 'success' : 'empty';
     } catch { if (generation === resumeGeneration && !controller.signal.aborted) resumeState = 'error'; }
     finally { if (generation === resumeGeneration) resumeLoading = false; }
@@ -62,7 +67,7 @@
       {#if resumeLoading}<p aria-live="polite">読書履歴を読み込み中…</p>
       {:else if resumeState === 'error'}<p role="alert">読書履歴を取得できませんでした。</p><button onclick={() => { if ($session.user?.id) void loadResume($session.user.id); }}>再試行</button>
       {:else if resumeState === 'empty'}<p>続きから読める作品はありません。</p>
-      {:else}<ul class="resume-list">{#each resumeItems as item}<li><a href={`/reader/releases/${item.releaseId}`}><strong>リリース {item.releaseId}</strong><span>{item.completed ? '読了' : `ページ ${item.pageOrdinal} から再開`}</span><b>読む →</b></a></li>{/each}</ul>{/if}
+      {:else}<ul class="resume-list">{#each resumeItems as item}<li><a href={`/reader/releases/${item.releaseId}?resume=${item.pageOrdinal}`}><strong>リリース {item.releaseId}</strong><span>{item.completed ? '読了' : `ページ ${item.pageOrdinal} から再開`}</span><b>読む →</b></a></li>{/each}</ul>{/if}
     </section>
   {:else}
     <section class="resume" aria-labelledby="resume-title"><h2 id="resume-title">続きから読む</h2><p>ログインすると、読書位置を同期して続きから読めます。</p><a class="login" href={loginHref(currentDestination())}>読書位置を同期する</a></section>

@@ -361,6 +361,10 @@ try {
 
   await pool.query('begin');
   await pool.query('set local role gutter_api');
+  const eligiblePages = await pool.query<{ count: number }>(
+    'select count(*)::int as count from reader_eligible_source_pages',
+  );
+  assert.equal(typeof eligiblePages.rows[0]?.count, 'number');
   await assert.rejects(
     pool.query('update library_roots set active=false where id=$1', [rootId]),
     /permission denied/,
